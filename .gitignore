@@ -1,0 +1,24 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+
+# Local app state and generated packages
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.app/
+
+# Local Codex/operator instructions are not part of the public project.
+AGENTS.md
+
+# Secrets and local environment
+.env
+.env.*
+*.pem
+*.p12
+*.mobileprovision
+secrets/

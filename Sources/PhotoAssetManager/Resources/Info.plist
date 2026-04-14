@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleExecutable</key>
+    <string>PhotoAssetManager</string>
+    <key>CFBundleIdentifier</key>
+    <string>local.photo-asset-manager</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Photo Asset Manager</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>需要扫描桌面中的照片文件并建立本地资产索引。</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>需要扫描文档目录中的照片文件并建立本地资产索引。</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>需要扫描下载目录中的照片文件并建立本地资产索引。</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>需要访问 NAS 或网络卷中的照片文件，用作权威原片库。</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>需要访问 SD 卡、移动硬盘或外接盘中的照片文件，用于导入和归档。</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>需要在用户选择时读取照片库位置，用于建立照片资产索引。</string>
+</dict>
+</plist>
