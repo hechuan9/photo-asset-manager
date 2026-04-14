@@ -16,19 +16,16 @@ struct ContentView: View {
         }
         .toolbar {
             ToolbarItemGroup {
-                Button("扫描本地") {
-                    library.chooseAndScan(storageKind: .local)
+                Button("添加文件夹", systemImage: "plus") {
+                    library.chooseAndAddFolders(scanImmediately: false)
                 }
-                Button("扫描 NAS") {
-                    library.chooseAndScan(storageKind: .nas)
+                Button("添加并扫描", systemImage: "plus.viewfinder") {
+                    library.chooseAndAddFolders(scanImmediately: true)
                 }
                 Button("扫描所有来源") {
                     library.scanTrackedSources()
                 }
                 .disabled(library.isScanning)
-                Button("设置 NAS") {
-                    library.chooseNASRoot()
-                }
             }
             ToolbarItemGroup {
                 Button("归档到 NAS") {
@@ -74,17 +71,7 @@ struct SidebarView: View {
                 }
             }
 
-            Section("文件夹") {
-                HStack {
-                    Button("添加本地") {
-                        library.chooseAndAddFolders(storageKind: .local, scanImmediately: false)
-                    }
-                    .disabled(library.isScanning)
-                    Button("添加 NAS") {
-                        library.chooseAndAddFolders(storageKind: .nas, scanImmediately: false)
-                    }
-                    .disabled(library.isScanning)
-                }
+            Section {
                 if library.sourceDirectories.isEmpty {
                     Text("还没有文件夹")
                         .foregroundStyle(.secondary)
@@ -92,6 +79,19 @@ struct SidebarView: View {
                     ForEach(library.sourceDirectories) { source in
                         SourceDirectoryRow(source: source)
                     }
+                }
+            } header: {
+                HStack {
+                    Text("文件夹")
+                    Spacer()
+                    Button {
+                        library.chooseAndAddFolders(scanImmediately: false)
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(library.isScanning)
+                    .help("添加文件夹")
                 }
             }
 
@@ -166,8 +166,6 @@ struct SourceDirectoryRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(source.storageKind.label)
-                    .fontWeight(.medium)
                 Text(source.isTracked ? "追踪中" : "已停止")
                     .foregroundStyle(source.isTracked ? Color.secondary : Color.orange)
                 Spacer()

@@ -39,27 +39,28 @@ final class LibraryStore: ObservableObject {
     }
 
     func chooseAndScan(storageKind: StorageKind) {
-        chooseAndAddFolders(storageKind: storageKind, scanImmediately: true)
+        chooseAndAddFolders(scanImmediately: true)
     }
 
-    func chooseAndAddFolders(storageKind: StorageKind, scanImmediately: Bool) {
+    func chooseAndAddFolders(scanImmediately: Bool) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = true
-        panel.message = storageKind == .nas ? "添加一个或多个 NAS 照片文件夹" : "添加一个或多个本地照片文件夹"
+        panel.message = "添加一个或多个照片文件夹"
         if panel.runModal() == .OK {
-            addSourceDirectories(panel.urls, storageKind: storageKind, scanImmediately: scanImmediately)
+            addSourceDirectories(panel.urls, scanImmediately: scanImmediately)
         }
     }
 
-    func addSourceDirectories(_ urls: [URL], storageKind: StorageKind, scanImmediately: Bool) {
+    func addSourceDirectories(_ urls: [URL], scanImmediately: Bool) {
         guard !urls.isEmpty else { return }
         do {
             for url in urls {
+                let storageKind = storageKind(for: url)
                 try database.upsertSourceDirectory(path: url.path, storageKind: storageKind)
                 if storageKind == .nas, nasRoot == nil {
-                    nasRoot = url
+                    nasRoot = nasRootURL(for: url)
                 }
             }
             sourceDirectories = try database.sourceDirectories()
@@ -70,17 +71,6 @@ final class LibraryStore: ObservableObject {
             }
         } catch {
             lastError = error.fullTrace
-        }
-    }
-
-    func chooseNASRoot() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.message = "选择 NAS 权威根目录"
-        if panel.runModal() == .OK {
-            nasRoot = panel.url
         }
     }
 
@@ -194,24 +184,20 @@ final class LibraryStore: ObservableObject {
 
     func archiveSelected() {
         guard let asset = selectedAsset else { return }
-        guard let nasRoot else {
-            chooseNASRoot()
-            guard let nasRoot else { return }
-            archive(asset: asset, nasRoot: nasRoot)
+        guard let root = preferredNASRoot() else {
+            lastError = "没有可用的 NAS 文件夹。请先添加一个 /Volumes 下的文件夹。"
             return
         }
-        archive(asset: asset, nasRoot: nasRoot)
+        archive(asset: asset, nasRoot: root)
     }
 
     func syncSelected() {
         guard let asset = selectedAsset else { return }
-        guard let nasRoot else {
-            chooseNASRoot()
-            guard let nasRoot else { return }
-            sync(asset: asset, nasRoot: nasRoot)
+        guard let root = preferredNASRoot() else {
+            lastError = "没有可用的 NAS 文件夹。请先添加一个 /Volumes 下的文件夹。"
             return
         }
-        sync(asset: asset, nasRoot: nasRoot)
+        sync(asset: asset, nasRoot: root)
     }
 
     func recordExportForSelected() {
@@ -272,6 +258,28 @@ final class LibraryStore: ObservableObject {
                 }
             }
         }
+    }
+
+    private func preferredNASRoot() -> URL? {
+        if let nasRoot {
+            return nasRoot
+        }
+        return sourceDirectories
+            .filter { $0.isTracked && $0.storageKind == .nas }
+            .map { nasRootURL(for: URL(fileURLWithPath: $0.path)) }
+            .first
+    }
+
+    private func storageKind(for url: URL) -> StorageKind {
+        url.path.hasPrefix("/Volumes/") ? .nas : .local
+    }
+
+    private func nasRootURL(for url: URL) -> URL {
+        let components = url.pathComponents
+        guard components.count >= 3, components[1] == "Volumes" else {
+            return url
+        }
+        return URL(fileURLWithPath: "/" + components[1] + "/" + components[2], isDirectory: true)
     }
 
     private static func applicationSupport() throws -> URL {
