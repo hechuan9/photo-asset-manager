@@ -129,6 +129,26 @@ final class SQLiteDatabase {
         return Dictionary(grouping: all, by: \.status).mapValues(\.count)
     }
 
+    func sourceDirectories() throws -> [SourceDirectory] {
+        try prepare(
+            """
+            SELECT id, path, storage_kind, is_tracked, created_at, last_scanned_at
+            FROM source_directories
+            ORDER BY is_tracked DESC, path ASC
+            """,
+            []
+        ) { statement in
+            SourceDirectory(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                path: statement.text(1),
+                storageKind: StorageKind(rawValue: statement.text(2)) ?? .local,
+                isTracked: statement.int(3) == 1,
+                createdAt: DateCoding.decode(statement.text(4)) ?? Date(),
+                lastScannedAt: DateCoding.decode(statement.optionalText(5))
+            )
+        }
+    }
+
     func fileInstances(assetID: UUID) throws -> [FileInstance] {
         let sql = """
         SELECT id, asset_id, path, device_id, storage_kind, file_role, authority_role,
@@ -167,7 +187,7 @@ final class SQLiteDatabase {
                 INSERT INTO assets (
                     id, capture_time, camera_make, camera_model, lens_model, original_filename,
                     content_fingerprint, metadata_fingerprint, rating, flag, tags, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, '[]', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]', ?, ?)
                 """,
                 [
                     .text(assetID.uuidString),
@@ -178,13 +198,22 @@ final class SQLiteDatabase {
                     .text(scanned.url.lastPathComponent),
                     .text(scanned.contentHash),
                     .text(scanned.metadataFingerprint),
+                    .int(Int64(scanned.rating)),
                     .text(DateCoding.encode(now)),
                     .text(DateCoding.encode(now))
                 ]
             )
             try insertVersion(assetID: assetID, name: "Original", kind: .original, parentID: nil, notes: "导入批次 \(batchID.uuidString)")
         } else {
-            try execute("UPDATE assets SET updated_at = ? WHERE id = ?", [.text(DateCoding.encode(now)), .text(assetID.uuidString)])
+            try execute(
+                """
+                UPDATE assets
+                SET rating = CASE WHEN rating = 0 AND ? > 0 THEN ? ELSE rating END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                [.int(Int64(scanned.rating)), .int(Int64(scanned.rating)), .text(DateCoding.encode(now)), .text(assetID.uuidString)]
+            )
         }
 
         let fileID = try fileInstanceID(path: scanned.url.path) ?? UUID()
@@ -252,6 +281,38 @@ final class SQLiteDatabase {
         return id
     }
 
+    func upsertSourceDirectory(path: String, storageKind: StorageKind) throws {
+        try execute(
+            """
+            INSERT INTO source_directories (id, path, storage_kind, is_tracked, created_at, last_scanned_at)
+            VALUES (?, ?, ?, 1, ?, NULL)
+            ON CONFLICT(path) DO UPDATE SET
+                storage_kind = excluded.storage_kind,
+                is_tracked = 1
+            """,
+            [
+                .text(UUID().uuidString),
+                .text(path),
+                .text(storageKind.rawValue),
+                .text(DateCoding.encode(Date()))
+            ]
+        )
+    }
+
+    func setSourceDirectoryTracked(id: UUID, isTracked: Bool) throws {
+        try execute(
+            "UPDATE source_directories SET is_tracked = ? WHERE id = ?",
+            [.int(isTracked ? 1 : 0), .text(id.uuidString)]
+        )
+    }
+
+    func markSourceDirectoryScanned(path: String) throws {
+        try execute(
+            "UPDATE source_directories SET last_scanned_at = ? WHERE path = ?",
+            [.text(DateCoding.encode(Date())), .text(path)]
+        )
+    }
+
     func finishImportBatch(_ id: UUID, status: String) throws {
         try execute("UPDATE import_batches SET status = ? WHERE id = ?", [.text(status), .text(id.uuidString)])
     }
@@ -291,6 +352,19 @@ final class SQLiteDatabase {
             statement.int64(0)
         }.first ?? 0
         return count > 0
+    }
+
+    func applyScannedRatingIfEmpty(path: String, rating: Int) throws {
+        guard rating > 0 else { return }
+        try execute(
+            """
+            UPDATE assets
+            SET rating = ?, updated_at = ?
+            WHERE rating = 0
+              AND id IN (SELECT asset_id FROM file_instances WHERE path = ?)
+            """,
+            [.int(Int64(rating)), .text(DateCoding.encode(Date())), .text(path)]
+        )
     }
 
     func updateAssetMetadata(asset: Asset) throws {
@@ -481,6 +555,15 @@ final class SQLiteDatabase {
                 status TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS source_directories (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                storage_kind TEXT NOT NULL,
+                is_tracked INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                last_scanned_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS operation_logs (
                 id TEXT PRIMARY KEY,
                 action TEXT NOT NULL,
@@ -490,6 +573,20 @@ final class SQLiteDatabase {
                 detail TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            """
+        )
+
+        try execute(
+            """
+            INSERT OR IGNORE INTO source_directories (id, path, storage_kind, is_tracked, created_at, last_scanned_at)
+            SELECT
+                id,
+                source_path,
+                CASE WHEN source_path LIKE '/Volumes/%' THEN 'nas' ELSE 'local' END,
+                1,
+                imported_at,
+                CASE WHEN status IN ('finished', 'finished_with_errors', 'resumed') THEN imported_at ELSE NULL END
+            FROM import_batches
             """
         )
     }

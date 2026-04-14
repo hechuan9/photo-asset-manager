@@ -17,6 +17,7 @@ struct ScannedFile {
     var cameraMake: String
     var cameraModel: String
     var lensModel: String
+    var rating: Int
     var thumbnailURL: URL?
     var thumbnailHash: String?
     var thumbnailSize: Int64
@@ -74,6 +75,10 @@ struct PhotoScanner: @unchecked Sendable {
                         try database.hasUnchangedFileInstance(path: url.path, sizeBytes: size)
                     }
                     if alreadyIndexed {
+                        let rating = ImageMetadata.read(url: url).rating
+                        try await MainActor.run {
+                            try database.applyScannedRatingIfEmpty(path: url.path, rating: rating)
+                        }
                         report.skippedExistingFiles += 1
                         report.scannedFiles += 1
                         if report.scannedFiles % 25 == 0 {
@@ -188,6 +193,7 @@ struct PhotoScanner: @unchecked Sendable {
             cameraMake: metadata.cameraMake,
             cameraModel: metadata.cameraModel,
             lensModel: metadata.lensModel,
+            rating: metadata.rating,
             thumbnailURL: derivatives.thumbnail,
             thumbnailHash: derivatives.thumbnail.flatMap { try? FileHasher.sha256(url: $0) },
             thumbnailSize: derivatives.thumbnail.flatMap { (try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) } ?? 0,
@@ -247,21 +253,24 @@ struct ImageMetadata {
     var cameraMake: String
     var cameraModel: String
     var lensModel: String
+    var rating: Int
 
     static func read(url: URL) -> ImageMetadata {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
-            return ImageMetadata(captureTime: nil, cameraMake: "", cameraModel: "", lensModel: "")
+            return ImageMetadata(captureTime: nil, cameraMake: "", cameraModel: "", lensModel: "", rating: readSidecarRating(for: url) ?? 0)
         }
 
         let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any]
         let tiff = properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let iptc = properties[kCGImagePropertyIPTCDictionary] as? [CFString: Any]
         let captureText = exif?[kCGImagePropertyExifDateTimeOriginal] as? String
         let captureTime = captureText.flatMap(parseEXIFDate)
         let make = (tiff?[kCGImagePropertyTIFFMake] as? String) ?? ""
         let model = (tiff?[kCGImagePropertyTIFFModel] as? String) ?? ""
         let lens = (exif?[kCGImagePropertyExifLensModel] as? String) ?? ""
-        return ImageMetadata(captureTime: captureTime, cameraMake: make, cameraModel: model, lensModel: lens)
+        let rating = readEmbeddedRating(source: source) ?? readDictionaryRating(properties) ?? readDictionaryRating(iptc ?? [:]) ?? readSidecarRating(for: url) ?? 0
+        return ImageMetadata(captureTime: captureTime, cameraMake: make, cameraModel: model, lensModel: lens, rating: rating)
     }
 
     func fingerprint(filename: String, sizeBytes: Int64) -> String {
@@ -274,6 +283,84 @@ struct ImageMetadata {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
         return formatter.date(from: value)
+    }
+
+    private static func readEmbeddedRating(source: CGImageSource) -> Int? {
+        guard let metadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil) else { return nil }
+        let paths = ["xmp:Rating", "aux:Rating", "photoshop:Urgency"]
+        for path in paths {
+            guard let tag = CGImageMetadataCopyTagWithPath(metadata, nil, path as CFString),
+                  let value = CGImageMetadataTagCopyValue(tag) else {
+                continue
+            }
+            if let rating = normalizeRating(value) {
+                return rating
+            }
+        }
+        return nil
+    }
+
+    private static func readDictionaryRating(_ dictionary: [CFString: Any]) -> Int? {
+        let keys = ["Rating", "rating", "StarRating", "Urgency"]
+        for key in keys {
+            if let value = dictionary[key as CFString], let rating = normalizeRating(value) {
+                return rating
+            }
+        }
+        return nil
+    }
+
+    private static func readSidecarRating(for url: URL) -> Int? {
+        let candidates = [
+            url.deletingPathExtension().appendingPathExtension("xmp"),
+            URL(fileURLWithPath: url.path + ".xmp")
+        ]
+        for candidate in candidates where FileManager.default.fileExists(atPath: candidate.path) {
+            guard let data = try? Data(contentsOf: candidate),
+                  let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) else {
+                continue
+            }
+            if let rating = firstRating(in: text) {
+                return rating
+            }
+        }
+        return nil
+    }
+
+    private static func firstRating(in text: String) -> Int? {
+        let patterns = [
+            #"xmp:Rating\s*=\s*["'](-?\d+)["']"#,
+            #"<xmp:Rating>\s*(-?\d+)\s*</xmp:Rating>"#,
+            #"Rating\s*=\s*["'](-?\d+)["']"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                  let range = Range(match.range(at: 1), in: text) else {
+                continue
+            }
+            if let value = Int(text[range]) {
+                return clampRating(value)
+            }
+        }
+        return nil
+    }
+
+    private static func normalizeRating(_ value: Any) -> Int? {
+        if let int = value as? Int {
+            return clampRating(int)
+        }
+        if let number = value as? NSNumber {
+            return clampRating(number.intValue)
+        }
+        if let string = value as? String, let int = Int(string.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return clampRating(int)
+        }
+        return nil
+    }
+
+    private static func clampRating(_ value: Int) -> Int {
+        max(0, min(5, value))
     }
 }
 

@@ -180,6 +180,15 @@ struct ImportBatch: Identifiable, Hashable {
     var status: String
 }
 
+struct SourceDirectory: Identifiable, Hashable {
+    let id: UUID
+    var path: String
+    var storageKind: StorageKind
+    var isTracked: Bool
+    var createdAt: Date
+    var lastScannedAt: Date?
+}
+
 struct LibraryFilter: Equatable {
     var status: AssetStatus?
     var searchText = ""

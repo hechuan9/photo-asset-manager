@@ -22,6 +22,10 @@ struct ContentView: View {
                 Button("扫描 NAS") {
                     library.chooseAndScan(storageKind: .nas)
                 }
+                Button("扫描所有来源") {
+                    library.scanTrackedSources()
+                }
+                .disabled(library.isScanning)
                 Button("设置 NAS") {
                     library.chooseNASRoot()
                 }
@@ -75,6 +79,17 @@ struct SidebarView: View {
                     Text(library.nasRoot?.path ?? "未设置")
                         .lineLimit(2)
                         .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("来源目录") {
+                if library.sourceDirectories.isEmpty {
+                    Text("还没有来源目录")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(library.sourceDirectories) { source in
+                        SourceDirectoryRow(source: source)
+                    }
                 }
             }
 
@@ -139,6 +154,49 @@ struct StatusRow: View {
             Text("\(count)")
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+struct SourceDirectoryRow: View {
+    @EnvironmentObject private var library: LibraryStore
+    var source: SourceDirectory
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(source.storageKind.label)
+                    .fontWeight(.medium)
+                Text(source.isTracked ? "追踪中" : "已停止")
+                    .foregroundStyle(source.isTracked ? Color.secondary : Color.orange)
+                Spacer()
+                Button("扫描") {
+                    library.scanSource(source)
+                }
+                .disabled(!source.isTracked || library.isScanning)
+                if source.isTracked {
+                    Button("停止追踪") {
+                        library.stopTrackingSource(source)
+                    }
+                    .disabled(library.isScanning)
+                } else {
+                    Button("恢复") {
+                        library.resumeTrackingSource(source)
+                    }
+                    .disabled(library.isScanning)
+                }
+            }
+            Text(source.path)
+                .lineLimit(2)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            if let lastScannedAt = source.lastScannedAt {
+                Text("上次扫描 \(lastScannedAt.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .font(.callout)
+        .padding(.vertical, 4)
     }
 }
 

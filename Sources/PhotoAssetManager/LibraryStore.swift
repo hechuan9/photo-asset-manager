@@ -13,6 +13,7 @@ final class LibraryStore: ObservableObject {
     @Published var lastError: String?
     @Published var nasRoot: URL?
     @Published var interruptedScanPath: String?
+    @Published var sourceDirectories: [SourceDirectory] = []
 
     private let database: SQLiteDatabase
     private let scanner: PhotoScanner
@@ -26,6 +27,7 @@ final class LibraryStore: ObservableObject {
             try database.markInterruptedImportBatches()
             interruptedScanPath = try database.latestInterruptedScanPath()
             try database.markMissingFiles()
+            sourceDirectories = try database.sourceDirectories()
             refresh()
         } catch {
             fatalError(error.fullTrace)
@@ -40,13 +42,30 @@ final class LibraryStore: ObservableObject {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.message = storageKind == .nas ? "选择 NAS 根目录或照片目录" : "选择要扫描的本地照片目录"
-        if panel.runModal() == .OK, let url = panel.url {
-            if storageKind == .nas {
-                nasRoot = url
+        panel.allowsMultipleSelection = true
+        panel.message = storageKind == .nas ? "选择一个或多个 NAS 照片目录" : "选择一个或多个本地照片目录"
+        if panel.runModal() == .OK {
+            addSourceDirectories(panel.urls, storageKind: storageKind, scanImmediately: true)
+        }
+    }
+
+    func addSourceDirectories(_ urls: [URL], storageKind: StorageKind, scanImmediately: Bool) {
+        guard !urls.isEmpty else { return }
+        do {
+            for url in urls {
+                try database.upsertSourceDirectory(path: url.path, storageKind: storageKind)
+                if storageKind == .nas, nasRoot == nil {
+                    nasRoot = url
+                }
             }
-            scan(url, storageKind: storageKind)
+            sourceDirectories = try database.sourceDirectories()
+            if scanImmediately {
+                scanSources(sourceDirectories.filter { source in
+                    urls.contains { $0.path == source.path }
+                })
+            }
+        } catch {
+            lastError = error.fullTrace
         }
     }
 
@@ -74,9 +93,38 @@ final class LibraryStore: ObservableObject {
             if !report.errors.isEmpty {
                 lastError = report.errors.joined(separator: "\n\n")
             }
+            try? database.markSourceDirectoryScanned(path: url.path)
             try? database.clearInterruptedBatches(sourcePath: url.path)
             interruptedScanPath = try? database.latestInterruptedScanPath()
+            sourceDirectories = (try? database.sourceDirectories()) ?? sourceDirectories
             refresh()
+        }
+    }
+
+    func scanSource(_ source: SourceDirectory) {
+        guard source.isTracked else { return }
+        scan(URL(fileURLWithPath: source.path), storageKind: source.storageKind)
+    }
+
+    func scanTrackedSources() {
+        scanSources(sourceDirectories.filter(\.isTracked))
+    }
+
+    func stopTrackingSource(_ source: SourceDirectory) {
+        do {
+            try database.setSourceDirectoryTracked(id: source.id, isTracked: false)
+            sourceDirectories = try database.sourceDirectories()
+        } catch {
+            lastError = error.fullTrace
+        }
+    }
+
+    func resumeTrackingSource(_ source: SourceDirectory) {
+        do {
+            try database.setSourceDirectoryTracked(id: source.id, isTracked: true)
+            sourceDirectories = try database.sourceDirectories()
+        } catch {
+            lastError = error.fullTrace
         }
     }
 
@@ -95,6 +143,7 @@ final class LibraryStore: ObservableObject {
             try database.markMissingFiles()
             assets = try database.queryAssets(filter: filter)
             counts = try database.countsByStatus()
+            sourceDirectories = try database.sourceDirectories()
             if selectedAssetID == nil {
                 selectedAssetID = assets.first?.id
             }
@@ -195,6 +244,20 @@ final class LibraryStore: ObservableObject {
             refresh()
         } catch {
             lastError = error.fullTrace
+        }
+    }
+
+    private func scanSources(_ sources: [SourceDirectory]) {
+        guard !sources.isEmpty else { return }
+        Task {
+            for source in sources where source.isTracked {
+                await MainActor.run {
+                    scan(URL(fileURLWithPath: source.path), storageKind: source.storageKind)
+                }
+                while await MainActor.run(body: { isScanning }) {
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                }
+            }
         }
     }
 
