@@ -74,17 +74,19 @@ struct SidebarView: View {
                 }
             }
 
-            Section("存储") {
-                LabeledContent("NAS") {
-                    Text(library.nasRoot?.path ?? "未设置")
-                        .lineLimit(2)
-                        .foregroundStyle(.secondary)
+            Section("文件夹") {
+                HStack {
+                    Button("添加本地") {
+                        library.chooseAndAddFolders(storageKind: .local, scanImmediately: false)
+                    }
+                    .disabled(library.isScanning)
+                    Button("添加 NAS") {
+                        library.chooseAndAddFolders(storageKind: .nas, scanImmediately: false)
+                    }
+                    .disabled(library.isScanning)
                 }
-            }
-
-            Section("来源目录") {
                 if library.sourceDirectories.isEmpty {
-                    Text("还没有来源目录")
+                    Text("还没有文件夹")
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(library.sourceDirectories) { source in
@@ -184,6 +186,10 @@ struct SourceDirectoryRow: View {
                     }
                     .disabled(library.isScanning)
                 }
+                Button("移除") {
+                    library.removeSourceDirectory(source)
+                }
+                .disabled(library.isScanning)
             }
             Text(source.path)
                 .lineLimit(2)

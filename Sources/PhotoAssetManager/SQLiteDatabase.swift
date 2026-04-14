@@ -306,6 +306,10 @@ final class SQLiteDatabase {
         )
     }
 
+    func removeSourceDirectory(id: UUID) throws {
+        try execute("DELETE FROM source_directories WHERE id = ?", [.text(id.uuidString)])
+    }
+
     func markSourceDirectoryScanned(path: String) throws {
         try execute(
             "UPDATE source_directories SET last_scanned_at = ? WHERE path = ?",

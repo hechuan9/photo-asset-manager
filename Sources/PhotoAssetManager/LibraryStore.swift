@@ -39,13 +39,17 @@ final class LibraryStore: ObservableObject {
     }
 
     func chooseAndScan(storageKind: StorageKind) {
+        chooseAndAddFolders(storageKind: storageKind, scanImmediately: true)
+    }
+
+    func chooseAndAddFolders(storageKind: StorageKind, scanImmediately: Bool) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = true
-        panel.message = storageKind == .nas ? "选择一个或多个 NAS 照片目录" : "选择一个或多个本地照片目录"
+        panel.message = storageKind == .nas ? "添加一个或多个 NAS 照片文件夹" : "添加一个或多个本地照片文件夹"
         if panel.runModal() == .OK {
-            addSourceDirectories(panel.urls, storageKind: storageKind, scanImmediately: true)
+            addSourceDirectories(panel.urls, storageKind: storageKind, scanImmediately: scanImmediately)
         }
     }
 
@@ -122,6 +126,15 @@ final class LibraryStore: ObservableObject {
     func resumeTrackingSource(_ source: SourceDirectory) {
         do {
             try database.setSourceDirectoryTracked(id: source.id, isTracked: true)
+            sourceDirectories = try database.sourceDirectories()
+        } catch {
+            lastError = error.fullTrace
+        }
+    }
+
+    func removeSourceDirectory(_ source: SourceDirectory) {
+        do {
+            try database.removeSourceDirectory(id: source.id)
             sourceDirectories = try database.sourceDirectories()
         } catch {
             lastError = error.fullTrace
