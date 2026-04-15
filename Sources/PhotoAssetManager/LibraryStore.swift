@@ -272,13 +272,22 @@ final class LibraryStore: ObservableObject {
         }
     }
 
-    func sourcesNeedingStartupOrganization() -> [SourceDirectory] {
-        sourceDirectories.filter { $0.lastScannedAt == nil }
+    func sourcesNeedingStartupOrganization() throws -> [SourceDirectory] {
+        let repairPaths = try database.sourceDirectoryPathsNeedingBrowseGraphRepair()
+        return sourceDirectories.filter { source in
+            source.isTracked && (source.lastScannedAt == nil || repairPaths.contains(source.path))
+        }
     }
 
     func startStartupLibraryOrganizationIfNeeded() {
         guard startupOrganizationTask == nil else { return }
-        let sources = sourcesNeedingStartupOrganization()
+        let sources: [SourceDirectory]
+        do {
+            sources = try sourcesNeedingStartupOrganization()
+        } catch {
+            lastError = error.fullTrace
+            return
+        }
         guard !sources.isEmpty else {
             startAvailabilityRefreshInBackground()
             return
@@ -300,6 +309,10 @@ final class LibraryStore: ObservableObject {
             var scanErrors: [String] = []
 
             do {
+                try database.backfillBrowseGraphFromFileInstances()
+                sourceDirectories = try database.sourceDirectories()
+                indexedBrowseFolders = try database.browseFolders()
+
                 for source in sources {
                     guard !Task.isCancelled else { throw CancellationError() }
                     let completedBeforeSource = completedSources
@@ -343,6 +356,7 @@ final class LibraryStore: ObservableObject {
                 }
 
                 interruptedScanPath = try database.latestInterruptedScanPath()
+                try database.backfillBrowseGraphFromFileInstances()
                 sourceDirectories = try database.sourceDirectories()
                 indexedBrowseFolders = try database.browseFolders()
                 if !scanErrors.isEmpty {

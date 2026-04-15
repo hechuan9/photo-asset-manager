@@ -245,6 +245,31 @@ final class SQLiteDatabase {
         }
     }
 
+    func sourceDirectoryPathsNeedingBrowseGraphRepair() throws -> Set<String> {
+        let paths = try prepare(
+            """
+            SELECT sd.path
+            FROM source_directories sd
+            LEFT JOIN browse_nodes bn
+              ON bn.kind = ?
+             AND bn.canonical_key = sd.path
+            WHERE sd.is_tracked = 1
+              AND bn.id IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM file_instances fi
+                  WHERE (fi.path = sd.path OR fi.path LIKE sd.path || '/%')
+                    AND fi.file_role IN ('raw_original', 'jpeg_original', 'sidecar', 'export')
+              )
+            ORDER BY sd.path
+            """,
+            [.text(BrowseNodeKind.folder.rawValue)]
+        ) { statement in
+            statement.text(0)
+        }
+        return Set(paths)
+    }
+
     func upsertBrowseFolderNode(path: String, storageKind: StorageKind) throws -> BrowseNode {
         let normalizedPath = Self.normalizedDirectoryPath(path)
         let id = UUID()
@@ -980,7 +1005,7 @@ final class SQLiteDatabase {
         try backfillBrowseGraphFromFileInstances()
     }
 
-    private func backfillBrowseGraphFromFileInstances() throws {
+    func backfillBrowseGraphFromFileInstances() throws {
         let rows = try prepare(
             """
             SELECT fi.id, fi.path, fi.storage_kind
@@ -1001,9 +1026,17 @@ final class SQLiteDatabase {
             )
         }
 
-        for row in rows {
-            guard let fileInstanceID = row.0 else { continue }
-            try upsertBrowseFolderMembership(filePath: row.1, fileInstanceID: fileInstanceID, storageKind: row.2)
+        guard !rows.isEmpty else { return }
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            for row in rows {
+                guard let fileInstanceID = row.0 else { continue }
+                try upsertBrowseFolderMembership(filePath: row.1, fileInstanceID: fileInstanceID, storageKind: row.2)
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
         }
     }
 

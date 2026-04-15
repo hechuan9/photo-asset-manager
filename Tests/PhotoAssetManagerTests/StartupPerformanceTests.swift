@@ -80,15 +80,29 @@ struct StartupPerformanceTests {
         let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
 
         #expect(store.contains("startStartupLibraryOrganizationIfNeeded()"))
-        #expect(store.contains("func sourcesNeedingStartupOrganization()"))
+        #expect(store.contains("func sourcesNeedingStartupOrganization() throws"))
         #expect(store.contains("func startStartupLibraryOrganizationIfNeeded()"))
         #expect(store.contains("系统整理中"))
         #expect(store.contains("正在整理照片索引"))
         #expect(functionBody(named: "sourcesNeedingStartupOrganization", in: store).contains("lastScannedAt == nil"))
+        #expect(functionBody(named: "sourcesNeedingStartupOrganization", in: store).contains("sourceDirectoryPathsNeedingBrowseGraphRepair"))
         #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("blockingTask = BlockingTaskReport"))
+        #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("database.backfillBrowseGraphFromFileInstances()"))
         #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("scanner.scanDirectory"))
         #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("database.markSourceDirectoryScanned"))
         #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("indexedBrowseFolders = try database.browseFolders()"))
+    }
+
+    @Test func startupOrganizationRepairsIndexedSourcesMissingBrowseGraph() throws {
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+
+        #expect(database.contains("func sourceDirectoryPathsNeedingBrowseGraphRepair() throws -> Set<String>"))
+        #expect(functionBody(named: "sourceDirectoryPathsNeedingBrowseGraphRepair", in: database).contains("source_directories sd"))
+        #expect(functionBody(named: "sourceDirectoryPathsNeedingBrowseGraphRepair", in: database).contains("EXISTS"))
+        #expect(functionBody(named: "sourceDirectoryPathsNeedingBrowseGraphRepair", in: database).contains("file_instances fi"))
+        #expect(functionBody(named: "sourceDirectoryPathsNeedingBrowseGraphRepair", in: database).contains("browse_nodes bn"))
+        #expect(functionBody(named: "sourceDirectoryPathsNeedingBrowseGraphRepair", in: database).contains("bn.id IS NULL"))
+        #expect(database.contains("func backfillBrowseGraphFromFileInstances() throws"))
     }
 
     private func sourceFile(_ path: String) throws -> String {
