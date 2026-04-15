@@ -48,5 +48,12 @@
 - 适用范围：应用启动、来源目录扫描、文件夹浏览树、后台可用性校验。
 - 问题模式：数据库里仍有 `last_scanned_at IS NULL` 的来源时，应用直接展示部分文件夹树并启动后台校验，用户一打开就看到缺照片或空目录。
 - 根因：启动路径只做普通刷新，没有先判定库索引是否处于未完成状态；单纯重扫已入库文件时，未变化文件可能跳过 browse graph membership 写入。
-- 预防动作：启动时必须先检查未完成来源和已有文件但缺 browse graph 的来源；存在问题时进入阻塞式“系统整理中”任务，先从 `file_instances` 回填 browse graph，再补扫未完成来源，完成后才启动后台文件状态校验。
-- 合并前验证：运行覆盖 `startStartupLibraryOrganizationIfNeeded`、`lastScannedAt == nil`、`sourceDirectoryPathsNeedingBrowseGraphRepair`、`backfillBrowseGraphFromFileInstances`、`BlockingTaskReport(title: "系统整理中"`、启动整理后刷新 `indexedBrowseFolders` 的测试，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。
+- 预防动作：启动时必须先检查未完成来源和已有文件但缺 browse graph 的来源；存在问题时进入阻塞式“系统整理中”任务，先从 `file_instances` 回填 browse graph，再补扫未完成来源，完成后才启动后台文件状态校验；重扫命中 unchanged 文件时也要修复 direct membership。
+- 合并前验证：运行覆盖 `startStartupLibraryOrganizationIfNeeded`、`lastScannedAt == nil`、`sourceDirectoryPathsNeedingBrowseGraphRepair`、`backfillBrowseGraphFromFileInstances`、`unchangedFileInstanceID`、`BlockingTaskReport(title: "系统整理中"`、启动整理后刷新 `indexedBrowseFolders` 的测试，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。
+
+## 启动后台任务
+- 适用范围：启动后的文件可用性校验、后台状态条、SQLite 批量写回。
+- 问题模式：启动后后台任务对全库照片逐条检查并逐条写库，导致大库侧边栏和选择交互卡顿。
+- 根因：后台校验需要遍历大量 `file_instances`，如果查询缺少针对 `file_role,path` 的索引，或每条结果单独 UPDATE，主 actor 写库窗口会被拉长。
+- 预防动作：可用性目标查询必须有 `idx_file_instances_role_path` 支撑；批量写回按 availability 分组，用 `WHERE id IN (...)` 更新，避免每条文件单独 prepare/step。
+- 合并前验证：运行覆盖 `idx_file_instances_role_path`、`Dictionary(grouping: updates, by: \.availability)`、`WHERE id IN` 的测试，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。

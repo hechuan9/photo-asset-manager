@@ -122,7 +122,7 @@ final class LibraryStore: ObservableObject {
 
     func scanTrackedSources() {
         guard !isBusy else { return }
-        scanSources(sourceDirectories)
+        scanSources(sourceDirectories.filter(\.isTracked))
     }
 
     func removeSourceDirectory(_ source: SourceDirectory) {
@@ -340,7 +340,7 @@ final class LibraryStore: ObservableObject {
                             totalItems: sources.count,
                             completedItems: completedBeforeSource,
                             skippedItems: report.skippedFiles,
-                            message: "正在整理 \(source.path)"
+                            message: self?.startupOrganizationMessage(sourcePath: source.path, report: report) ?? "正在整理 \(source.path)"
                         )
                     }
 
@@ -372,6 +372,16 @@ final class LibraryStore: ObservableObject {
             blockingTask = nil
             startupOrganizationTask = nil
         }
+    }
+
+    private func startupOrganizationMessage(sourcePath: String, report: ScanReport) -> String {
+        if report.totalFiles > 0 {
+            return "正在整理 \(sourcePath)，已扫描 \(report.scannedFiles) / \(report.totalFiles) 个候选文件。"
+        }
+        if report.discoveredFiles > 0 {
+            return "正在整理 \(sourcePath)，已发现 \(report.discoveredFiles) 个候选文件。"
+        }
+        return "正在整理 \(sourcePath)"
     }
 
     func setStatusFilter(_ status: AssetStatus?) {

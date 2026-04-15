@@ -24,7 +24,7 @@ struct SidebarUXTests {
         #expect(!source.contains("扫描 NAS 目录"))
         #expect(!source.contains(".disabled(!source.isTracked || library.isBusy)"))
 
-        #expect(!store.contains("sourceDirectories.filter(\\.isTracked)"))
+        #expect(functionBody(named: "scanTrackedSources", in: store).contains("sourceDirectories.filter(\\.isTracked)"))
         #expect(!store.contains("for source in sources where source.isTracked"))
         #expect(!store.contains("guard source.isTracked else { return }"))
         #expect(!store.contains("func chooseAndScan"))

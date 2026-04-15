@@ -91,6 +91,8 @@ struct StartupPerformanceTests {
         #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("scanner.scanDirectory"))
         #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("database.markSourceDirectoryScanned"))
         #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("indexedBrowseFolders = try database.browseFolders()"))
+        #expect(functionBody(named: "startupOrganizationMessage", in: store).contains("已扫描"))
+        #expect(functionBody(named: "startupOrganizationMessage", in: store).contains("候选文件"))
     }
 
     @Test func startupOrganizationRepairsIndexedSourcesMissingBrowseGraph() throws {
@@ -101,8 +103,28 @@ struct StartupPerformanceTests {
         #expect(functionBody(named: "sourceDirectoryPathsNeedingBrowseGraphRepair", in: database).contains("EXISTS"))
         #expect(functionBody(named: "sourceDirectoryPathsNeedingBrowseGraphRepair", in: database).contains("file_instances fi"))
         #expect(functionBody(named: "sourceDirectoryPathsNeedingBrowseGraphRepair", in: database).contains("browse_nodes bn"))
+        #expect(functionBody(named: "sourceDirectoryPathsNeedingBrowseGraphRepair", in: database).contains("browse_file_instances bfi"))
         #expect(functionBody(named: "sourceDirectoryPathsNeedingBrowseGraphRepair", in: database).contains("bn.id IS NULL"))
+        #expect(functionBody(named: "sourceDirectoryPathsNeedingBrowseGraphRepair", in: database).contains("bfi.file_instance_id IS NULL"))
         #expect(database.contains("func backfillBrowseGraphFromFileInstances() throws"))
+    }
+
+    @Test func rescanningUnchangedFilesRepairsBrowseMembership() throws {
+        let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+
+        #expect(database.contains("func unchangedFileInstanceID(path: String, sizeBytes: Int64) throws -> UUID?"))
+        #expect(scanner.contains("let unchangedFileInstanceID = try await MainActor.run"))
+        #expect(functionBody(named: "scanDirectory", in: scanner).contains("database.upsertBrowseFolderMembership(filePath: url.path, fileInstanceID: unchangedFileInstanceID, storageKind: storageKind)"))
+        #expect(!scanner.contains("try database.hasUnchangedFileInstance(path: url.path, sizeBytes: size)"))
+    }
+
+    @Test func availabilityRefreshUsesIndexedQueryAndGroupedWrites() throws {
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+
+        #expect(database.contains("idx_file_instances_role_path"))
+        #expect(functionBody(named: "updateFileAvailability", in: database).contains("Dictionary(grouping: updates, by: \\.availability)"))
+        #expect(functionBody(named: "updateFileAvailability", in: database).contains("WHERE id IN"))
     }
 
     private func sourceFile(_ path: String) throws -> String {

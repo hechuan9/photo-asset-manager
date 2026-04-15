@@ -254,16 +254,33 @@ final class SQLiteDatabase {
               ON bn.kind = ?
              AND bn.canonical_key = sd.path
             WHERE sd.is_tracked = 1
-              AND bn.id IS NULL
-              AND EXISTS (
-                  SELECT 1
-                  FROM file_instances fi
-                  WHERE (fi.path = sd.path OR fi.path LIKE sd.path || '/%')
-                    AND fi.file_role IN ('raw_original', 'jpeg_original', 'sidecar', 'export')
+              AND (
+                  (
+                      bn.id IS NULL
+                      AND EXISTS (
+                          SELECT 1
+                          FROM file_instances fi
+                          WHERE (fi.path = sd.path OR fi.path LIKE sd.path || '/%')
+                            AND fi.file_role IN ('raw_original', 'jpeg_original', 'sidecar', 'export')
+                      )
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                      FROM file_instances fi
+                      LEFT JOIN browse_file_instances bfi
+                        ON bfi.file_instance_id = fi.id
+                       AND bfi.membership_kind = ?
+                      WHERE (fi.path = sd.path OR fi.path LIKE sd.path || '/%')
+                        AND fi.file_role IN ('raw_original', 'jpeg_original', 'sidecar', 'export')
+                        AND bfi.file_instance_id IS NULL
+                  )
               )
             ORDER BY sd.path
             """,
-            [.text(BrowseNodeKind.folder.rawValue)]
+            [
+                .text(BrowseNodeKind.folder.rawValue),
+                .text(BrowseMembershipKind.directFileInstance.rawValue)
+            ]
         ) { statement in
             statement.text(0)
         }
@@ -631,18 +648,18 @@ final class SQLiteDatabase {
         }.first ?? nil
     }
 
-    func hasUnchangedFileInstance(path: String, sizeBytes: Int64) throws -> Bool {
-        let count = try prepare(
+    func unchangedFileInstanceID(path: String, sizeBytes: Int64) throws -> UUID? {
+        try prepare(
             """
-            SELECT COUNT(*)
+            SELECT id
             FROM file_instances
             WHERE path = ? AND size_bytes = ? AND availability = 'online'
+            LIMIT 1
             """,
             [.text(path), .int(sizeBytes)]
         ) { statement in
-            statement.int64(0)
-        }.first ?? 0
-        return count > 0
+            UUID(uuidString: statement.text(0))
+        }.first ?? nil
     }
 
     func applyScannedRatingIfEmpty(path: String, rating: Int) throws {
@@ -839,10 +856,13 @@ final class SQLiteDatabase {
         guard !updates.isEmpty else { return }
         try execute("BEGIN IMMEDIATE TRANSACTION")
         do {
-            for update in updates {
+            let groupedUpdates = Dictionary(grouping: updates, by: \.availability)
+            for (availability, group) in groupedUpdates {
+                let placeholders = Array(repeating: "?", count: group.count).joined(separator: ", ")
+                let values = [.text(availability.rawValue)] + group.map { SQLiteValue.text($0.id.uuidString) }
                 try execute(
-                    "UPDATE file_instances SET availability = ? WHERE id = ?",
-                    [.text(update.availability.rawValue), .text(update.id.uuidString)]
+                    "UPDATE file_instances SET availability = ? WHERE id IN (\(placeholders))",
+                    values
                 )
             }
             try execute("COMMIT")
@@ -891,6 +911,7 @@ final class SQLiteDatabase {
             CREATE INDEX IF NOT EXISTS idx_file_instances_asset_role_availability ON file_instances(asset_id, file_role, availability);
             CREATE INDEX IF NOT EXISTS idx_file_instances_asset_sync ON file_instances(asset_id, sync_status);
             CREATE INDEX IF NOT EXISTS idx_file_instances_asset_storage_authority ON file_instances(asset_id, storage_kind, authority_role);
+            CREATE INDEX IF NOT EXISTS idx_file_instances_role_path ON file_instances(file_role, path);
             CREATE INDEX IF NOT EXISTS idx_assets_sort_time ON assets(COALESCE(capture_time, created_at) DESC);
 
             CREATE TABLE IF NOT EXISTS versions (

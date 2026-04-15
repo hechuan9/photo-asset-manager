@@ -66,13 +66,14 @@ struct PhotoScanner: @unchecked Sendable {
                     }
                     let values = try url.resourceValues(forKeys: [.fileSizeKey])
                     let size = Int64(values.fileSize ?? 0)
-                    let alreadyIndexed = try await MainActor.run {
-                        try database.hasUnchangedFileInstance(path: url.path, sizeBytes: size)
+                    let unchangedFileInstanceID = try await MainActor.run {
+                        try database.unchangedFileInstanceID(path: url.path, sizeBytes: size)
                     }
-                    if alreadyIndexed {
+                    if let unchangedFileInstanceID {
                         let rating = ImageMetadata.read(url: url).rating
                         try await MainActor.run {
                             try database.applyScannedRatingIfEmpty(path: url.path, rating: rating)
+                            try database.upsertBrowseFolderMembership(filePath: url.path, fileInstanceID: unchangedFileInstanceID, storageKind: storageKind)
                         }
                         report.skippedExistingFiles += 1
                         report.scannedFiles += 1
