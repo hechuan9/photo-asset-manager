@@ -270,6 +270,27 @@ final class SQLiteDatabase {
         return try browseNode(kind: .folder, canonicalKey: normalizedPath)
     }
 
+    func browseFolders() throws -> [BrowseNode] {
+        try prepare(
+            """
+            SELECT id, kind, canonical_key, display_name, display_path, storage_kind
+            FROM browse_nodes
+            WHERE kind = ?
+            ORDER BY display_path
+            """,
+            [.text(BrowseNodeKind.folder.rawValue)]
+        ) { statement in
+            BrowseNode(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                kind: BrowseNodeKind(rawValue: statement.text(1)) ?? .folder,
+                canonicalKey: statement.text(2),
+                displayName: statement.text(3),
+                displayPath: statement.text(4),
+                storageKind: StorageKind(rawValue: statement.text(5)) ?? .local
+            )
+        }
+    }
+
     func browseNodeIDs(selection: BrowseSelection) throws -> [UUID] {
         switch selection.scope {
         case BrowseScope.direct:

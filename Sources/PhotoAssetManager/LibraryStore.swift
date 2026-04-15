@@ -14,6 +14,7 @@ final class LibraryStore: ObservableObject {
     @Published var nasRoot: URL?
     @Published var interruptedScanPath: String?
     @Published var sourceDirectories: [SourceDirectory] = []
+    @Published var indexedBrowseFolders: [BrowseNode] = []
     @Published var derivativeStorageURL: URL?
     @Published var migrationReport: String?
     @Published var blockingTask: BlockingTaskReport?
@@ -35,6 +36,7 @@ final class LibraryStore: ObservableObject {
             interruptedScanPath = try database.latestInterruptedScanPath()
             derivativeStorageURL = try database.derivativeStoragePath().map { URL(fileURLWithPath: $0, isDirectory: true) }
             sourceDirectories = try database.sourceDirectories()
+            indexedBrowseFolders = try database.browseFolders()
             refresh()
             startAvailabilityRefreshInBackground()
         } catch {
@@ -78,6 +80,7 @@ final class LibraryStore: ObservableObject {
                 }
             }
             sourceDirectories = try database.sourceDirectories()
+            indexedBrowseFolders = try database.browseFolders()
             if scanImmediately {
                 scanSources(sourceDirectories.filter { source in
                     urls.contains { $0.path == source.path }
@@ -106,6 +109,7 @@ final class LibraryStore: ObservableObject {
             try? database.clearInterruptedBatches(sourcePath: url.path)
             interruptedScanPath = try? database.latestInterruptedScanPath()
             sourceDirectories = (try? database.sourceDirectories()) ?? sourceDirectories
+            indexedBrowseFolders = (try? database.browseFolders()) ?? indexedBrowseFolders
             refresh()
         }
     }
@@ -124,6 +128,7 @@ final class LibraryStore: ObservableObject {
         do {
             try database.removeSourceDirectory(id: source.id)
             sourceDirectories = try database.sourceDirectories()
+            indexedBrowseFolders = try database.browseFolders()
         } catch {
             lastError = error.fullTrace
         }
@@ -134,6 +139,7 @@ final class LibraryStore: ObservableObject {
         do {
             try database.moveSourceDirectory(id: source.id, parentID: parent?.id)
             sourceDirectories = try database.sourceDirectories()
+            indexedBrowseFolders = try database.browseFolders()
         } catch {
             lastError = error.fullTrace
         }
@@ -179,6 +185,7 @@ final class LibraryStore: ObservableObject {
             assets = Array(page.prefix(assetPageSize))
             hasMoreAssets = page.count > assetPageSize
             sourceDirectories = try database.sourceDirectories()
+            indexedBrowseFolders = try database.browseFolders()
             if selectedAssetID == nil || !assets.contains(where: { $0.id == selectedAssetID }) {
                 selectedAssetID = assets.first?.id
             }

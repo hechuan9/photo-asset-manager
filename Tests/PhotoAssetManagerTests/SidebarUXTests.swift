@@ -85,17 +85,21 @@ struct SidebarUXTests {
         #expect(content.contains("Text(displayName)"))
     }
 
-    @Test func folderTreeExpandsRealFileSystemSubdirectoriesWithoutPureBlackSidebar() throws {
+    @Test func folderTreeExpandsIndexedBrowseGraphSubdirectoriesWithoutPureBlackSidebar() throws {
         let content = try contentViewSource()
         let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
+        let store = try libraryStoreSource()
 
         #expect(content.contains("@State private var expandedFolderNodeIDs: Set<String>"))
         #expect(content.contains("expandedFolderNodeIDs.contains(node.id)"))
         #expect(models.contains("var id: String"))
         #expect(models.contains("var source: SourceDirectory?"))
-        #expect(models.contains("contentsOfDirectory"))
-        #expect(models.contains("fileSystemChildNodes"))
-        #expect(models.contains("hasFileSystemSubdirectories"))
+        #expect(store.contains("@Published var indexedBrowseFolders: [BrowseNode] = []"))
+        #expect(store.contains("indexedBrowseFolders = try database.browseFolders()"))
+        #expect(models.contains("indexedBrowseFolders:"))
+        #expect(!models.contains("contentsOfDirectory"))
+        #expect(!models.contains("fileSystemChildNodes"))
+        #expect(!models.contains("hasFileSystemSubdirectories"))
         #expect(content.contains("AppPalette.sidebarBackground"))
         #expect(content.contains("AppPalette.folderText"))
         #expect(!content.contains("Color.black"))
@@ -107,6 +111,7 @@ struct SidebarUXTests {
         let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
         let store = try libraryStoreSource()
         let app = try appSource()
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
 
         #expect(models.contains("enum BrowseNodeKind"))
         #expect(models.contains("case folder"))
@@ -115,9 +120,11 @@ struct SidebarUXTests {
         #expect(models.contains("case recursive"))
         #expect(models.contains("struct BrowseSelection"))
         #expect(models.contains("var browseSelection: BrowseSelection?"))
+        #expect(models.contains("struct IndexedFolderTree"))
         #expect(store.contains("func selectFolder(path: String)"))
         #expect(store.contains("func clearBrowseSelection()"))
         #expect(store.contains("func setBrowseScope(_ scope: BrowseScope)"))
+        #expect(database.contains("func browseFolders() throws -> [BrowseNode]"))
         #expect(content.contains("isSelected: library.filter.browseSelection?.path == node.path"))
         #expect(content.contains("select: {"))
         #expect(app.contains("Commands"))

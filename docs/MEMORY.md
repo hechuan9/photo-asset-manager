@@ -24,11 +24,11 @@
 - 合并前验证：运行 `swift test`、`swift build`、`scripts/pre_merge_gate.sh`、`./scripts/package_app.sh`，并确认 app 路径是 `.build/app/PhotoAssetManager.app`。
 
 ## 文件夹树展开
-- 适用范围：侧边栏文件夹树、展开/收缩、来源目录分组。
-- 问题模式：树只递归已登记的 `SourceDirectory`，用户无法继续展开真实磁盘子目录。
-- 根因：把扫描来源配置当成完整文件系统树，缺少对已展开节点的只读目录枚举。
-- 预防动作：文件夹树节点必须支持数据库来源目录和只读文件系统目录两类节点；展开真实目录只能枚举子目录，不能写数据库或移动照片文件。
-- 合并前验证：运行覆盖 `contentsOfDirectory`、字符串节点 ID、非纯黑 sidebar 颜色的 sidebar 测试，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。
+- 适用范围：侧边栏文件夹树、展开/收缩、来源目录分组、文件夹浏览。
+- 问题模式：侧边栏实时枚举 NAS/大目录导致卡顿，或选中未索引目录时创建空 browse 节点导致没有照片。
+- 根因：把实时文件系统目录树和已索引浏览图混成同一个浏览真源。
+- 预防动作：文件夹浏览树必须来自数据库里的 `indexedBrowseFolders` / `browse_nodes`；展开只投影已索引 browse graph，不在 SwiftUI render 路径调用 `contentsOfDirectory`。
+- 合并前验证：运行覆盖 `indexedBrowseFolders`、禁止 `contentsOfDirectory`、字符串节点 ID、非纯黑 sidebar 颜色的 sidebar 测试，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。
 
 ## 浏览图
 - 适用范围：文件夹浏览、未来相册/标签/日期等访问入口、资产查询筛选。

@@ -210,7 +210,11 @@ struct SidebarView: View {
                     Text("还没有文件夹")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(SourceDirectoryTreeBuilder.build(library.sourceDirectories, expandedNodeIDs: expandedFolderNodeIDs)) { node in
+                    ForEach(SourceDirectoryTreeBuilder.build(
+                        library.sourceDirectories,
+                        indexedBrowseFolders: library.indexedBrowseFolders,
+                        expandedNodeIDs: expandedFolderNodeIDs
+                    )) { node in
                         SourceDirectoryNodeRow(
                             node: node,
                             interruptedScanPath: library.interruptedScanPath,
