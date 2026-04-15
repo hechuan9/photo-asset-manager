@@ -50,15 +50,26 @@ struct SidebarUXTests {
         #expect(source.contains("@State private var expandedSourceFolderIDs"))
         #expect(source.contains("SourceDirectoryTreeBuilder.build"))
         #expect(source.contains("SourceDirectoryNodeRow("))
-        #expect(source.contains("node.depth > 0"))
-        #expect(source.contains("Button(\"展开\")"))
-        #expect(source.contains("Button(\"收缩\")"))
+        #expect(source.contains("Image(systemName: isExpanded ? \"chevron.down\" : \"chevron.right\")"))
+        #expect(source.contains(".onTapGesture"))
         #expect(source.contains("Button(\"移动到...\")"))
         #expect(source.contains("MoveSourceDirectorySheet("))
         #expect(store.contains("func moveSourceDirectory"))
         #expect(database.contains("parent_source_directory_id"))
         #expect(database.contains("func moveSourceDirectory"))
         #expect(!database.contains("UPDATE file_instances SET path"))
+    }
+
+    @Test func folderTreeUsesLightroomStyleClickableDisclosureRows() throws {
+        let source = try contentViewSource()
+
+        #expect(source.contains("Image(systemName: isExpanded ? \"chevron.down\" : \"chevron.right\")"))
+        #expect(source.contains(".contentShape(Rectangle())"))
+        #expect(source.contains(".onTapGesture"))
+        #expect(source.contains("node.hasChildren"))
+        #expect(!source.contains("Button(\"展开\")"))
+        #expect(!source.contains("Button(\"收缩\")"))
+        #expect(!source.contains("node.depth > 0 && node.hasChildren"))
     }
 
     private func contentViewSource() throws -> String {

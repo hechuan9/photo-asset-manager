@@ -412,30 +412,25 @@ struct SourceDirectoryNodeRow: View {
         HStack(alignment: .top, spacing: 6) {
             Spacer()
                 .frame(width: CGFloat(node.depth) * 14)
-            if node.depth > 0 && node.hasChildren {
-                if isExpanded {
-                    Button("收缩") {
-                        toggleExpansion()
-                    }
-                    .buttonStyle(.plain)
-                    .labelStyle(.iconOnly)
-                    .help("收缩")
-                } else {
-                    Button("展开") {
-                        toggleExpansion()
-                    }
-                    .buttonStyle(.plain)
-                    .labelStyle(.iconOnly)
-                    .help("展开")
-                }
+            if node.hasChildren {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 12, height: 18)
             } else {
                 Spacer()
-                    .frame(width: node.depth > 0 ? 16 : 0)
+                    .frame(width: 12)
             }
             SourceDirectoryRow(
                 source: node.source,
                 interruptedScanPath: interruptedScanPath
             )
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if node.hasChildren {
+                toggleExpansion()
+            }
         }
         .contextMenu {
             Button("刷新") {
