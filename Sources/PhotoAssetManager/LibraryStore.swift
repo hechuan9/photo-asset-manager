@@ -15,6 +15,7 @@ final class LibraryStore: ObservableObject {
     @Published var interruptedScanPath: String?
     @Published var sourceDirectories: [SourceDirectory] = []
     @Published var derivativeStorageURL: URL?
+    @Published var migrationReport: String?
 
     private let database: SQLiteDatabase
     private let scanner: PhotoScanner
@@ -133,14 +134,14 @@ final class LibraryStore: ObservableObject {
         }
     }
 
-    func chooseDerivativeStorageLocation() {
+    func chooseDerivativeMigrationLocation() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.message = "选择缩略图保存位置"
+        panel.message = "选择缩略图迁移目标位置"
         if panel.runModal() == .OK, let url = panel.url {
-            setDerivativeStorageURL(url.appendingPathComponent("PhotoAssetManagerDerivatives", isDirectory: true))
+            migrateDerivativeStorage(to: url.appendingPathComponent("PhotoAssetManagerDerivatives", isDirectory: true))
         }
     }
 
@@ -284,6 +285,42 @@ final class LibraryStore: ObservableObject {
             }
             try database.setDerivativeStoragePath(url?.path)
             derivativeStorageURL = url
+        } catch {
+            lastError = error.fullTrace
+        }
+    }
+
+    private func migrateDerivativeStorage(to destinationRoot: URL) {
+        do {
+            try FileManager.default.createDirectory(at: destinationRoot.appendingPathComponent("thumbnails", isDirectory: true), withIntermediateDirectories: true)
+            let thumbnails = try database.thumbnailFileInstances()
+            var copied = 0
+            var skippedMissing = 0
+            for thumbnail in thumbnails {
+                let source = URL(fileURLWithPath: thumbnail.path)
+                guard FileManager.default.fileExists(atPath: source.path) else {
+                    skippedMissing += 1
+                    continue
+                }
+                let destination = destinationRoot
+                    .appendingPathComponent("thumbnails", isDirectory: true)
+                    .appendingPathComponent(source.lastPathComponent)
+                if !FileManager.default.fileExists(atPath: destination.path) {
+                    try FileManager.default.copyItem(at: source, to: destination)
+                }
+                let sourceHash = try FileHasher.sha256(url: source)
+                let destinationHash = try FileHasher.sha256(url: destination)
+                guard sourceHash == destinationHash else {
+                    throw FileOperationError.hashMismatch(source: sourceHash, destination: destinationHash)
+                }
+                let size = try Int64(destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+                try database.updateFileInstanceLocation(id: thumbnail.id, path: destination.path, hash: destinationHash, sizeBytes: size)
+                copied += 1
+            }
+            try database.setDerivativeStoragePath(destinationRoot.path)
+            derivativeStorageURL = destinationRoot
+            migrationReport = "缩略图迁移完成：\(copied) 个已迁移，\(skippedMissing) 个源文件缺失。旧文件未删除。"
+            refresh()
         } catch {
             lastError = error.fullTrace
         }

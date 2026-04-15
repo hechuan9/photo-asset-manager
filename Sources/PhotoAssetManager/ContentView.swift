@@ -95,14 +95,19 @@ struct SidebarView: View {
                 }
             }
 
-            Section("缩略图位置") {
+            Section("缩略图存储") {
                 Text(library.derivativeStorageURL?.path ?? "未设置，不生成新缩略图")
                     .lineLimit(2)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
+                if let migrationReport = library.migrationReport {
+                    Text(migrationReport)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 HStack {
-                    Button("修改") {
-                        library.chooseDerivativeStorageLocation()
+                    Button("迁移到...") {
+                        library.chooseDerivativeMigrationLocation()
                     }
                     .disabled(library.isScanning)
                     if library.derivativeStorageURL != nil {

@@ -392,6 +392,50 @@ final class SQLiteDatabase {
         )
     }
 
+    func thumbnailFileInstances() throws -> [FileInstance] {
+        let sql = """
+        SELECT id, asset_id, path, device_id, storage_kind, file_role, authority_role,
+               sync_status, size_bytes, content_hash, last_seen_at, availability
+        FROM file_instances
+        WHERE file_role = 'thumbnail'
+        ORDER BY path
+        """
+        return try prepare(sql, []) { statement in
+            FileInstance(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                assetID: UUID(uuidString: statement.text(1)) ?? UUID(),
+                path: statement.text(2),
+                deviceID: statement.text(3),
+                storageKind: StorageKind(rawValue: statement.text(4)) ?? .local,
+                fileRole: FileRole(rawValue: statement.text(5)) ?? .thumbnail,
+                authorityRole: AuthorityRole(rawValue: statement.text(6)) ?? .cache,
+                syncStatus: SyncStatus(rawValue: statement.text(7)) ?? .cacheOnly,
+                sizeBytes: statement.int64(8),
+                contentHash: statement.text(9),
+                lastSeenAt: DateCoding.decode(statement.text(10)) ?? Date(),
+                availability: Availability(rawValue: statement.text(11)) ?? .missing
+            )
+        }
+    }
+
+    func updateFileInstanceLocation(id: UUID, path: String, hash: String, sizeBytes: Int64) throws {
+        try execute(
+            """
+            UPDATE file_instances
+            SET path = ?, content_hash = ?, size_bytes = ?, last_seen_at = ?, availability = ?
+            WHERE id = ?
+            """,
+            [
+                .text(path),
+                .text(hash),
+                .int(sizeBytes),
+                .text(DateCoding.encode(Date())),
+                .text(Availability.online.rawValue),
+                .text(id.uuidString)
+            ]
+        )
+    }
+
     func updateAssetMetadata(asset: Asset) throws {
         try execute(
             """
