@@ -270,6 +270,28 @@ final class SQLiteDatabase {
         return try browseNode(kind: .folder, canonicalKey: normalizedPath)
     }
 
+    func browseFolder(path: String) throws -> BrowseNode? {
+        let normalizedPath = Self.normalizedDirectoryPath(path)
+        return try prepare(
+            """
+            SELECT id, kind, canonical_key, display_name, display_path, storage_kind
+            FROM browse_nodes
+            WHERE kind = ? AND canonical_key = ?
+            LIMIT 1
+            """,
+            [.text(BrowseNodeKind.folder.rawValue), .text(normalizedPath)]
+        ) { statement in
+            BrowseNode(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                kind: BrowseNodeKind(rawValue: statement.text(1)) ?? .folder,
+                canonicalKey: statement.text(2),
+                displayName: statement.text(3),
+                displayPath: statement.text(4),
+                storageKind: StorageKind(rawValue: statement.text(5)) ?? .local
+            )
+        }.first
+    }
+
     func browseFolders() throws -> [BrowseNode] {
         try prepare(
             """
@@ -950,8 +972,9 @@ final class SQLiteDatabase {
                 CASE WHEN source_path LIKE '/Volumes/%' THEN 'nas' ELSE 'local' END,
                 1,
                 imported_at,
-                CASE WHEN status IN ('finished', 'finished_with_errors', 'resumed') THEN imported_at ELSE NULL END
+                imported_at
             FROM import_batches
+            WHERE status IN ('finished', 'finished_with_errors', 'resumed')
             """
         )
         try backfillBrowseGraphFromFileInstances()

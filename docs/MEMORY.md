@@ -34,5 +34,12 @@
 - 适用范围：文件夹浏览、未来相册/标签/日期等访问入口、资产查询筛选。
 - 问题模式：把文件夹选择实现成路径字符串前缀筛选，导致直属/递归语义混乱，也难以扩展到非文件夹访问方式。
 - 根因：没有把“文件实例的真实位置”和“用户访问资产的浏览入口”分成两个模型。
-- 预防动作：新增访问入口必须优先接入 `browse_nodes`、`browse_edges`、`browse_file_instances`；文件夹浏览使用 `BrowseSelection` 和 `BrowseScope`，不要绕过浏览图直接拼路径筛选。
+- 预防动作：新增访问入口必须优先接入 `browse_nodes`、`browse_edges`、`browse_file_instances`；文件夹浏览使用 `BrowseSelection` 和 `BrowseScope`，不要绕过浏览图直接拼路径筛选；选择文件夹只能读取已有 browse node，不能为了选择而写入空节点。
 - 合并前验证：运行覆盖 `browse_nodes`、`browse_edges`、`browse_file_instances`、`WITH RECURSIVE selected_browse_nodes` 和菜单范围切换的测试，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。
+
+## 扫描来源恢复
+- 适用范围：启动迁移、import batch 恢复、来源目录清单。
+- 问题模式：旧的 interrupted 根目录扫描把过宽来源（例如 `/Volumes/photo`）重新加入 `source_directories`，绕过用户后来收窄到子目录的意图，并把 `#recycle` 重新暴露到浏览树。
+- 根因：迁移从所有 `import_batches` 回填来源目录，没有按完成状态过滤。
+- 预防动作：只允许 `finished`、`finished_with_errors`、`resumed` 批次恢复来源目录；扫描跳过目录必须按 path component 识别 `#recycle`、`.trashes`、`.fseventsd`、`.spotlight-v100`。
+- 合并前验证：运行覆盖 interrupted batch 不恢复 source、recycle path component 跳过、数据库无 `/Volumes/photo/#recycle%` 记录的检查，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。

@@ -122,6 +122,8 @@ struct SidebarUXTests {
         #expect(models.contains("var browseSelection: BrowseSelection?"))
         #expect(models.contains("struct IndexedFolderTree"))
         #expect(store.contains("func selectFolder(path: String)"))
+        #expect(store.contains("try database.browseFolder(path: normalizedPath)"))
+        #expect(!functionBody(named: "selectFolder", in: store).contains("upsertBrowseFolderNode"))
         #expect(store.contains("func clearBrowseSelection()"))
         #expect(store.contains("func setBrowseScope(_ scope: BrowseScope)"))
         #expect(database.contains("func browseFolders() throws -> [BrowseNode]"))
@@ -167,5 +169,26 @@ struct SidebarUXTests {
             .deletingLastPathComponent()
         let file = repositoryRoot.appendingPathComponent(path)
         return try String(contentsOf: file, encoding: .utf8)
+    }
+
+    private func functionBody(named name: String, in source: String) -> String {
+        guard let range = source.range(of: "func \(name)") else { return "" }
+        let suffix = source[range.lowerBound...]
+        guard let openBrace = suffix.firstIndex(of: "{") else { return "" }
+
+        var depth = 0
+        var body = ""
+        for character in suffix[openBrace...] {
+            if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+            }
+            body.append(character)
+            if depth == 0 {
+                return body
+            }
+        }
+        return body
     }
 }

@@ -60,6 +60,22 @@ struct StartupPerformanceTests {
         #expect(database.contains("BrowseScope.recursive"))
     }
 
+    @Test func databaseMigrationDoesNotRestoreInterruptedScanRootsAsSources() throws {
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+
+        #expect(database.contains("WHERE status IN ('finished', 'finished_with_errors', 'resumed')"))
+        #expect(!database.contains("CASE WHEN status IN ('finished', 'finished_with_errors', 'resumed') THEN imported_at ELSE NULL END"))
+    }
+
+    @Test func scannerSkipsRecycleDirectoriesByPathComponent() throws {
+        let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")
+
+        #expect(scanner.contains("private let skippedDirectoryNames"))
+        #expect(scanner.contains("url.pathComponents.contains"))
+        #expect(scanner.contains("\"#recycle\""))
+        #expect(functionBody(named: "shouldSkipDirectory", in: scanner).contains("skippedDirectoryNames.contains"))
+    }
+
     private func sourceFile(_ path: String) throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile

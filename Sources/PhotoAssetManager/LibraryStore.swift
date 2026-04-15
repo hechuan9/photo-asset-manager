@@ -277,12 +277,13 @@ final class LibraryStore: ObservableObject {
 
     func selectFolder(path: String) {
         do {
-            let node = try database.upsertBrowseFolderNode(path: path, storageKind: storageKind(for: URL(fileURLWithPath: path, isDirectory: true)))
+            let normalizedPath = Self.normalizedDirectoryPath(path)
+            let node = try database.browseFolder(path: normalizedPath)
             filter.browseSelection = BrowseSelection(
-                nodeID: node.id,
-                kind: node.kind,
-                path: node.displayPath,
-                displayName: node.displayName,
+                nodeID: node?.id ?? UUID(),
+                kind: node?.kind ?? .folder,
+                path: node?.displayPath ?? normalizedPath,
+                displayName: node?.displayName ?? URL(fileURLWithPath: normalizedPath, isDirectory: true).lastPathComponent,
                 scope: filter.browseSelection?.scope ?? .recursive
             )
             refresh()
@@ -502,6 +503,11 @@ final class LibraryStore: ObservableObject {
             .appendingPathComponent("PhotoAssetManager", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
+    }
+
+    private static func normalizedDirectoryPath(_ path: String) -> String {
+        guard path.count > 1 else { return path }
+        return path.hasSuffix("/") ? String(path.dropLast()) : path
     }
 
     nonisolated private static func checkAvailability(_ targets: [AvailabilityCheckTarget]) async -> [FileAvailabilityUpdate] {

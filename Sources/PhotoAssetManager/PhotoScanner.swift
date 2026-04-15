@@ -3,6 +3,8 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
+private let skippedDirectoryNames: Set<String> = ["#recycle", ".spotlight-v100", ".trashes", ".fseventsd"]
+
 struct ScannedFile {
     var url: URL
     var deviceID: String
@@ -153,11 +155,13 @@ struct PhotoScanner: @unchecked Sendable {
     }
 
     private func shouldSkipDirectory(_ url: URL) -> Bool {
+        if url.pathComponents.contains(where: { skippedDirectoryNames.contains($0.lowercased()) }) {
+            return true
+        }
         guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey]), values.isDirectory == true else {
             return false
         }
-        let name = url.lastPathComponent.lowercased()
-        return name == "#recycle" || name == ".spotlight-v100" || name == ".trashes" || name == ".fseventsd"
+        return skippedDirectoryNames.contains(url.lastPathComponent.lowercased())
     }
 
     private func scanFile(_ url: URL, storageKind: StorageKind, derivativeRoot: URL?) throws -> ScannedFile? {
