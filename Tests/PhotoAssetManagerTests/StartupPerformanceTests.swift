@@ -76,6 +76,21 @@ struct StartupPerformanceTests {
         #expect(functionBody(named: "shouldSkipDirectory", in: scanner).contains("skippedDirectoryNames.contains"))
     }
 
+    @Test func startupOrganizesUnscannedSourcesBehindBlockingDialog() throws {
+        let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
+
+        #expect(store.contains("startStartupLibraryOrganizationIfNeeded()"))
+        #expect(store.contains("func sourcesNeedingStartupOrganization()"))
+        #expect(store.contains("func startStartupLibraryOrganizationIfNeeded()"))
+        #expect(store.contains("系统整理中"))
+        #expect(store.contains("正在整理照片索引"))
+        #expect(functionBody(named: "sourcesNeedingStartupOrganization", in: store).contains("lastScannedAt == nil"))
+        #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("blockingTask = BlockingTaskReport"))
+        #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("scanner.scanDirectory"))
+        #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("database.markSourceDirectoryScanned"))
+        #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("indexedBrowseFolders = try database.browseFolders()"))
+    }
+
     private func sourceFile(_ path: String) throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile

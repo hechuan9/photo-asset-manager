@@ -25,6 +25,7 @@ final class LibraryStore: ObservableObject {
     private let scanner: PhotoScanner
     private let fileOperations = FileOperations()
     private var availabilityTask: Task<Void, Never>?
+    private var startupOrganizationTask: Task<Void, Never>?
     private let assetPageSize = 600
 
     init() {
@@ -38,7 +39,7 @@ final class LibraryStore: ObservableObject {
             sourceDirectories = try database.sourceDirectories()
             indexedBrowseFolders = try database.browseFolders()
             refresh()
-            startAvailabilityRefreshInBackground()
+            startStartupLibraryOrganizationIfNeeded()
         } catch {
             fatalError(error.fullTrace)
         }
@@ -46,6 +47,7 @@ final class LibraryStore: ObservableObject {
 
     deinit {
         availabilityTask?.cancel()
+        startupOrganizationTask?.cancel()
     }
 
     var selectedAsset: Asset? {
@@ -267,6 +269,94 @@ final class LibraryStore: ObservableObject {
                 )
             }
             availabilityTask = nil
+        }
+    }
+
+    func sourcesNeedingStartupOrganization() -> [SourceDirectory] {
+        sourceDirectories.filter { $0.lastScannedAt == nil }
+    }
+
+    func startStartupLibraryOrganizationIfNeeded() {
+        guard startupOrganizationTask == nil else { return }
+        let sources = sourcesNeedingStartupOrganization()
+        guard !sources.isEmpty else {
+            startAvailabilityRefreshInBackground()
+            return
+        }
+
+        isScanning = true
+        scanReport = ScanReport()
+        lastError = nil
+        blockingTask = BlockingTaskReport(
+            title: "系统整理中",
+            phase: "正在整理照片索引",
+            totalItems: sources.count,
+            message: "正在整理文件夹索引，完成后会自动显示照片。"
+        )
+
+        startupOrganizationTask = Task { [weak self] in
+            guard let self else { return }
+            var completedSources = 0
+            var scanErrors: [String] = []
+
+            do {
+                for source in sources {
+                    guard !Task.isCancelled else { throw CancellationError() }
+                    let completedBeforeSource = completedSources
+                    let sourceURL = URL(fileURLWithPath: source.path, isDirectory: true)
+                    blockingTask = BlockingTaskReport(
+                        title: "系统整理中",
+                        phase: "正在整理照片索引",
+                        currentPath: source.path,
+                        totalItems: sources.count,
+                        completedItems: completedBeforeSource,
+                        message: "正在整理 \(source.path)"
+                    )
+
+                    let report = await scanner.scanDirectory(
+                        sourceURL,
+                        storageKind: source.storageKind,
+                        derivativeRoot: derivativeStorageURL,
+                        database: database
+                    ) { [weak self] report in
+                        self?.scanReport = report
+                        self?.blockingTask = BlockingTaskReport(
+                            title: "系统整理中",
+                            phase: report.phase.isEmpty ? "正在整理照片索引" : report.phase,
+                            currentPath: report.currentPath.isEmpty ? source.path : report.currentPath,
+                            totalItems: sources.count,
+                            completedItems: completedBeforeSource,
+                            skippedItems: report.skippedFiles,
+                            message: "正在整理 \(source.path)"
+                        )
+                    }
+
+                    scanReport = report
+                    scanErrors.append(contentsOf: report.errors)
+                    try database.markSourceDirectoryScanned(path: source.path)
+                    try database.clearInterruptedBatches(sourcePath: source.path)
+                    completedSources += 1
+                    sourceDirectories = try database.sourceDirectories()
+                    indexedBrowseFolders = try database.browseFolders()
+                    blockingTask?.completedItems = completedSources
+                    await Task.yield()
+                }
+
+                interruptedScanPath = try database.latestInterruptedScanPath()
+                sourceDirectories = try database.sourceDirectories()
+                indexedBrowseFolders = try database.browseFolders()
+                if !scanErrors.isEmpty {
+                    lastError = scanErrors.joined(separator: "\n\n")
+                }
+                refresh()
+                startAvailabilityRefreshInBackground()
+            } catch is CancellationError {
+            } catch {
+                lastError = error.fullTrace
+            }
+            isScanning = false
+            blockingTask = nil
+            startupOrganizationTask = nil
         }
     }
 

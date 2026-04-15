@@ -43,3 +43,10 @@
 - 根因：迁移从所有 `import_batches` 回填来源目录，没有按完成状态过滤。
 - 预防动作：只允许 `finished`、`finished_with_errors`、`resumed` 批次恢复来源目录；扫描跳过目录必须按 path component 识别 `#recycle`、`.trashes`、`.fseventsd`、`.spotlight-v100`。
 - 合并前验证：运行覆盖 interrupted batch 不恢复 source、recycle path component 跳过、数据库无 `/Volumes/photo/#recycle%` 记录的检查，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。
+
+## 启动索引整理
+- 适用范围：应用启动、来源目录扫描、文件夹浏览树、后台可用性校验。
+- 问题模式：数据库里仍有 `last_scanned_at IS NULL` 的来源时，应用直接展示部分文件夹树并启动后台校验，用户一打开就看到缺照片或空目录。
+- 根因：启动路径只做普通刷新，没有先判定库索引是否处于未完成状态。
+- 预防动作：启动时必须先检查未完成来源；存在未扫描来源时进入阻塞式“系统整理中”任务，补齐 browse graph 后再启动后台文件状态校验。
+- 合并前验证：运行覆盖 `startStartupLibraryOrganizationIfNeeded`、`lastScannedAt == nil`、`BlockingTaskReport(title: "系统整理中"`、启动整理后刷新 `indexedBrowseFolders` 的测试，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。
