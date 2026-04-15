@@ -92,7 +92,10 @@ final class SQLiteDatabase {
             a.rating, a.flag, a.tags, a.created_at, a.updated_at,
             COUNT(fi.id) AS file_count,
             MIN(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') THEN fi.path ELSE NULL END) AS primary_path,
-            MAX(CASE WHEN fi.file_role = 'thumbnail' THEN fi.path ELSE NULL END) AS thumbnail_path
+            COALESCE(
+                MAX(CASE WHEN fi.file_role = 'thumbnail' THEN fi.path ELSE NULL END),
+                MIN(CASE WHEN fi.file_role = 'jpeg_original' THEN fi.path ELSE NULL END)
+            ) AS thumbnail_path
         FROM assets a
         LEFT JOIN file_instances fi ON fi.asset_id = a.id
         \(whereClause)
@@ -255,11 +258,29 @@ final class SQLiteDatabase {
         if let thumbnailURL = scanned.thumbnailURL {
             try upsertDerivedFile(assetID: assetID, url: thumbnailURL, role: .thumbnail, hash: scanned.thumbnailHash ?? "", sizeBytes: scanned.thumbnailSize)
         }
-        if let previewURL = scanned.previewURL {
-            try upsertDerivedFile(assetID: assetID, url: previewURL, role: .preview, hash: scanned.previewHash ?? "", sizeBytes: scanned.previewSize)
-        }
 
         return isNewAsset || !exists
+    }
+
+    func derivativeStoragePath() throws -> String? {
+        try prepare("SELECT value FROM app_settings WHERE key = 'derivative_storage_path'", []) { statement in
+            statement.text(0)
+        }.first ?? nil
+    }
+
+    func setDerivativeStoragePath(_ path: String?) throws {
+        if let path, !path.isEmpty {
+            try execute(
+                """
+                INSERT INTO app_settings (key, value)
+                VALUES ('derivative_storage_path', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                [.text(path)]
+            )
+        } else {
+            try execute("DELETE FROM app_settings WHERE key = 'derivative_storage_path'", [])
+        }
     }
 
     func createImportBatch(sourcePath: String, deviceID: String) throws -> UUID {
@@ -576,6 +597,11 @@ final class SQLiteDatabase {
                 status TEXT NOT NULL,
                 detail TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );
             """
         )

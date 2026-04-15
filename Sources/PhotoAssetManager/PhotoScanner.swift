@@ -21,19 +21,12 @@ struct ScannedFile {
     var thumbnailURL: URL?
     var thumbnailHash: String?
     var thumbnailSize: Int64
-    var previewURL: URL?
-    var previewHash: String?
-    var previewSize: Int64
 }
 
 struct PhotoScanner: @unchecked Sendable {
-    private let cacheRoot: URL
+    init() {}
 
-    init(cacheRoot: URL) {
-        self.cacheRoot = cacheRoot
-    }
-
-    func scanDirectory(_ root: URL, storageKind: StorageKind, database: SQLiteDatabase, progress: @escaping @MainActor (ScanReport) -> Void) async -> ScanReport {
+    func scanDirectory(_ root: URL, storageKind: StorageKind, derivativeRoot: URL?, database: SQLiteDatabase, progress: @escaping @MainActor (ScanReport) -> Void) async -> ScanReport {
         var report = ScanReport()
         report.phase = "准备扫描"
         let batchID: UUID
@@ -88,7 +81,7 @@ struct PhotoScanner: @unchecked Sendable {
                     }
                     report.currentPath = url.path
                     await MainActor.run { progress(report) }
-                    guard let scanned = try scanFile(url, storageKind: storageKind) else {
+                    guard let scanned = try scanFile(url, storageKind: storageKind, derivativeRoot: derivativeRoot) else {
                         report.skippedFiles += 1
                         continue
                     }
@@ -167,7 +160,7 @@ struct PhotoScanner: @unchecked Sendable {
         return name == "#recycle" || name == ".spotlight-v100" || name == ".trashes" || name == ".fseventsd"
     }
 
-    private func scanFile(_ url: URL, storageKind: StorageKind) throws -> ScannedFile? {
+    private func scanFile(_ url: URL, storageKind: StorageKind, derivativeRoot: URL?) throws -> ScannedFile? {
         guard SupportedFiles.isPhoto(url) else { return nil }
         let values = try url.resourceValues(forKeys: [.fileSizeKey])
         let size = Int64(values.fileSize ?? 0)
@@ -177,7 +170,7 @@ struct PhotoScanner: @unchecked Sendable {
         let role = SupportedFiles.isRaw(url) ? FileRole.rawOriginal : FileRole.jpegOriginal
         let authority = storageKind == .nas ? AuthorityRole.canonical : AuthorityRole.workingCopy
         let syncStatus = storageKind == .nas ? SyncStatus.synced : SyncStatus.needsArchive
-        let derivatives = try generateDerivatives(source: url, contentHash: hash)
+        let thumbnail = try generateThumbnail(source: url, contentHash: hash, derivativeRoot: derivativeRoot)
 
         return ScannedFile(
             url: url,
@@ -194,37 +187,27 @@ struct PhotoScanner: @unchecked Sendable {
             cameraModel: metadata.cameraModel,
             lensModel: metadata.lensModel,
             rating: metadata.rating,
-            thumbnailURL: derivatives.thumbnail,
-            thumbnailHash: derivatives.thumbnail.flatMap { try? FileHasher.sha256(url: $0) },
-            thumbnailSize: derivatives.thumbnail.flatMap { (try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) } ?? 0,
-            previewURL: derivatives.preview,
-            previewHash: derivatives.preview.flatMap { try? FileHasher.sha256(url: $0) },
-            previewSize: derivatives.preview.flatMap { (try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) } ?? 0
+            thumbnailURL: thumbnail,
+            thumbnailHash: thumbnail.flatMap { try? FileHasher.sha256(url: $0) },
+            thumbnailSize: thumbnail.flatMap { (try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) } ?? 0
         )
     }
 
-    private func generateDerivatives(source: URL, contentHash: String) throws -> (thumbnail: URL?, preview: URL?) {
-        let thumbDir = cacheRoot.appendingPathComponent("thumbnails", isDirectory: true)
-        let previewDir = cacheRoot.appendingPathComponent("previews", isDirectory: true)
+    private func generateThumbnail(source: URL, contentHash: String, derivativeRoot: URL?) throws -> URL? {
+        guard let derivativeRoot else { return nil }
+        let thumbDir = derivativeRoot.appendingPathComponent("thumbnails", isDirectory: true)
         try FileManager.default.createDirectory(at: thumbDir, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: previewDir, withIntermediateDirectories: true)
 
         let thumbnailURL = thumbDir.appendingPathComponent("\(contentHash)-320.jpg")
-        let previewURL = previewDir.appendingPathComponent("\(contentHash)-1600.jpg")
-        if FileManager.default.fileExists(atPath: thumbnailURL.path), FileManager.default.fileExists(atPath: previewURL.path) {
-            return (thumbnailURL, previewURL)
+        if FileManager.default.fileExists(atPath: thumbnailURL.path) {
+            return thumbnailURL
         }
 
         guard let image = ImageRenderer.renderableImage(url: source) else {
-            return (nil, nil)
+            return nil
         }
-        if !FileManager.default.fileExists(atPath: thumbnailURL.path) {
-            try ImageRenderer.writeJPEG(image: image, maxPixel: 320, destination: thumbnailURL)
-        }
-        if !FileManager.default.fileExists(atPath: previewURL.path) {
-            try ImageRenderer.writeJPEG(image: image, maxPixel: 1600, destination: previewURL)
-        }
-        return (thumbnailURL, previewURL)
+        try ImageRenderer.writeJPEG(image: image, maxPixel: 320, destination: thumbnailURL)
+        return thumbnailURL
     }
 }
 
@@ -274,8 +257,15 @@ struct ImageMetadata {
     }
 
     func fingerprint(filename: String, sizeBytes: Int64) -> String {
-        [captureTime.map(DateCoding.encode) ?? "", cameraMake, cameraModel, lensModel, filename, String(sizeBytes)]
+        let baseName = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
+        return [captureTime.map(DateCoding.encode) ?? "", cameraMake, cameraModel, lensModel, normalizedBaseName(baseName)]
             .joined(separator: "|")
+    }
+
+    private func normalizedBaseName(_ name: String) -> String {
+        name
+            .replacingOccurrences(of: #"(?i)\s*\(\d+\)$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)[-_ ]?(edit|edited|export|copy|副本|已编辑)$"#, with: "", options: .regularExpression)
     }
 
     private static func parseEXIFDate(_ value: String) -> Date? {

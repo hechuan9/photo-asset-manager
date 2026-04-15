@@ -14,6 +14,7 @@ final class LibraryStore: ObservableObject {
     @Published var nasRoot: URL?
     @Published var interruptedScanPath: String?
     @Published var sourceDirectories: [SourceDirectory] = []
+    @Published var derivativeStorageURL: URL?
 
     private let database: SQLiteDatabase
     private let scanner: PhotoScanner
@@ -23,9 +24,10 @@ final class LibraryStore: ObservableObject {
         do {
             let support = try Self.applicationSupport()
             database = try SQLiteDatabase(path: support.appendingPathComponent("Library.sqlite"))
-            scanner = PhotoScanner(cacheRoot: support.appendingPathComponent("Cache", isDirectory: true))
+            scanner = PhotoScanner()
             try database.markInterruptedImportBatches()
             interruptedScanPath = try database.latestInterruptedScanPath()
+            derivativeStorageURL = try database.derivativeStoragePath().map { URL(fileURLWithPath: $0, isDirectory: true) }
             try database.markMissingFiles()
             sourceDirectories = try database.sourceDirectories()
             refresh()
@@ -79,7 +81,7 @@ final class LibraryStore: ObservableObject {
         scanReport = ScanReport()
         lastError = nil
         Task {
-            let report = await scanner.scanDirectory(url, storageKind: storageKind, database: database) { [weak self] report in
+            let report = await scanner.scanDirectory(url, storageKind: storageKind, derivativeRoot: derivativeStorageURL, database: database) { [weak self] report in
                 self?.scanReport = report
             }
             scanReport = report
@@ -129,6 +131,21 @@ final class LibraryStore: ObservableObject {
         } catch {
             lastError = error.fullTrace
         }
+    }
+
+    func chooseDerivativeStorageLocation() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "选择缩略图保存位置"
+        if panel.runModal() == .OK, let url = panel.url {
+            setDerivativeStorageURL(url.appendingPathComponent("PhotoAssetManagerDerivatives", isDirectory: true))
+        }
+    }
+
+    func clearDerivativeStorageLocation() {
+        setDerivativeStorageURL(nil)
     }
 
     func resumeInterruptedScan() {
@@ -257,6 +274,18 @@ final class LibraryStore: ObservableObject {
                     try? await Task.sleep(nanoseconds: 200_000_000)
                 }
             }
+        }
+    }
+
+    private func setDerivativeStorageURL(_ url: URL?) {
+        do {
+            if let url {
+                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            }
+            try database.setDerivativeStoragePath(url?.path)
+            derivativeStorageURL = url
+        } catch {
+            lastError = error.fullTrace
         }
     }
 

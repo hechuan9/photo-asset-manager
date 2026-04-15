@@ -95,6 +95,25 @@ struct SidebarView: View {
                 }
             }
 
+            Section("缩略图位置") {
+                Text(library.derivativeStorageURL?.path ?? "未设置，不生成新缩略图")
+                    .lineLimit(2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                HStack {
+                    Button("修改") {
+                        library.chooseDerivativeStorageLocation()
+                    }
+                    .disabled(library.isScanning)
+                    if library.derivativeStorageURL != nil {
+                        Button("清除") {
+                            library.clearDerivativeStorageLocation()
+                        }
+                        .disabled(library.isScanning)
+                    }
+                }
+            }
+
             if let path = library.interruptedScanPath {
                 Section("断点续扫") {
                     Text(path)
