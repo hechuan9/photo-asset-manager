@@ -191,8 +191,9 @@ struct SourceDirectory: Identifiable, Hashable {
 }
 
 struct SourceDirectoryNode: Identifiable, Hashable {
-    var id: UUID { source.id }
-    var source: SourceDirectory
+    var id: String
+    var source: SourceDirectory?
+    var path: String
     var depth: Int
     var displayName: String
     var hasChildren: Bool
@@ -200,10 +201,23 @@ struct SourceDirectoryNode: Identifiable, Hashable {
 
 enum SourceDirectoryTreeBuilder {
     static func build(_ sources: [SourceDirectory], expandedIDs: Set<UUID>) -> [SourceDirectoryNode] {
+        build(sources, expandedNodeIDs: Set(expandedIDs.map { "source:\($0.uuidString)" }))
+    }
+
+    static func build(_ sources: [SourceDirectory], expandedNodeIDs: Set<String>) -> [SourceDirectoryNode] {
         let children = childMap(for: sources)
+        let sourceByPath = sourceMapByPath(for: sources)
         let roots = rootSources(in: sources, children: children)
         return roots.flatMap {
-            flatten(source: $0, parent: nil, depth: 0, children: children, expandedIDs: expandedIDs)
+            flatten(
+                source: $0,
+                parent: nil,
+                displayNameOverride: nil,
+                depth: 0,
+                children: children,
+                sourceByPath: sourceByPath,
+                expandedNodeIDs: expandedNodeIDs
+            )
         }
     }
 
@@ -215,22 +229,91 @@ enum SourceDirectoryTreeBuilder {
     private static func flatten(
         source: SourceDirectory,
         parent: SourceDirectory?,
+        displayNameOverride: String?,
         depth: Int,
         children: [UUID: [SourceDirectory]],
-        expandedIDs: Set<UUID>
+        sourceByPath: [String: SourceDirectory],
+        expandedNodeIDs: Set<String>
     ) -> [SourceDirectoryNode] {
         let childSources = children[source.id] ?? []
+        let sourcePath = normalizedDirectoryPath(source.path)
+        let sourceChildPaths = Set(childSources.map { normalizedDirectoryPath($0.path) })
+        let filesystemChildren = fileSystemChildNodes(
+            parentPath: sourcePath,
+            depth: depth + 1,
+            excludedPaths: sourceChildPaths
+        )
+        let nodeID = sourceNodeID(source.id)
         var nodes = [
             SourceDirectoryNode(
+                id: nodeID,
                 source: source,
+                path: sourcePath,
                 depth: depth,
-                displayName: displayName(for: source, parent: parent),
-                hasChildren: !childSources.isEmpty
+                displayName: displayNameOverride ?? displayName(for: source, parent: parent),
+                hasChildren: !childSources.isEmpty || !filesystemChildren.isEmpty
             )
         ]
-        guard expandedIDs.contains(source.id) else { return nodes }
+        guard expandedNodeIDs.contains(nodeID) else { return nodes }
         nodes.append(contentsOf: childSources.flatMap {
-            flatten(source: $0, parent: source, depth: depth + 1, children: children, expandedIDs: expandedIDs)
+            flatten(
+                source: $0,
+                parent: source,
+                displayNameOverride: nil,
+                depth: depth + 1,
+                children: children,
+                sourceByPath: sourceByPath,
+                expandedNodeIDs: expandedNodeIDs
+            )
+        })
+        nodes.append(contentsOf: filesystemChildren.flatMap {
+            flattenFileSystemDirectory(
+                path: $0.path,
+                depth: $0.depth,
+                sourceByPath: sourceByPath,
+                expandedNodeIDs: expandedNodeIDs
+            )
+        })
+        return nodes
+    }
+
+    private static func flattenFileSystemDirectory(
+        path: String,
+        depth: Int,
+        sourceByPath: [String: SourceDirectory],
+        expandedNodeIDs: Set<String>
+    ) -> [SourceDirectoryNode] {
+        let nodeID = fileSystemNodeID(path)
+        if let source = sourceByPath[path] {
+            return flatten(
+                source: source,
+                parent: nil,
+                displayNameOverride: URL(fileURLWithPath: path).lastPathComponent,
+                depth: depth,
+                children: [:],
+                sourceByPath: sourceByPath,
+                expandedNodeIDs: expandedNodeIDs
+            )
+        }
+
+        var nodes = [
+            SourceDirectoryNode(
+                id: nodeID,
+                source: nil,
+                path: path,
+                depth: depth,
+                displayName: URL(fileURLWithPath: path).lastPathComponent,
+                hasChildren: hasFileSystemSubdirectories(path)
+            )
+        ]
+        guard expandedNodeIDs.contains(nodeID) else { return nodes }
+        nodes.append(contentsOf: fileSystemChildNodes(parentPath: path, depth: depth + 1).flatMap {
+            flattenFileSystemDirectory(
+                path: $0.path,
+                depth: $0.depth,
+                sourceByPath: sourceByPath,
+                expandedNodeIDs: expandedNodeIDs
+            )
         })
         return nodes
     }
@@ -266,7 +349,7 @@ enum SourceDirectoryTreeBuilder {
         let ids = Set(sources.map(\.id))
         var children: [UUID: [SourceDirectory]] = [:]
         for source in sources {
-            guard let parentID = explicitOrPathParentID(for: source, in: sources, validIDs: ids) else { continue }
+            guard let parentID = explicitOrImmediatePathParentID(for: source, in: sources, validIDs: ids) else { continue }
             children[parentID, default: []].append(source)
         }
         for parentID in children.keys {
@@ -275,7 +358,15 @@ enum SourceDirectoryTreeBuilder {
         return children
     }
 
-    private static func explicitOrPathParentID(
+    private static func sourceMapByPath(for sources: [SourceDirectory]) -> [String: SourceDirectory] {
+        var sourceByPath: [String: SourceDirectory] = [:]
+        for source in sources {
+            sourceByPath[normalizedDirectoryPath(source.path)] = source
+        }
+        return sourceByPath
+    }
+
+    private static func explicitOrImmediatePathParentID(
         for source: SourceDirectory,
         in sources: [SourceDirectory],
         validIDs: Set<UUID>
@@ -285,10 +376,71 @@ enum SourceDirectoryTreeBuilder {
         }
         return sources
             .filter { candidate in
-                candidate.id != source.id && source.path.hasPrefix(normalizedDirectoryPath(candidate.path) + "/")
+                candidate.id != source.id && isImmediateChild(source.path, of: candidate.path)
             }
             .max { $0.path.count < $1.path.count }?
             .id
+    }
+
+    private static func fileSystemChildNodes(
+        parentPath: String,
+        depth: Int,
+        excludedPaths: Set<String> = []
+    ) -> [SourceDirectoryNode] {
+        let parentURL = URL(fileURLWithPath: parentPath, isDirectory: true)
+        let childURLs = (try? FileManager.default.contentsOfDirectory(
+            at: parentURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        return childURLs
+            .filter { isDirectory($0) }
+            .map { normalizedDirectoryPath($0.path) }
+            .filter { !excludedPaths.contains($0) }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .map { path in
+                SourceDirectoryNode(
+                    id: fileSystemNodeID(path),
+                    source: nil,
+                    path: path,
+                    depth: depth,
+                    displayName: URL(fileURLWithPath: path).lastPathComponent,
+                    hasChildren: hasFileSystemSubdirectories(path)
+                )
+            }
+    }
+
+    private static func hasFileSystemSubdirectories(_ path: String) -> Bool {
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+        guard let childURLs = try? FileManager.default.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return false
+        }
+        return childURLs.contains { isDirectory($0) }
+    }
+
+    private static func isDirectory(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+    }
+
+    private static func isImmediateChild(_ childPath: String, of parentPath: String) -> Bool {
+        let parent = normalizedDirectoryPath(parentPath)
+        let child = normalizedDirectoryPath(childPath)
+        let prefix = parent == "/" ? "/" : parent + "/"
+        guard child.hasPrefix(prefix) else { return false }
+        return !String(child.dropFirst(prefix.count)).contains("/")
+    }
+
+    private static func sourceNodeID(_ id: UUID) -> String {
+        "source:\(id.uuidString)"
+    }
+
+    private static func fileSystemNodeID(_ path: String) -> String {
+        "folder:\(path)"
     }
 
     private static func normalizedDirectoryPath(_ path: String) -> String {

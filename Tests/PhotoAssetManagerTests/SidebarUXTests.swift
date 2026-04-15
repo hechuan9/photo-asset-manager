@@ -47,7 +47,7 @@ struct SidebarUXTests {
 
         #expect(models.contains("struct SourceDirectoryNode"))
         #expect(models.contains("var parentID: UUID?"))
-        #expect(source.contains("@State private var expandedSourceFolderIDs"))
+        #expect(source.contains("@State private var expandedFolderNodeIDs: Set<String>"))
         #expect(source.contains("SourceDirectoryTreeBuilder.build"))
         #expect(source.contains("SourceDirectoryNodeRow("))
         #expect(source.contains("Image(systemName: isExpanded ? \"chevron.down\" : \"chevron.right\")"))
@@ -77,12 +77,29 @@ struct SidebarUXTests {
         let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
 
         #expect(models.contains("var displayName: String"))
-        #expect(models.contains("displayName: displayName(for: source, parent: parent)"))
-        #expect(models.contains("guard expandedIDs.contains(source.id) else { return nodes }"))
+        #expect(models.contains("displayNameOverride ?? displayName(for: source, parent: parent)"))
+        #expect(models.contains("guard expandedNodeIDs.contains(nodeID) else { return nodes }"))
         #expect(!models.contains("guard depth == 0 || expandedIDs.contains(source.id) else { return nodes }"))
         #expect(models.contains("relativePath.hasPrefix(\"/\")"))
         #expect(content.contains("displayName: node.displayName"))
         #expect(content.contains("Text(displayName)"))
+    }
+
+    @Test func folderTreeExpandsRealFileSystemSubdirectoriesWithoutPureBlackSidebar() throws {
+        let content = try contentViewSource()
+        let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
+
+        #expect(content.contains("@State private var expandedFolderNodeIDs: Set<String>"))
+        #expect(content.contains("expandedFolderNodeIDs.contains(node.id)"))
+        #expect(models.contains("var id: String"))
+        #expect(models.contains("var source: SourceDirectory?"))
+        #expect(models.contains("contentsOfDirectory"))
+        #expect(models.contains("fileSystemChildNodes"))
+        #expect(models.contains("hasFileSystemSubdirectories"))
+        #expect(content.contains("AppPalette.sidebarBackground"))
+        #expect(content.contains("AppPalette.folderText"))
+        #expect(!content.contains("Color.black"))
+        #expect(!content.contains("NSColor.black"))
     }
 
     private func contentViewSource() throws -> String {
