@@ -118,6 +118,51 @@ enum CollectionKind: String, Codable {
     case smartAlbum = "smart_album"
 }
 
+enum BrowseNodeKind: String, CaseIterable, Codable, Identifiable {
+    case folder
+
+    var id: String { rawValue }
+}
+
+enum BrowseEdgeKind: String, Codable {
+    case filesystemContainment = "filesystem_containment"
+}
+
+enum BrowseMembershipKind: String, Codable {
+    case directFileInstance = "direct_file_instance"
+}
+
+enum BrowseScope: String, CaseIterable, Codable, Identifiable {
+    case direct
+    case recursive
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .direct: "仅当前文件夹"
+        case .recursive: "包含子文件夹"
+        }
+    }
+}
+
+struct BrowseNode: Identifiable, Hashable {
+    let id: UUID
+    var kind: BrowseNodeKind
+    var canonicalKey: String
+    var displayName: String
+    var displayPath: String
+    var storageKind: StorageKind
+}
+
+struct BrowseSelection: Equatable, Hashable {
+    var nodeID: UUID
+    var kind: BrowseNodeKind
+    var path: String
+    var displayName: String
+    var scope: BrowseScope
+}
+
 struct Asset: Identifiable, Hashable {
     let id: UUID
     var captureTime: Date?
@@ -451,6 +496,7 @@ enum SourceDirectoryTreeBuilder {
 
 struct LibraryFilter: Equatable {
     var status: AssetStatus?
+    var browseSelection: BrowseSelection?
     var searchText = ""
     var camera = ""
     var fileExtension = ""

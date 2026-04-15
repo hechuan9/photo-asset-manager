@@ -42,6 +42,24 @@ struct StartupPerformanceTests {
         #expect(content.contains("Button(\"加载更多\")"))
     }
 
+    @Test func browseGraphPersistsFolderMembershipAndFiltersAssetQueries() throws {
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+
+        #expect(database.contains("CREATE TABLE IF NOT EXISTS browse_nodes"))
+        #expect(database.contains("CREATE TABLE IF NOT EXISTS browse_edges"))
+        #expect(database.contains("CREATE TABLE IF NOT EXISTS browse_file_instances"))
+        #expect(database.contains("UNIQUE(kind, canonical_key)"))
+        #expect(database.contains("WITH RECURSIVE selected_browse_nodes"))
+        #expect(database.contains("browse_file_instances bfi"))
+        #expect(database.contains("func upsertBrowseFolderMembership(filePath: String, fileInstanceID: UUID, storageKind: StorageKind)"))
+        #expect(database.contains("func backfillBrowseGraphFromFileInstances()"))
+        #expect(database.contains("try backfillBrowseGraphFromFileInstances()"))
+        #expect(database.contains("func browseNodeIDs(selection: BrowseSelection) throws -> [UUID]"))
+        #expect(database.contains("upsertBrowseFolderMembership(filePath: scanned.url.path, fileInstanceID: fileID, storageKind: scanned.storageKind)"))
+        #expect(database.contains("BrowseScope.direct"))
+        #expect(database.contains("BrowseScope.recursive"))
+    }
+
     private func sourceFile(_ path: String) throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile

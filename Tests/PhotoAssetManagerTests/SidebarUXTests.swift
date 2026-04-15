@@ -102,6 +102,30 @@ struct SidebarUXTests {
         #expect(!content.contains("NSColor.black"))
     }
 
+    @Test func folderBrowsingUsesReusableBrowseGraphSelection() throws {
+        let content = try contentViewSource()
+        let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
+        let store = try libraryStoreSource()
+        let app = try appSource()
+
+        #expect(models.contains("enum BrowseNodeKind"))
+        #expect(models.contains("case folder"))
+        #expect(models.contains("enum BrowseScope"))
+        #expect(models.contains("case direct"))
+        #expect(models.contains("case recursive"))
+        #expect(models.contains("struct BrowseSelection"))
+        #expect(models.contains("var browseSelection: BrowseSelection?"))
+        #expect(store.contains("func selectFolder(path: String)"))
+        #expect(store.contains("func clearBrowseSelection()"))
+        #expect(store.contains("func setBrowseScope(_ scope: BrowseScope)"))
+        #expect(content.contains("isSelected: library.filter.browseSelection?.path == node.path"))
+        #expect(content.contains("select: {"))
+        #expect(app.contains("Commands"))
+        #expect(app.contains("FolderScopeCommands"))
+        #expect(app.contains("仅当前文件夹"))
+        #expect(app.contains("包含子文件夹"))
+    }
+
     private func contentViewSource() throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile

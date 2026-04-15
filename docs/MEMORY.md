@@ -29,3 +29,10 @@
 - 根因：把扫描来源配置当成完整文件系统树，缺少对已展开节点的只读目录枚举。
 - 预防动作：文件夹树节点必须支持数据库来源目录和只读文件系统目录两类节点；展开真实目录只能枚举子目录，不能写数据库或移动照片文件。
 - 合并前验证：运行覆盖 `contentsOfDirectory`、字符串节点 ID、非纯黑 sidebar 颜色的 sidebar 测试，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。
+
+## 浏览图
+- 适用范围：文件夹浏览、未来相册/标签/日期等访问入口、资产查询筛选。
+- 问题模式：把文件夹选择实现成路径字符串前缀筛选，导致直属/递归语义混乱，也难以扩展到非文件夹访问方式。
+- 根因：没有把“文件实例的真实位置”和“用户访问资产的浏览入口”分成两个模型。
+- 预防动作：新增访问入口必须优先接入 `browse_nodes`、`browse_edges`、`browse_file_instances`；文件夹浏览使用 `BrowseSelection` 和 `BrowseScope`，不要绕过浏览图直接拼路径筛选。
+- 合并前验证：运行覆盖 `browse_nodes`、`browse_edges`、`browse_file_instances`、`WITH RECURSIVE selected_browse_nodes` 和菜单范围切换的测试，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。

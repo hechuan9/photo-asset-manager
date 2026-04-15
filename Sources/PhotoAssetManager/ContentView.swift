@@ -192,6 +192,7 @@ struct SidebarView: View {
         )) {
             Button {
                 library.setStatusFilter(nil)
+                library.clearBrowseSelection()
             } label: {
                 Label("全部资产", systemImage: "photo.on.rectangle")
             }
@@ -214,12 +215,16 @@ struct SidebarView: View {
                             node: node,
                             interruptedScanPath: library.interruptedScanPath,
                             isExpanded: expandedFolderNodeIDs.contains(node.id),
+                            isSelected: library.filter.browseSelection?.path == node.path,
                             toggleExpansion: {
                                 if expandedFolderNodeIDs.contains(node.id) {
                                     expandedFolderNodeIDs.remove(node.id)
                                 } else {
                                     expandedFolderNodeIDs.insert(node.id)
                                 }
+                            },
+                            select: {
+                                library.selectFolder(path: node.path)
                             },
                             move: {
                                 sourcePendingMove = node.source
@@ -427,7 +432,9 @@ struct SourceDirectoryNodeRow: View {
     var node: SourceDirectoryNode
     var interruptedScanPath: String?
     var isExpanded: Bool
+    var isSelected: Bool
     var toggleExpansion: () -> Void
+    var select: () -> Void
     var move: () -> Void
 
     var body: some View {
@@ -439,6 +446,10 @@ struct SourceDirectoryNodeRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(width: 12, height: 18)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        toggleExpansion()
+                    }
             } else {
                 Spacer()
                     .frame(width: 12)
@@ -451,10 +462,10 @@ struct SourceDirectoryNodeRow: View {
             )
         }
         .contentShape(Rectangle())
+        .background(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
         .onTapGesture {
-            if node.hasChildren {
-                toggleExpansion()
-            }
+            select()
         }
         .contextMenu {
             if let source = node.source {

@@ -81,6 +81,26 @@ final class SQLiteDatabase {
             conditions.append("fi.path LIKE ?")
             values.append(.text("\(filter.directory)%"))
         }
+        if let browseSelection = filter.browseSelection {
+            let nodeIDs = try browseNodeIDs(selection: browseSelection)
+            if nodeIDs.isEmpty {
+                conditions.append("0 = 1")
+            } else {
+                let placeholders = Array(repeating: "?", count: nodeIDs.count).joined(separator: ", ")
+                conditions.append(
+                    """
+                    a.id IN (
+                        SELECT DISTINCT bfi_file.asset_id
+                        FROM file_instances bfi_file
+                        JOIN browse_file_instances bfi ON bfi.file_instance_id = bfi_file.id
+                        WHERE bfi.node_id IN (\(placeholders))
+                          AND bfi.membership_kind = 'direct_file_instance'
+                    )
+                    """
+                )
+                values.append(contentsOf: nodeIDs.map { .text($0.uuidString) })
+            }
+        }
 
         let statusCondition = statusSQL(filter.status)
         if !statusCondition.isEmpty {
@@ -225,6 +245,99 @@ final class SQLiteDatabase {
         }
     }
 
+    func upsertBrowseFolderNode(path: String, storageKind: StorageKind) throws -> BrowseNode {
+        let normalizedPath = Self.normalizedDirectoryPath(path)
+        let id = UUID()
+        let displayName = normalizedPath == "/" ? "/" : URL(fileURLWithPath: normalizedPath, isDirectory: true).lastPathComponent
+        try execute(
+            """
+            INSERT INTO browse_nodes (id, kind, canonical_key, display_name, display_path, storage_kind)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(kind, canonical_key) DO UPDATE SET
+                display_name = excluded.display_name,
+                display_path = excluded.display_path,
+                storage_kind = excluded.storage_kind
+            """,
+            [
+                .text(id.uuidString),
+                .text(BrowseNodeKind.folder.rawValue),
+                .text(normalizedPath),
+                .text(displayName),
+                .text(normalizedPath),
+                .text(storageKind.rawValue)
+            ]
+        )
+        return try browseNode(kind: .folder, canonicalKey: normalizedPath)
+    }
+
+    func browseNodeIDs(selection: BrowseSelection) throws -> [UUID] {
+        switch selection.scope {
+        case BrowseScope.direct:
+            return [selection.nodeID]
+        case BrowseScope.recursive:
+            return try prepare(
+                """
+                WITH RECURSIVE selected_browse_nodes(id) AS (
+                    SELECT ?
+                    UNION
+                    SELECT be.child_node_id
+                    FROM browse_edges be
+                    JOIN selected_browse_nodes selected ON selected.id = be.parent_node_id
+                    WHERE be.kind = 'filesystem_containment'
+                )
+                SELECT id FROM selected_browse_nodes
+                """,
+                [.text(selection.nodeID.uuidString)]
+            ) { statement in
+                UUID(uuidString: statement.text(0)) ?? selection.nodeID
+            }
+        }
+    }
+
+    func upsertBrowseFolderMembership(filePath: String, fileInstanceID: UUID, storageKind: StorageKind) throws {
+        let folderPath = Self.normalizedDirectoryPath(URL(fileURLWithPath: filePath).deletingLastPathComponent().path)
+        let folders = Self.ancestorDirectoryPaths(to: folderPath)
+        guard !folders.isEmpty else { return }
+
+        var previousNode: BrowseNode?
+        var directNode: BrowseNode?
+        for folder in folders {
+            let node = try upsertBrowseFolderNode(path: folder, storageKind: storageKind)
+            if let previousNode {
+                try execute(
+                    """
+                    INSERT OR IGNORE INTO browse_edges (parent_node_id, child_node_id, kind)
+                    VALUES (?, ?, ?)
+                    """,
+                    [
+                        .text(previousNode.id.uuidString),
+                        .text(node.id.uuidString),
+                        .text(BrowseEdgeKind.filesystemContainment.rawValue)
+                    ]
+                )
+            }
+            previousNode = node
+            directNode = node
+        }
+
+        guard let directNode else { return }
+        try execute(
+            "DELETE FROM browse_file_instances WHERE file_instance_id = ? AND membership_kind = ?",
+            [.text(fileInstanceID.uuidString), .text(BrowseMembershipKind.directFileInstance.rawValue)]
+        )
+        try execute(
+            """
+            INSERT OR IGNORE INTO browse_file_instances (node_id, file_instance_id, membership_kind)
+            VALUES (?, ?, ?)
+            """,
+            [
+                .text(directNode.id.uuidString),
+                .text(fileInstanceID.uuidString),
+                .text(BrowseMembershipKind.directFileInstance.rawValue)
+            ]
+        )
+    }
+
     func fileInstances(assetID: UUID) throws -> [FileInstance] {
         let sql = """
         SELECT id, asset_id, path, device_id, storage_kind, file_role, authority_role,
@@ -327,6 +440,7 @@ final class SQLiteDatabase {
                 .text(Availability.online.rawValue)
             ]
         )
+        try upsertBrowseFolderMembership(filePath: scanned.url.path, fileInstanceID: fileID, storageKind: scanned.storageKind)
 
         if let thumbnailURL = scanned.thumbnailURL {
             try upsertDerivedFile(assetID: assetID, url: thumbnailURL, role: .thumbnail, hash: scanned.thumbnailHash ?? "", sizeBytes: scanned.thumbnailSize)
@@ -768,6 +882,35 @@ final class SQLiteDatabase {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS browse_nodes (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                canonical_key TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                display_path TEXT NOT NULL,
+                storage_kind TEXT NOT NULL,
+                UNIQUE(kind, canonical_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS browse_edges (
+                parent_node_id TEXT NOT NULL REFERENCES browse_nodes(id) ON DELETE CASCADE,
+                child_node_id TEXT NOT NULL REFERENCES browse_nodes(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                PRIMARY KEY(parent_node_id, child_node_id, kind)
+            );
+
+            CREATE TABLE IF NOT EXISTS browse_file_instances (
+                node_id TEXT NOT NULL REFERENCES browse_nodes(id) ON DELETE CASCADE,
+                file_instance_id TEXT NOT NULL REFERENCES file_instances(id) ON DELETE CASCADE,
+                membership_kind TEXT NOT NULL,
+                PRIMARY KEY(node_id, file_instance_id, membership_kind)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_browse_edges_parent ON browse_edges(parent_node_id, kind);
+            CREATE INDEX IF NOT EXISTS idx_browse_edges_child ON browse_edges(child_node_id, kind);
+            CREATE INDEX IF NOT EXISTS idx_browse_file_instances_node ON browse_file_instances(node_id, membership_kind);
+            CREATE INDEX IF NOT EXISTS idx_browse_file_instances_file ON browse_file_instances(file_instance_id);
             """
         )
 
@@ -790,6 +933,34 @@ final class SQLiteDatabase {
             FROM import_batches
             """
         )
+        try backfillBrowseGraphFromFileInstances()
+    }
+
+    private func backfillBrowseGraphFromFileInstances() throws {
+        let rows = try prepare(
+            """
+            SELECT fi.id, fi.path, fi.storage_kind
+            FROM file_instances fi
+            LEFT JOIN browse_file_instances bfi
+              ON bfi.file_instance_id = fi.id
+             AND bfi.membership_kind = 'direct_file_instance'
+            WHERE bfi.file_instance_id IS NULL
+              AND fi.file_role IN ('raw_original', 'jpeg_original', 'sidecar', 'export')
+            ORDER BY fi.path
+            """,
+            []
+        ) { statement in
+            (
+                UUID(uuidString: statement.text(0)),
+                statement.text(1),
+                StorageKind(rawValue: statement.text(2)) ?? .local
+            )
+        }
+
+        for row in rows {
+            guard let fileInstanceID = row.0 else { continue }
+            try upsertBrowseFolderMembership(filePath: row.1, fileInstanceID: fileInstanceID, storageKind: row.2)
+        }
     }
 
     private func assetID(contentHash: String, metadataFingerprint: String) throws -> UUID? {
@@ -797,6 +968,31 @@ final class SQLiteDatabase {
         return try prepare(sql, [.text(contentHash), .text(metadataFingerprint)]) { statement in
             UUID(uuidString: statement.text(0))
         }.first ?? nil
+    }
+
+    private func browseNode(kind: BrowseNodeKind, canonicalKey: String) throws -> BrowseNode {
+        let rows = try prepare(
+            """
+            SELECT id, kind, canonical_key, display_name, display_path, storage_kind
+            FROM browse_nodes
+            WHERE kind = ? AND canonical_key = ?
+            LIMIT 1
+            """,
+            [.text(kind.rawValue), .text(canonicalKey)]
+        ) { statement in
+            BrowseNode(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                kind: BrowseNodeKind(rawValue: statement.text(1)) ?? .folder,
+                canonicalKey: statement.text(2),
+                displayName: statement.text(3),
+                displayPath: statement.text(4),
+                storageKind: StorageKind(rawValue: statement.text(5)) ?? .local
+            )
+        }
+        guard let node = rows.first else {
+            throw DatabaseError.stepFailed("浏览节点不存在：\(kind.rawValue) \(canonicalKey)")
+        }
+        return node
     }
 
     private func fileInstanceID(path: String) throws -> UUID? {
@@ -991,4 +1187,31 @@ func decodeTags(_ value: String) -> [String] {
         return []
     }
     return tags
+}
+
+private extension SQLiteDatabase {
+    static func normalizedDirectoryPath(_ path: String) -> String {
+        guard path.count > 1 else { return path }
+        return path.hasSuffix("/") ? String(path.dropLast()) : path
+    }
+
+    static func ancestorDirectoryPaths(to folderPath: String) -> [String] {
+        let normalizedPath = normalizedDirectoryPath(folderPath)
+        let components = URL(fileURLWithPath: normalizedPath, isDirectory: true).pathComponents
+        guard !components.isEmpty else { return [] }
+
+        var paths: [String] = []
+        var current = ""
+        for component in components {
+            if component == "/" {
+                current = "/"
+            } else if current == "/" {
+                current += component
+            } else {
+                current += "/" + component
+            }
+            paths.append(current)
+        }
+        return paths
+    }
 }

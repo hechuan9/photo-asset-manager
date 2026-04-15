@@ -268,6 +268,34 @@ final class LibraryStore: ObservableObject {
         refresh()
     }
 
+    func selectFolder(path: String) {
+        do {
+            let node = try database.upsertBrowseFolderNode(path: path, storageKind: storageKind(for: URL(fileURLWithPath: path, isDirectory: true)))
+            filter.browseSelection = BrowseSelection(
+                nodeID: node.id,
+                kind: node.kind,
+                path: node.displayPath,
+                displayName: node.displayName,
+                scope: filter.browseSelection?.scope ?? .recursive
+            )
+            refresh()
+        } catch {
+            lastError = error.fullTrace
+        }
+    }
+
+    func clearBrowseSelection() {
+        filter.browseSelection = nil
+        refresh()
+    }
+
+    func setBrowseScope(_ scope: BrowseScope) {
+        guard var selection = filter.browseSelection else { return }
+        selection.scope = scope
+        filter.browseSelection = selection
+        refresh()
+    }
+
     func loadSelectedFiles() {
         guard let selectedAssetID else {
             selectedFiles = []
