@@ -17,10 +17,14 @@ final class LibraryStore: ObservableObject {
     @Published var derivativeStorageURL: URL?
     @Published var migrationReport: String?
     @Published var blockingTask: BlockingTaskReport?
+    @Published var backgroundTask: BackgroundTaskReport?
+    @Published var hasMoreAssets = false
 
     private let database: SQLiteDatabase
     private let scanner: PhotoScanner
     private let fileOperations = FileOperations()
+    private var availabilityTask: Task<Void, Never>?
+    private let assetPageSize = 600
 
     init() {
         do {
@@ -30,12 +34,16 @@ final class LibraryStore: ObservableObject {
             try database.markInterruptedImportBatches()
             interruptedScanPath = try database.latestInterruptedScanPath()
             derivativeStorageURL = try database.derivativeStoragePath().map { URL(fileURLWithPath: $0, isDirectory: true) }
-            try database.markMissingFiles()
             sourceDirectories = try database.sourceDirectories()
             refresh()
+            startAvailabilityRefreshInBackground()
         } catch {
             fatalError(error.fullTrace)
         }
+    }
+
+    deinit {
+        availabilityTask?.cancel()
     }
 
     var selectedAsset: Asset? {
@@ -44,10 +52,6 @@ final class LibraryStore: ObservableObject {
 
     var isBusy: Bool {
         isScanning || blockingTask != nil
-    }
-
-    func chooseAndScan(storageKind: StorageKind) {
-        chooseAndAddFolders(scanImmediately: true)
     }
 
     func chooseAndAddFolders(scanImmediately: Bool) {
@@ -107,33 +111,12 @@ final class LibraryStore: ObservableObject {
     }
 
     func scanSource(_ source: SourceDirectory) {
-        guard source.isTracked else { return }
         scan(URL(fileURLWithPath: source.path), storageKind: source.storageKind)
     }
 
     func scanTrackedSources() {
         guard !isBusy else { return }
-        scanSources(sourceDirectories.filter(\.isTracked))
-    }
-
-    func stopTrackingSource(_ source: SourceDirectory) {
-        guard !isBusy else { return }
-        do {
-            try database.setSourceDirectoryTracked(id: source.id, isTracked: false)
-            sourceDirectories = try database.sourceDirectories()
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    func resumeTrackingSource(_ source: SourceDirectory) {
-        guard !isBusy else { return }
-        do {
-            try database.setSourceDirectoryTracked(id: source.id, isTracked: true)
-            sourceDirectories = try database.sourceDirectories()
-        } catch {
-            lastError = error.fullTrace
-        }
+        scanSources(sourceDirectories)
     }
 
     func removeSourceDirectory(_ source: SourceDirectory) {
@@ -144,6 +127,22 @@ final class LibraryStore: ObservableObject {
         } catch {
             lastError = error.fullTrace
         }
+    }
+
+    func moveSourceDirectory(_ source: SourceDirectory, to parent: SourceDirectory?) {
+        guard !isBusy else { return }
+        do {
+            try database.moveSourceDirectory(id: source.id, parentID: parent?.id)
+            sourceDirectories = try database.sourceDirectories()
+        } catch {
+            lastError = error.fullTrace
+        }
+    }
+
+    func topLevelMoveTargets(excluding source: SourceDirectory) -> [SourceDirectory] {
+        SourceDirectoryTreeBuilder
+            .topLevelSources(in: sourceDirectories)
+            .filter { $0.id != source.id }
     }
 
     func chooseDerivativeMigrationLocation() {
@@ -176,16 +175,91 @@ final class LibraryStore: ObservableObject {
 
     func refresh() {
         do {
-            try database.markMissingFiles()
-            assets = try database.queryAssets(filter: filter)
-            counts = try database.countsByStatus()
+            let page = try database.queryAssets(filter: filter, limit: assetPageSize + 1)
+            assets = Array(page.prefix(assetPageSize))
+            hasMoreAssets = page.count > assetPageSize
             sourceDirectories = try database.sourceDirectories()
-            if selectedAssetID == nil {
+            if selectedAssetID == nil || !assets.contains(where: { $0.id == selectedAssetID }) {
                 selectedAssetID = assets.first?.id
             }
             loadSelectedFiles()
         } catch {
             lastError = error.fullTrace
+        }
+    }
+
+    func refreshCounts() {
+        do {
+            counts = try database.countsByStatus()
+        } catch {
+            lastError = error.fullTrace
+        }
+    }
+
+    func loadMoreAssets() {
+        guard hasMoreAssets else { return }
+        do {
+            let page = try database.queryAssets(filter: filter, limit: assetPageSize + 1, offset: assets.count)
+            assets.append(contentsOf: page.prefix(assetPageSize))
+            hasMoreAssets = page.count > assetPageSize
+        } catch {
+            lastError = error.fullTrace
+        }
+    }
+
+    func startAvailabilityRefreshInBackground() {
+        guard availabilityTask == nil else { return }
+        backgroundTask = BackgroundTaskReport(title: "后台任务", phase: "准备校验文件状态", message: "应用可以继续使用")
+        availabilityTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                refreshCounts()
+                let targets = try database.availabilityCheckTargets()
+                backgroundTask = BackgroundTaskReport(
+                    title: "后台任务",
+                    phase: targets.isEmpty ? "没有需要校验的文件" : "校验文件状态",
+                    totalItems: targets.count,
+                    message: "应用可以继续使用"
+                )
+
+                let batchSize = 250
+                var completed = 0
+                for batch in targets.chunked(size: batchSize) {
+                    guard !Task.isCancelled else { return }
+                    let updates = await Self.checkAvailability(batch)
+                    try database.updateFileAvailability(updates)
+                    completed += batch.count
+                    backgroundTask = BackgroundTaskReport(
+                        title: "后台任务",
+                        phase: "校验文件状态",
+                        currentPath: batch.last?.path ?? "",
+                        totalItems: targets.count,
+                        completedItems: completed,
+                        message: "应用可以继续使用"
+                    )
+                    await Task.yield()
+                }
+
+                refresh()
+                refreshCounts()
+                backgroundTask = BackgroundTaskReport(
+                    title: "后台任务",
+                    phase: "文件状态校验完成",
+                    totalItems: targets.count,
+                    completedItems: targets.count,
+                    message: "资产状态已更新",
+                    isFinished: true
+                )
+            } catch {
+                lastError = error.fullTrace
+                backgroundTask = BackgroundTaskReport(
+                    title: "后台任务",
+                    phase: "文件状态校验失败",
+                    message: error.localizedDescription,
+                    isFinished: true
+                )
+            }
+            availabilityTask = nil
         }
     }
 
@@ -286,7 +360,7 @@ final class LibraryStore: ObservableObject {
         guard !isBusy else { return }
         guard !sources.isEmpty else { return }
         Task {
-            for source in sources where source.isTracked {
+            for source in sources {
                 await MainActor.run {
                     scan(URL(fileURLWithPath: source.path), storageKind: source.storageKind)
                 }
@@ -371,7 +445,7 @@ final class LibraryStore: ObservableObject {
             return nasRoot
         }
         return sourceDirectories
-            .filter { $0.isTracked && $0.storageKind == .nas }
+            .filter { $0.storageKind == .nas }
             .map { nasRootURL(for: URL(fileURLWithPath: $0.path)) }
             .first
     }
@@ -393,5 +467,25 @@ final class LibraryStore: ObservableObject {
             .appendingPathComponent("PhotoAssetManager", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
+    }
+
+    nonisolated private static func checkAvailability(_ targets: [AvailabilityCheckTarget]) async -> [FileAvailabilityUpdate] {
+        await Task.detached(priority: .utility) {
+            targets.map { target in
+                FileAvailabilityUpdate(
+                    id: target.id,
+                    availability: FileManager.default.fileExists(atPath: target.path) ? .online : .missing
+                )
+            }
+        }.value
+    }
+}
+
+private extension Array {
+    func chunked(size: Int) -> [[Element]] {
+        precondition(size > 0, "chunk size must be positive")
+        return stride(from: 0, to: count, by: size).map { start in
+            Array(self[start..<Swift.min(start + size, count)])
+        }
     }
 }

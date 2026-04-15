@@ -78,7 +78,7 @@ enum SyncStatus: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-enum Availability: String, Codable {
+enum Availability: String, Codable, Sendable {
     case online
     case offline
     case missing
@@ -185,8 +185,94 @@ struct SourceDirectory: Identifiable, Hashable {
     var path: String
     var storageKind: StorageKind
     var isTracked: Bool
+    var parentID: UUID?
     var createdAt: Date
     var lastScannedAt: Date?
+}
+
+struct SourceDirectoryNode: Identifiable, Hashable {
+    var id: UUID { source.id }
+    var source: SourceDirectory
+    var depth: Int
+    var hasChildren: Bool
+}
+
+enum SourceDirectoryTreeBuilder {
+    static func build(_ sources: [SourceDirectory], expandedIDs: Set<UUID>) -> [SourceDirectoryNode] {
+        let children = childMap(for: sources)
+        let roots = rootSources(in: sources, children: children)
+        return roots.flatMap { flatten(source: $0, depth: 0, children: children, expandedIDs: expandedIDs) }
+    }
+
+    static func topLevelSources(in sources: [SourceDirectory]) -> [SourceDirectory] {
+        let children = childMap(for: sources)
+        return rootSources(in: sources, children: children)
+    }
+
+    private static func flatten(
+        source: SourceDirectory,
+        depth: Int,
+        children: [UUID: [SourceDirectory]],
+        expandedIDs: Set<UUID>
+    ) -> [SourceDirectoryNode] {
+        let childSources = children[source.id] ?? []
+        var nodes = [
+            SourceDirectoryNode(
+                source: source,
+                depth: depth,
+                hasChildren: !childSources.isEmpty
+            )
+        ]
+        guard depth == 0 || expandedIDs.contains(source.id) else { return nodes }
+        nodes.append(contentsOf: childSources.flatMap {
+            flatten(source: $0, depth: depth + 1, children: children, expandedIDs: expandedIDs)
+        })
+        return nodes
+    }
+
+    private static func rootSources(
+        in sources: [SourceDirectory],
+        children: [UUID: [SourceDirectory]]
+    ) -> [SourceDirectory] {
+        let childIDs = Set(children.values.flatMap { $0.map(\.id) })
+        return sources
+            .filter { !childIDs.contains($0.id) }
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    private static func childMap(for sources: [SourceDirectory]) -> [UUID: [SourceDirectory]] {
+        let ids = Set(sources.map(\.id))
+        var children: [UUID: [SourceDirectory]] = [:]
+        for source in sources {
+            guard let parentID = explicitOrPathParentID(for: source, in: sources, validIDs: ids) else { continue }
+            children[parentID, default: []].append(source)
+        }
+        for parentID in children.keys {
+            children[parentID]?.sort { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        }
+        return children
+    }
+
+    private static func explicitOrPathParentID(
+        for source: SourceDirectory,
+        in sources: [SourceDirectory],
+        validIDs: Set<UUID>
+    ) -> UUID? {
+        if let parentID = source.parentID, validIDs.contains(parentID), parentID != source.id {
+            return parentID
+        }
+        return sources
+            .filter { candidate in
+                candidate.id != source.id && source.path.hasPrefix(normalizedDirectoryPath(candidate.path) + "/")
+            }
+            .max { $0.path.count < $1.path.count }?
+            .id
+    }
+
+    private static func normalizedDirectoryPath(_ path: String) -> String {
+        guard path.count > 1 else { return path }
+        return path.hasSuffix("/") ? String(path.dropLast()) : path
+    }
 }
 
 struct LibraryFilter: Equatable {
@@ -220,4 +306,24 @@ struct BlockingTaskReport {
     var completedItems = 0
     var skippedItems = 0
     var message = ""
+}
+
+struct BackgroundTaskReport: Sendable {
+    var title = ""
+    var phase = ""
+    var currentPath = ""
+    var totalItems = 0
+    var completedItems = 0
+    var message = ""
+    var isFinished = false
+}
+
+struct AvailabilityCheckTarget: Sendable {
+    let id: UUID
+    let path: String
+}
+
+struct FileAvailabilityUpdate: Sendable {
+    let id: UUID
+    let availability: Availability
 }

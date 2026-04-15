@@ -46,7 +46,10 @@ final class SQLiteDatabase {
         }
     }
 
-    func queryAssets(filter: LibraryFilter) throws -> [Asset] {
+    func queryAssets(filter: LibraryFilter, limit: Int, offset: Int = 0) throws -> [Asset] {
+        guard limit > 0 else { return [] }
+        guard offset >= 0 else { return [] }
+
         var conditions: [String] = []
         var values: [SQLiteValue] = []
 
@@ -84,24 +87,64 @@ final class SQLiteDatabase {
             conditions.append(statusCondition)
         }
 
-        let whereClause = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
-        let sql = """
-        SELECT
-            a.id, a.capture_time, a.camera_make, a.camera_model, a.lens_model,
-            a.original_filename, a.content_fingerprint, a.metadata_fingerprint,
-            a.rating, a.flag, a.tags, a.created_at, a.updated_at,
-            COUNT(fi.id) AS file_count,
-            MIN(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') THEN fi.path ELSE NULL END) AS primary_path,
-            COALESCE(
-                MAX(CASE WHEN fi.file_role = 'thumbnail' THEN fi.path ELSE NULL END),
-                MIN(CASE WHEN fi.file_role = 'jpeg_original' THEN fi.path ELSE NULL END)
-            ) AS thumbnail_path
-        FROM assets a
-        LEFT JOIN file_instances fi ON fi.asset_id = a.id
-        \(whereClause)
-        GROUP BY a.id
-        ORDER BY COALESCE(a.capture_time, a.created_at) DESC
-        """
+        let sql: String
+        if conditions.isEmpty {
+            sql = """
+            WITH page AS (
+                SELECT id
+                FROM assets
+                ORDER BY COALESCE(capture_time, created_at) DESC
+                LIMIT ? OFFSET ?
+            )
+            SELECT
+                a.id, a.capture_time, a.camera_make, a.camera_model, a.lens_model,
+                a.original_filename, a.content_fingerprint, a.metadata_fingerprint,
+                a.rating, a.flag, a.tags, a.created_at, a.updated_at,
+                COUNT(fi.id) AS file_count,
+                MIN(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') THEN fi.path ELSE NULL END) AS primary_path,
+                COALESCE(
+                    MAX(CASE WHEN fi.file_role = 'thumbnail' THEN fi.path ELSE NULL END),
+                    MIN(CASE WHEN fi.file_role = 'jpeg_original' THEN fi.path ELSE NULL END)
+                ) AS thumbnail_path,
+                MAX(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') AND fi.availability = 'online' THEN 1 ELSE 0 END) AS has_online_original,
+                MAX(CASE WHEN fi.sync_status = 'needs_sync' THEN 1 ELSE 0 END) AS has_needs_sync,
+                MAX(CASE WHEN fi.sync_status = 'needs_archive' THEN 1 ELSE 0 END) AS has_needs_archive,
+                MAX(CASE WHEN fi.storage_kind = 'nas' AND fi.authority_role = 'canonical' THEN 1 ELSE 0 END) AS has_archived_copy,
+                MAX(CASE WHEN fi.authority_role = 'working_copy' THEN 1 ELSE 0 END) AS has_working_copy
+            FROM page p
+            JOIN assets a ON a.id = p.id
+            LEFT JOIN file_instances fi ON fi.asset_id = a.id
+            GROUP BY a.id
+            ORDER BY COALESCE(a.capture_time, a.created_at) DESC
+            """
+        } else {
+            let whereClause = "WHERE " + conditions.joined(separator: " AND ")
+            sql = """
+            SELECT
+                a.id, a.capture_time, a.camera_make, a.camera_model, a.lens_model,
+                a.original_filename, a.content_fingerprint, a.metadata_fingerprint,
+                a.rating, a.flag, a.tags, a.created_at, a.updated_at,
+                COUNT(fi.id) AS file_count,
+                MIN(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') THEN fi.path ELSE NULL END) AS primary_path,
+                COALESCE(
+                    MAX(CASE WHEN fi.file_role = 'thumbnail' THEN fi.path ELSE NULL END),
+                    MIN(CASE WHEN fi.file_role = 'jpeg_original' THEN fi.path ELSE NULL END)
+                ) AS thumbnail_path,
+                MAX(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') AND fi.availability = 'online' THEN 1 ELSE 0 END) AS has_online_original,
+                MAX(CASE WHEN fi.sync_status = 'needs_sync' THEN 1 ELSE 0 END) AS has_needs_sync,
+                MAX(CASE WHEN fi.sync_status = 'needs_archive' THEN 1 ELSE 0 END) AS has_needs_archive,
+                MAX(CASE WHEN fi.storage_kind = 'nas' AND fi.authority_role = 'canonical' THEN 1 ELSE 0 END) AS has_archived_copy,
+                MAX(CASE WHEN fi.authority_role = 'working_copy' THEN 1 ELSE 0 END) AS has_working_copy
+            FROM assets a
+            LEFT JOIN file_instances fi ON fi.asset_id = a.id
+            \(whereClause)
+            GROUP BY a.id
+            ORDER BY COALESCE(a.capture_time, a.created_at) DESC
+            LIMIT ? OFFSET ?
+            """
+        }
+        values.append(.int(Int64(limit)))
+        values.append(.int(Int64(offset)))
 
         return try prepare(sql, values) { statement in
             let asset = Asset(
@@ -118,24 +161,53 @@ final class SQLiteDatabase {
                 tags: decodeTags(statement.text(10)),
                 createdAt: DateCoding.decode(statement.text(11)) ?? Date(),
                 updatedAt: DateCoding.decode(statement.text(12)) ?? Date(),
-                status: .inbox,
+                status: assetStatus(
+                    hasOnlineOriginal: statement.int(16) == 1,
+                    hasNeedsSync: statement.int(17) == 1,
+                    hasNeedsArchive: statement.int(18) == 1,
+                    hasArchivedCopy: statement.int(19) == 1,
+                    hasWorkingCopy: statement.int(20) == 1
+                ),
                 fileCount: Int(statement.int(13)),
                 primaryPath: statement.optionalText(14),
                 thumbnailPath: statement.optionalText(15)
             )
-            return asset.withStatus(derivedStatus(for: asset.id))
+            return asset
         }
     }
 
     func countsByStatus() throws -> [AssetStatus: Int] {
-        let all = try queryAssets(filter: LibraryFilter())
-        return Dictionary(grouping: all, by: \.status).mapValues(\.count)
+        let sql = """
+        SELECT status, COUNT(*)
+        FROM (
+            SELECT
+                CASE
+                    WHEN MAX(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') AND fi.availability = 'online' THEN 1 ELSE 0 END) = 0 THEN 'missingOriginal'
+                    WHEN MAX(CASE WHEN fi.sync_status = 'needs_sync' THEN 1 ELSE 0 END) = 1 THEN 'needsSync'
+                    WHEN MAX(CASE WHEN fi.sync_status = 'needs_archive' THEN 1 ELSE 0 END) = 1 THEN 'needsArchive'
+                    WHEN MAX(CASE WHEN fi.storage_kind = 'nas' AND fi.authority_role = 'canonical' THEN 1 ELSE 0 END) = 1 THEN 'archived'
+                    WHEN MAX(CASE WHEN fi.authority_role = 'working_copy' THEN 1 ELSE 0 END) = 1 THEN 'working'
+                    ELSE 'inbox'
+                END AS status
+            FROM assets a
+            LEFT JOIN file_instances fi ON fi.asset_id = a.id
+            GROUP BY a.id
+        )
+        GROUP BY status
+        """
+        let rows = try prepare(sql, []) { statement in
+            (statement.text(0), Int(statement.int(1)))
+        }
+        return rows.reduce(into: [:]) { result, row in
+            guard let status = AssetStatus(rawValue: row.0) else { return }
+            result[status] = row.1
+        }
     }
 
     func sourceDirectories() throws -> [SourceDirectory] {
         try prepare(
             """
-            SELECT id, path, storage_kind, is_tracked, created_at, last_scanned_at
+            SELECT id, path, storage_kind, is_tracked, parent_source_directory_id, created_at, last_scanned_at
             FROM source_directories
             ORDER BY is_tracked DESC, path ASC
             """,
@@ -146,8 +218,9 @@ final class SQLiteDatabase {
                 path: statement.text(1),
                 storageKind: StorageKind(rawValue: statement.text(2)) ?? .local,
                 isTracked: statement.int(3) == 1,
-                createdAt: DateCoding.decode(statement.text(4)) ?? Date(),
-                lastScannedAt: DateCoding.decode(statement.optionalText(5))
+                parentID: statement.optionalText(4).flatMap(UUID.init(uuidString:)),
+                createdAt: DateCoding.decode(statement.text(5)) ?? Date(),
+                lastScannedAt: DateCoding.decode(statement.optionalText(6))
             )
         }
     }
@@ -328,7 +401,18 @@ final class SQLiteDatabase {
     }
 
     func removeSourceDirectory(id: UUID) throws {
+        try execute("UPDATE source_directories SET parent_source_directory_id = NULL WHERE parent_source_directory_id = ?", [.text(id.uuidString)])
         try execute("DELETE FROM source_directories WHERE id = ?", [.text(id.uuidString)])
+    }
+
+    func moveSourceDirectory(id: UUID, parentID: UUID?) throws {
+        guard parentID != id else {
+            throw DatabaseError.stepFailed("不能把文件夹移动到自身下面。")
+        }
+        try execute(
+            "UPDATE source_directories SET parent_source_directory_id = ? WHERE id = ?",
+            [.nullableText(parentID?.uuidString), .text(id.uuidString)]
+        )
     }
 
     func markSourceDirectoryScanned(path: String) throws {
@@ -554,6 +638,38 @@ final class SQLiteDatabase {
         }
     }
 
+    func availabilityCheckTargets() throws -> [AvailabilityCheckTarget] {
+        try prepare(
+            "SELECT id, path FROM file_instances WHERE file_role IN ('raw_original','jpeg_original','sidecar','export') ORDER BY path",
+            []
+        ) { statement in
+            guard let id = UUID(uuidString: statement.text(0)) else {
+                throw DatabaseError.stepFailed("文件实例 ID 格式无效：\(statement.text(0))")
+            }
+            return AvailabilityCheckTarget(
+                id: id,
+                path: statement.text(1)
+            )
+        }
+    }
+
+    func updateFileAvailability(_ updates: [FileAvailabilityUpdate]) throws {
+        guard !updates.isEmpty else { return }
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            for update in updates {
+                try execute(
+                    "UPDATE file_instances SET availability = ? WHERE id = ?",
+                    [.text(update.availability.rawValue), .text(update.id.uuidString)]
+                )
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
     private func migrate() throws {
         try execute(
             """
@@ -590,6 +706,10 @@ final class SQLiteDatabase {
 
             CREATE INDEX IF NOT EXISTS idx_file_instances_asset ON file_instances(asset_id);
             CREATE INDEX IF NOT EXISTS idx_file_instances_hash ON file_instances(content_hash);
+            CREATE INDEX IF NOT EXISTS idx_file_instances_asset_role_availability ON file_instances(asset_id, file_role, availability);
+            CREATE INDEX IF NOT EXISTS idx_file_instances_asset_sync ON file_instances(asset_id, sync_status);
+            CREATE INDEX IF NOT EXISTS idx_file_instances_asset_storage_authority ON file_instances(asset_id, storage_kind, authority_role);
+            CREATE INDEX IF NOT EXISTS idx_assets_sort_time ON assets(COALESCE(capture_time, created_at) DESC);
 
             CREATE TABLE IF NOT EXISTS versions (
                 id TEXT PRIMARY KEY,
@@ -629,6 +749,7 @@ final class SQLiteDatabase {
                 path TEXT NOT NULL UNIQUE,
                 storage_kind TEXT NOT NULL,
                 is_tracked INTEGER NOT NULL,
+                parent_source_directory_id TEXT,
                 created_at TEXT NOT NULL,
                 last_scanned_at TEXT
             );
@@ -648,6 +769,12 @@ final class SQLiteDatabase {
                 value TEXT NOT NULL
             );
             """
+        )
+
+        try addColumnIfNeeded(
+            table: "source_directories",
+            column: "parent_source_directory_id",
+            definition: "TEXT"
         )
 
         try execute(
@@ -742,21 +869,26 @@ final class SQLiteDatabase {
         }
     }
 
-    private func derivedStatus(for assetID: UUID) -> AssetStatus {
-        let files = (try? fileInstances(assetID: assetID)) ?? []
-        if !files.contains(where: { ($0.fileRole == .rawOriginal || $0.fileRole == .jpegOriginal) && $0.availability == .online }) {
+    private func assetStatus(
+        hasOnlineOriginal: Bool,
+        hasNeedsSync: Bool,
+        hasNeedsArchive: Bool,
+        hasArchivedCopy: Bool,
+        hasWorkingCopy: Bool
+    ) -> AssetStatus {
+        if !hasOnlineOriginal {
             return .missingOriginal
         }
-        if files.contains(where: { $0.syncStatus == .needsSync }) {
+        if hasNeedsSync {
             return .needsSync
         }
-        if files.contains(where: { $0.syncStatus == .needsArchive }) {
+        if hasNeedsArchive {
             return .needsArchive
         }
-        if files.contains(where: { $0.storageKind == .nas && $0.authorityRole == .canonical }) {
+        if hasArchivedCopy {
             return .archived
         }
-        if files.contains(where: { $0.authorityRole == .workingCopy }) {
+        if hasWorkingCopy {
             return .working
         }
         return .inbox
@@ -790,6 +922,14 @@ final class SQLiteDatabase {
 
     private func execute(_ sql: String, _ values: [SQLiteValue]) throws {
         _ = try prepare(sql, values) { _ in () }
+    }
+
+    private func addColumnIfNeeded(table: String, column: String, definition: String) throws {
+        let columns = try prepare("PRAGMA table_info(\(table))", []) { statement in
+            statement.text(1)
+        }
+        guard !columns.contains(column) else { return }
+        try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)", [])
     }
 }
 
@@ -851,12 +991,4 @@ func decodeTags(_ value: String) -> [String] {
         return []
     }
     return tags
-}
-
-private extension Asset {
-    func withStatus(_ status: AssetStatus) -> Asset {
-        var copy = self
-        copy.status = status
-        return copy
-    }
 }

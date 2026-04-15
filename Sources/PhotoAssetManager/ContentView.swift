@@ -14,18 +14,13 @@ struct ContentView: View {
             DetailView()
                 .navigationSplitViewColumnWidth(min: 320, ideal: 420)
         }
+        .safeAreaInset(edge: .bottom) {
+            BackgroundTaskBar()
+        }
         .toolbar {
             ToolbarItemGroup {
                 Button("添加文件夹", systemImage: "plus") {
                     library.chooseAndAddFolders(scanImmediately: false)
-                }
-                .disabled(library.isBusy)
-                Button("添加并扫描", systemImage: "plus.viewfinder") {
-                    library.chooseAndAddFolders(scanImmediately: true)
-                }
-                .disabled(library.isBusy)
-                Button("扫描所有来源") {
-                    library.scanTrackedSources()
                 }
                 .disabled(library.isBusy)
             }
@@ -56,6 +51,57 @@ struct ContentView: View {
             Button("关闭", role: .cancel) {}
         } message: {
             Text(library.lastError ?? "")
+        }
+    }
+}
+
+struct BackgroundTaskBar: View {
+    @EnvironmentObject private var library: LibraryStore
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: 10) {
+                if let task = library.backgroundTask {
+                    if task.isFinished {
+                        Image(systemName: "checkmark.circle")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Text(task.phase)
+                        .lineLimit(1)
+                    if task.totalItems > 0 {
+                        ProgressView(value: Double(task.completedItems), total: Double(task.totalItems))
+                            .frame(width: 160)
+                        Text("\(task.completedItems) / \(task.totalItems)")
+                            .foregroundStyle(.secondary)
+                    }
+                    if !task.message.isEmpty {
+                        Text(task.message)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    if !task.currentPath.isEmpty {
+                        Text(task.currentPath)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                } else {
+                    Image(systemName: "checkmark.circle")
+                        .foregroundStyle(.secondary)
+                    Text("就绪")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .font(.caption)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
+            .background(.bar)
         }
     }
 }
@@ -120,6 +166,8 @@ struct BlockingTaskProgressView: View {
 
 struct SidebarView: View {
     @EnvironmentObject private var library: LibraryStore
+    @State private var expandedSourceFolderIDs: Set<UUID> = []
+    @State private var sourcePendingMove: SourceDirectory?
 
     var body: some View {
         List(selection: Binding(
@@ -145,14 +193,37 @@ struct SidebarView: View {
                     Text("还没有文件夹")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(library.sourceDirectories) { source in
-                        SourceDirectoryRow(source: source)
+                    ForEach(SourceDirectoryTreeBuilder.build(library.sourceDirectories, expandedIDs: expandedSourceFolderIDs)) { node in
+                        SourceDirectoryNodeRow(
+                            node: node,
+                            interruptedScanPath: library.interruptedScanPath,
+                            isExpanded: expandedSourceFolderIDs.contains(node.id),
+                            toggleExpansion: {
+                                if expandedSourceFolderIDs.contains(node.id) {
+                                    expandedSourceFolderIDs.remove(node.id)
+                                } else {
+                                    expandedSourceFolderIDs.insert(node.id)
+                                }
+                            },
+                            move: {
+                                sourcePendingMove = node.source
+                            }
+                        )
                     }
                 }
             } header: {
                 HStack {
                     Text("文件夹")
                     Spacer()
+                    ThumbnailStoragePopover()
+                    Button {
+                        library.scanTrackedSources()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(library.isBusy || library.sourceDirectories.isEmpty)
+                    .help("刷新所有文件夹")
                     Button {
                         library.chooseAndAddFolders(scanImmediately: false)
                     } label: {
@@ -161,42 +232,6 @@ struct SidebarView: View {
                     .buttonStyle(.plain)
                     .disabled(library.isBusy)
                     .help("添加文件夹")
-                }
-            }
-
-            Section("缩略图存储") {
-                Text(library.derivativeStorageURL?.path ?? "未设置，不生成新缩略图")
-                    .lineLimit(2)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                if let migrationReport = library.migrationReport {
-                    Text(migrationReport)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                HStack {
-                    Button("迁移到...") {
-                        library.chooseDerivativeMigrationLocation()
-                    }
-                    .disabled(library.isBusy)
-                    if library.derivativeStorageURL != nil {
-                        Button("清除") {
-                            library.clearDerivativeStorageLocation()
-                        }
-                        .disabled(library.isBusy)
-                    }
-                }
-            }
-
-            if let path = library.interruptedScanPath {
-                Section("断点续扫") {
-                    Text(path)
-                        .lineLimit(2)
-                        .foregroundStyle(.secondary)
-                    Button("继续上次扫描") {
-                        library.resumeInterruptedScan()
-                    }
-                    .disabled(library.isBusy)
                 }
             }
 
@@ -235,6 +270,70 @@ struct SidebarView: View {
                 }
             }
         }
+        .sheet(item: $sourcePendingMove) { source in
+            MoveSourceDirectorySheet(
+                source: source,
+                targets: library.topLevelMoveTargets(excluding: source),
+                move: { target in
+                    library.moveSourceDirectory(source, to: target)
+                    sourcePendingMove = nil
+                },
+                cancel: {
+                    sourcePendingMove = nil
+                }
+            )
+        }
+    }
+}
+
+struct ThumbnailStoragePopover: View {
+    @EnvironmentObject private var library: LibraryStore
+    @State private var isPresented = false
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            Image(systemName: "rectangle.stack")
+        }
+        .buttonStyle(.plain)
+        .disabled(library.isBusy)
+        .help("缩略图维护")
+        .popover(isPresented: $isPresented) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("缩略图存储")
+                    .font(.headline)
+
+                Text(library.derivativeStorageURL?.path ?? "未设置，不生成新缩略图")
+                    .lineLimit(3)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+
+                if let migrationReport = library.migrationReport {
+                    Text(migrationReport)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Button("迁移到...") {
+                        library.chooseDerivativeMigrationLocation()
+                        isPresented = false
+                    }
+                    .disabled(library.isBusy)
+
+                    if library.derivativeStorageURL != nil {
+                        Button("清除") {
+                            library.clearDerivativeStorageLocation()
+                            isPresented = false
+                        }
+                        .disabled(library.isBusy)
+                    }
+                }
+            }
+            .frame(width: 320, alignment: .leading)
+            .padding(14)
+        }
     }
 }
 
@@ -255,37 +354,36 @@ struct StatusRow: View {
 struct SourceDirectoryRow: View {
     @EnvironmentObject private var library: LibraryStore
     var source: SourceDirectory
+    var interruptedScanPath: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(source.isTracked ? "追踪中" : "已停止")
-                    .foregroundStyle(source.isTracked ? Color.secondary : Color.orange)
+                Text(source.path)
+                    .lineLimit(2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                 Spacer()
-                Button("扫描") {
-                    library.scanSource(source)
-                }
-                .disabled(!source.isTracked || library.isBusy)
-                if source.isTracked {
-                    Button("停止追踪") {
-                        library.stopTrackingSource(source)
+                Menu {
+                    Button("刷新") {
+                        library.scanSource(source)
                     }
-                    .disabled(library.isBusy)
-                } else {
-                    Button("恢复") {
-                        library.resumeTrackingSource(source)
+                    if isInterruptedScanSource {
+                        Button("继续扫描") {
+                            library.resumeInterruptedScan()
+                        }
                     }
-                    .disabled(library.isBusy)
+                    Divider()
+                    Button("移除", role: .destructive) {
+                        library.removeSourceDirectory(source)
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
                 }
-                Button("移除") {
-                    library.removeSourceDirectory(source)
-                }
+                .menuStyle(.borderlessButton)
                 .disabled(library.isBusy)
+                .help("文件夹操作")
             }
-            Text(source.path)
-                .lineLimit(2)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
             if let lastScannedAt = source.lastScannedAt {
                 Text("上次扫描 \(lastScannedAt.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption)
@@ -294,6 +392,101 @@ struct SourceDirectoryRow: View {
         }
         .font(.callout)
         .padding(.vertical, 4)
+    }
+
+    private var isInterruptedScanSource: Bool {
+        guard let interruptedScanPath else { return false }
+        return interruptedScanPath == source.path || interruptedScanPath.hasPrefix(source.path + "/")
+    }
+}
+
+struct SourceDirectoryNodeRow: View {
+    @EnvironmentObject private var library: LibraryStore
+    var node: SourceDirectoryNode
+    var interruptedScanPath: String?
+    var isExpanded: Bool
+    var toggleExpansion: () -> Void
+    var move: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Spacer()
+                .frame(width: CGFloat(node.depth) * 14)
+            if node.depth > 0 && node.hasChildren {
+                if isExpanded {
+                    Button("收缩") {
+                        toggleExpansion()
+                    }
+                    .buttonStyle(.plain)
+                    .labelStyle(.iconOnly)
+                    .help("收缩")
+                } else {
+                    Button("展开") {
+                        toggleExpansion()
+                    }
+                    .buttonStyle(.plain)
+                    .labelStyle(.iconOnly)
+                    .help("展开")
+                }
+            } else {
+                Spacer()
+                    .frame(width: node.depth > 0 ? 16 : 0)
+            }
+            SourceDirectoryRow(
+                source: node.source,
+                interruptedScanPath: interruptedScanPath
+            )
+        }
+        .contextMenu {
+            Button("刷新") {
+                library.scanSource(node.source)
+            }
+            if node.depth > 0 {
+                Button("移动到...") {
+                    move()
+                }
+            }
+            Button("移除", role: .destructive) {
+                library.removeSourceDirectory(node.source)
+            }
+        }
+    }
+}
+
+struct MoveSourceDirectorySheet: View {
+    var source: SourceDirectory
+    var targets: [SourceDirectory]
+    var move: (SourceDirectory?) -> Void
+    var cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("移动文件夹")
+                .font(.headline)
+            Text(source.path)
+                .lineLimit(2)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            Divider()
+            Button("移到顶层") {
+                move(nil)
+            }
+            ForEach(targets) { target in
+                Button(target.path) {
+                    move(target)
+                }
+                .lineLimit(1)
+                .truncationMode(.middle)
+            }
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) {
+                    cancel()
+                }
+            }
+        }
+        .frame(width: 420, alignment: .leading)
+        .padding(18)
     }
 }
 
@@ -319,6 +512,12 @@ struct AssetBrowserView: View {
                         }
                     }
                     .padding(16)
+                    if library.hasMoreAssets {
+                        Button("加载更多") {
+                            library.loadMoreAssets()
+                        }
+                        .padding(.bottom, 16)
+                    }
                 }
             }
         }
@@ -373,7 +572,7 @@ struct EmptyLibraryView: View {
                 .foregroundStyle(.secondary)
             Text("还没有资产")
                 .font(.title3)
-            Text("先扫描本地目录或 NAS 目录。原片不会被移动，索引会记录每个文件位置。")
+            Text("先添加文件夹，再用刷新扫描清单。原片不会被移动，索引会记录每个文件位置。")
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
