@@ -211,3 +211,13 @@ struct ScanReport {
     var skippedFiles = 0
     var errors: [String] = []
 }
+
+struct BlockingTaskReport {
+    var title = ""
+    var phase = ""
+    var currentPath = ""
+    var totalItems = 0
+    var completedItems = 0
+    var skippedItems = 0
+    var message = ""
+}

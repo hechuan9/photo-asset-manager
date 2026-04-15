@@ -16,6 +16,7 @@ final class LibraryStore: ObservableObject {
     @Published var sourceDirectories: [SourceDirectory] = []
     @Published var derivativeStorageURL: URL?
     @Published var migrationReport: String?
+    @Published var blockingTask: BlockingTaskReport?
 
     private let database: SQLiteDatabase
     private let scanner: PhotoScanner
@@ -41,11 +42,16 @@ final class LibraryStore: ObservableObject {
         assets.first { $0.id == selectedAssetID }
     }
 
+    var isBusy: Bool {
+        isScanning || blockingTask != nil
+    }
+
     func chooseAndScan(storageKind: StorageKind) {
         chooseAndAddFolders(scanImmediately: true)
     }
 
     func chooseAndAddFolders(scanImmediately: Bool) {
+        guard !isBusy else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -57,6 +63,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func addSourceDirectories(_ urls: [URL], scanImmediately: Bool) {
+        guard !isBusy else { return }
         guard !urls.isEmpty else { return }
         do {
             for url in urls {
@@ -78,6 +85,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func scan(_ url: URL, storageKind: StorageKind) {
+        guard !isBusy else { return }
         isScanning = true
         scanReport = ScanReport()
         lastError = nil
@@ -104,10 +112,12 @@ final class LibraryStore: ObservableObject {
     }
 
     func scanTrackedSources() {
+        guard !isBusy else { return }
         scanSources(sourceDirectories.filter(\.isTracked))
     }
 
     func stopTrackingSource(_ source: SourceDirectory) {
+        guard !isBusy else { return }
         do {
             try database.setSourceDirectoryTracked(id: source.id, isTracked: false)
             sourceDirectories = try database.sourceDirectories()
@@ -117,6 +127,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func resumeTrackingSource(_ source: SourceDirectory) {
+        guard !isBusy else { return }
         do {
             try database.setSourceDirectoryTracked(id: source.id, isTracked: true)
             sourceDirectories = try database.sourceDirectories()
@@ -126,6 +137,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func removeSourceDirectory(_ source: SourceDirectory) {
+        guard !isBusy else { return }
         do {
             try database.removeSourceDirectory(id: source.id)
             sourceDirectories = try database.sourceDirectories()
@@ -135,6 +147,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func chooseDerivativeMigrationLocation() {
+        guard !isBusy else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -146,10 +159,12 @@ final class LibraryStore: ObservableObject {
     }
 
     func clearDerivativeStorageLocation() {
+        guard !isBusy else { return }
         setDerivativeStorageURL(nil)
     }
 
     func resumeInterruptedScan() {
+        guard !isBusy else { return }
         guard let interruptedScanPath else { return }
         let url = URL(fileURLWithPath: interruptedScanPath)
         let storageKind: StorageKind = interruptedScanPath.hasPrefix("/Volumes/") ? .nas : .local
@@ -201,6 +216,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func archiveSelected() {
+        guard !isBusy else { return }
         guard let asset = selectedAsset else { return }
         guard let root = preferredNASRoot() else {
             lastError = "没有可用的 NAS 文件夹。请先添加一个 /Volumes 下的文件夹。"
@@ -210,6 +226,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func syncSelected() {
+        guard !isBusy else { return }
         guard let asset = selectedAsset else { return }
         guard let root = preferredNASRoot() else {
             lastError = "没有可用的 NAS 文件夹。请先添加一个 /Volumes 下的文件夹。"
@@ -219,6 +236,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func recordExportForSelected() {
+        guard !isBusy else { return }
         guard let asset = selectedAsset else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
@@ -265,6 +283,7 @@ final class LibraryStore: ObservableObject {
     }
 
     private func scanSources(_ sources: [SourceDirectory]) {
+        guard !isBusy else { return }
         guard !sources.isEmpty else { return }
         Task {
             for source in sources where source.isTracked {
@@ -292,14 +311,25 @@ final class LibraryStore: ObservableObject {
 
     private func migrateDerivativeStorage(to destinationRoot: URL) {
         do {
+            blockingTask = BlockingTaskReport(title: "迁移缩略图", phase: "准备迁移", currentPath: destinationRoot.path)
+            migrationReport = nil
             try FileManager.default.createDirectory(at: destinationRoot.appendingPathComponent("thumbnails", isDirectory: true), withIntermediateDirectories: true)
             let thumbnails = try database.thumbnailFileInstances()
+            blockingTask?.totalItems = thumbnails.count
+            blockingTask?.phase = thumbnails.isEmpty ? "没有可迁移缩略图" : "复制并校验"
             var copied = 0
             var skippedMissing = 0
-            for thumbnail in thumbnails {
+            for (index, thumbnail) in thumbnails.enumerated() {
                 let source = URL(fileURLWithPath: thumbnail.path)
+                blockingTask?.currentPath = source.path
+                blockingTask?.completedItems = index
+                blockingTask?.skippedItems = skippedMissing
                 guard FileManager.default.fileExists(atPath: source.path) else {
                     skippedMissing += 1
+                    blockingTask?.completedItems = index + 1
+                    blockingTask?.skippedItems = skippedMissing
+                    blockingTask?.message = "已迁移 \(copied)，跳过 \(skippedMissing)"
+                    RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.001))
                     continue
                 }
                 let destination = destinationRoot
@@ -316,12 +346,17 @@ final class LibraryStore: ObservableObject {
                 let size = try Int64(destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
                 try database.updateFileInstanceLocation(id: thumbnail.id, path: destination.path, hash: destinationHash, sizeBytes: size)
                 copied += 1
+                blockingTask?.completedItems = index + 1
+                blockingTask?.message = "已迁移 \(copied)，跳过 \(skippedMissing)"
+                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.001))
             }
             try database.setDerivativeStoragePath(destinationRoot.path)
             derivativeStorageURL = destinationRoot
             migrationReport = "缩略图迁移完成：\(copied) 个已迁移，\(skippedMissing) 个源文件缺失。旧文件未删除。"
+            blockingTask = nil
             refresh()
         } catch {
+            blockingTask = nil
             lastError = error.fullTrace
         }
     }

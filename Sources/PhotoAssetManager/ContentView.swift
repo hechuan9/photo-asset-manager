@@ -19,23 +19,25 @@ struct ContentView: View {
                 Button("添加文件夹", systemImage: "plus") {
                     library.chooseAndAddFolders(scanImmediately: false)
                 }
+                .disabled(library.isBusy)
                 Button("添加并扫描", systemImage: "plus.viewfinder") {
                     library.chooseAndAddFolders(scanImmediately: true)
                 }
+                .disabled(library.isBusy)
                 Button("扫描所有来源") {
                     library.scanTrackedSources()
                 }
-                .disabled(library.isScanning)
+                .disabled(library.isBusy)
             }
             ToolbarItemGroup {
                 Button("归档到 NAS") {
                     library.archiveSelected()
                 }
-                .disabled(library.selectedAsset == nil)
+                .disabled(library.selectedAsset == nil || library.isBusy)
                 Button("同步变更") {
                     library.syncSelected()
                 }
-                .disabled(library.selectedAsset == nil)
+                .disabled(library.selectedAsset == nil || library.isBusy)
             }
         }
         .alert("操作失败", isPresented: Binding(
@@ -90,7 +92,7 @@ struct SidebarView: View {
                         Image(systemName: "plus")
                     }
                     .buttonStyle(.plain)
-                    .disabled(library.isScanning)
+                    .disabled(library.isBusy)
                     .help("添加文件夹")
                 }
             }
@@ -109,13 +111,43 @@ struct SidebarView: View {
                     Button("迁移到...") {
                         library.chooseDerivativeMigrationLocation()
                     }
-                    .disabled(library.isScanning)
+                    .disabled(library.isBusy)
                     if library.derivativeStorageURL != nil {
                         Button("清除") {
                             library.clearDerivativeStorageLocation()
                         }
-                        .disabled(library.isScanning)
+                        .disabled(library.isBusy)
                     }
+                }
+            }
+
+            if let task = library.blockingTask {
+                Section(task.title) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if task.totalItems > 0 {
+                            ProgressView(value: Double(task.completedItems), total: Double(task.totalItems))
+                            Text("\(task.completedItems) / \(task.totalItems)")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ProgressView()
+                        }
+                        if !task.phase.isEmpty {
+                            Text(task.phase)
+                                .fontWeight(.medium)
+                        }
+                        if !task.currentPath.isEmpty {
+                            Text(task.currentPath)
+                                .lineLimit(2)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        if !task.message.isEmpty {
+                            Text(task.message)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .font(.callout)
+                    .padding(.vertical, 4)
                 }
             }
 
@@ -127,7 +159,7 @@ struct SidebarView: View {
                     Button("继续上次扫描") {
                         library.resumeInterruptedScan()
                     }
-                    .disabled(library.isScanning)
+                    .disabled(library.isBusy)
                 }
             }
 
@@ -196,22 +228,22 @@ struct SourceDirectoryRow: View {
                 Button("扫描") {
                     library.scanSource(source)
                 }
-                .disabled(!source.isTracked || library.isScanning)
+                .disabled(!source.isTracked || library.isBusy)
                 if source.isTracked {
                     Button("停止追踪") {
                         library.stopTrackingSource(source)
                     }
-                    .disabled(library.isScanning)
+                    .disabled(library.isBusy)
                 } else {
                     Button("恢复") {
                         library.resumeTrackingSource(source)
                     }
-                    .disabled(library.isScanning)
+                    .disabled(library.isBusy)
                 }
                 Button("移除") {
                     library.removeSourceDirectory(source)
                 }
-                .disabled(library.isScanning)
+                .disabled(library.isBusy)
             }
             Text(source.path)
                 .lineLimit(2)
