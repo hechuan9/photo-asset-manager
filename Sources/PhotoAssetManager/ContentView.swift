@@ -1,5 +1,21 @@
 import SwiftUI
 
+private enum AppPalette {
+    static let sidebarBackground = Color(nsColor: NSColor(name: nil) { appearance in
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return isDark
+            ? NSColor(calibratedRed: 0.13, green: 0.15, blue: 0.16, alpha: 1)
+            : NSColor(calibratedRed: 0.95, green: 0.96, blue: 0.96, alpha: 1)
+    })
+
+    static let folderText = Color(nsColor: NSColor(name: nil) { appearance in
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return isDark
+            ? NSColor(calibratedWhite: 0.82, alpha: 1)
+            : NSColor(calibratedWhite: 0.24, alpha: 1)
+    })
+}
+
 struct ContentView: View {
     @EnvironmentObject private var library: LibraryStore
 
@@ -166,7 +182,7 @@ struct BlockingTaskProgressView: View {
 
 struct SidebarView: View {
     @EnvironmentObject private var library: LibraryStore
-    @State private var expandedSourceFolderIDs: Set<UUID> = []
+    @State private var expandedFolderNodeIDs: Set<String> = []
     @State private var sourcePendingMove: SourceDirectory?
 
     var body: some View {
@@ -193,16 +209,16 @@ struct SidebarView: View {
                     Text("还没有文件夹")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(SourceDirectoryTreeBuilder.build(library.sourceDirectories, expandedIDs: expandedSourceFolderIDs)) { node in
+                    ForEach(SourceDirectoryTreeBuilder.build(library.sourceDirectories, expandedNodeIDs: expandedFolderNodeIDs)) { node in
                         SourceDirectoryNodeRow(
                             node: node,
                             interruptedScanPath: library.interruptedScanPath,
-                            isExpanded: expandedSourceFolderIDs.contains(node.id),
+                            isExpanded: expandedFolderNodeIDs.contains(node.id),
                             toggleExpansion: {
-                                if expandedSourceFolderIDs.contains(node.id) {
-                                    expandedSourceFolderIDs.remove(node.id)
+                                if expandedFolderNodeIDs.contains(node.id) {
+                                    expandedFolderNodeIDs.remove(node.id)
                                 } else {
-                                    expandedSourceFolderIDs.insert(node.id)
+                                    expandedFolderNodeIDs.insert(node.id)
                                 }
                             },
                             move: {
@@ -270,6 +286,8 @@ struct SidebarView: View {
                 }
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(AppPalette.sidebarBackground)
         .sheet(item: $sourcePendingMove) { source in
             MoveSourceDirectorySheet(
                 source: source,
@@ -353,7 +371,8 @@ struct StatusRow: View {
 
 struct SourceDirectoryRow: View {
     @EnvironmentObject private var library: LibraryStore
-    var source: SourceDirectory
+    var source: SourceDirectory?
+    var path: String
     var displayName: String
     var interruptedScanPath: String?
 
@@ -362,30 +381,32 @@ struct SourceDirectoryRow: View {
             HStack {
                 Text(displayName)
                     .lineLimit(2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppPalette.folderText)
                     .textSelection(.enabled)
                 Spacer()
-                Menu {
-                    Button("刷新") {
-                        library.scanSource(source)
-                    }
-                    if isInterruptedScanSource {
-                        Button("继续扫描") {
-                            library.resumeInterruptedScan()
+                if let source {
+                    Menu {
+                        Button("刷新") {
+                            library.scanSource(source)
                         }
+                        if isInterruptedScanSource {
+                            Button("继续扫描") {
+                                library.resumeInterruptedScan()
+                            }
+                        }
+                        Divider()
+                        Button("移除", role: .destructive) {
+                            library.removeSourceDirectory(source)
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
                     }
-                    Divider()
-                    Button("移除", role: .destructive) {
-                        library.removeSourceDirectory(source)
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
+                    .menuStyle(.borderlessButton)
+                    .disabled(library.isBusy)
+                    .help("文件夹操作")
                 }
-                .menuStyle(.borderlessButton)
-                .disabled(library.isBusy)
-                .help("文件夹操作")
             }
-            if let lastScannedAt = source.lastScannedAt {
+            if let lastScannedAt = source?.lastScannedAt {
                 Text("上次扫描 \(lastScannedAt.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
@@ -397,7 +418,7 @@ struct SourceDirectoryRow: View {
 
     private var isInterruptedScanSource: Bool {
         guard let interruptedScanPath else { return false }
-        return interruptedScanPath == source.path || interruptedScanPath.hasPrefix(source.path + "/")
+        return interruptedScanPath == path || interruptedScanPath.hasPrefix(path + "/")
     }
 }
 
@@ -424,6 +445,7 @@ struct SourceDirectoryNodeRow: View {
             }
             SourceDirectoryRow(
                 source: node.source,
+                path: node.path,
                 displayName: node.displayName,
                 interruptedScanPath: interruptedScanPath
             )
@@ -435,16 +457,18 @@ struct SourceDirectoryNodeRow: View {
             }
         }
         .contextMenu {
-            Button("刷新") {
-                library.scanSource(node.source)
-            }
-            if node.depth > 0 {
-                Button("移动到...") {
-                    move()
+            if let source = node.source {
+                Button("刷新") {
+                    library.scanSource(source)
                 }
-            }
-            Button("移除", role: .destructive) {
-                library.removeSourceDirectory(node.source)
+                if node.depth > 0 {
+                    Button("移动到...") {
+                        move()
+                    }
+                }
+                Button("移除", role: .destructive) {
+                    library.removeSourceDirectory(source)
+                }
             }
         }
     }

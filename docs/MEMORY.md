@@ -22,3 +22,10 @@
 - 根因：开发路径和用户固定打开路径不同，打包产物没有回写到固定仓库目录。
 - 预防动作：最终合并、验证、打包必须在 `/Users/hechuan/workspace/photo-asset-manager` 执行；`.build/` 和 `.app` 只生成不提交。
 - 合并前验证：运行 `swift test`、`swift build`、`scripts/pre_merge_gate.sh`、`./scripts/package_app.sh`，并确认 app 路径是 `.build/app/PhotoAssetManager.app`。
+
+## 文件夹树展开
+- 适用范围：侧边栏文件夹树、展开/收缩、来源目录分组。
+- 问题模式：树只递归已登记的 `SourceDirectory`，用户无法继续展开真实磁盘子目录。
+- 根因：把扫描来源配置当成完整文件系统树，缺少对已展开节点的只读目录枚举。
+- 预防动作：文件夹树节点必须支持数据库来源目录和只读文件系统目录两类节点；展开真实目录只能枚举子目录，不能写数据库或移动照片文件。
+- 合并前验证：运行覆盖 `contentsOfDirectory`、字符串节点 ID、非纯黑 sidebar 颜色的 sidebar 测试，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。
