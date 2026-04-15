@@ -354,12 +354,13 @@ struct StatusRow: View {
 struct SourceDirectoryRow: View {
     @EnvironmentObject private var library: LibraryStore
     var source: SourceDirectory
+    var displayName: String
     var interruptedScanPath: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(source.path)
+                Text(displayName)
                     .lineLimit(2)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
@@ -423,6 +424,7 @@ struct SourceDirectoryNodeRow: View {
             }
             SourceDirectoryRow(
                 source: node.source,
+                displayName: node.displayName,
                 interruptedScanPath: interruptedScanPath
             )
         }

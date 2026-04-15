@@ -194,6 +194,7 @@ struct SourceDirectoryNode: Identifiable, Hashable {
     var id: UUID { source.id }
     var source: SourceDirectory
     var depth: Int
+    var displayName: String
     var hasChildren: Bool
 }
 
@@ -201,7 +202,9 @@ enum SourceDirectoryTreeBuilder {
     static func build(_ sources: [SourceDirectory], expandedIDs: Set<UUID>) -> [SourceDirectoryNode] {
         let children = childMap(for: sources)
         let roots = rootSources(in: sources, children: children)
-        return roots.flatMap { flatten(source: $0, depth: 0, children: children, expandedIDs: expandedIDs) }
+        return roots.flatMap {
+            flatten(source: $0, parent: nil, depth: 0, children: children, expandedIDs: expandedIDs)
+        }
     }
 
     static func topLevelSources(in sources: [SourceDirectory]) -> [SourceDirectory] {
@@ -211,6 +214,7 @@ enum SourceDirectoryTreeBuilder {
 
     private static func flatten(
         source: SourceDirectory,
+        parent: SourceDirectory?,
         depth: Int,
         children: [UUID: [SourceDirectory]],
         expandedIDs: Set<UUID>
@@ -220,14 +224,32 @@ enum SourceDirectoryTreeBuilder {
             SourceDirectoryNode(
                 source: source,
                 depth: depth,
+                displayName: displayName(for: source, parent: parent),
                 hasChildren: !childSources.isEmpty
             )
         ]
-        guard depth == 0 || expandedIDs.contains(source.id) else { return nodes }
+        guard expandedIDs.contains(source.id) else { return nodes }
         nodes.append(contentsOf: childSources.flatMap {
-            flatten(source: $0, depth: depth + 1, children: children, expandedIDs: expandedIDs)
+            flatten(source: $0, parent: source, depth: depth + 1, children: children, expandedIDs: expandedIDs)
         })
         return nodes
+    }
+
+    private static func displayName(for source: SourceDirectory, parent: SourceDirectory?) -> String {
+        let sourcePath = normalizedDirectoryPath(source.path)
+        guard let parent else { return sourcePath }
+
+        let parentPath = normalizedDirectoryPath(parent.path)
+        let prefix = parentPath == "/" ? "/" : parentPath + "/"
+        guard sourcePath.hasPrefix(prefix) else {
+            return URL(fileURLWithPath: sourcePath).lastPathComponent
+        }
+
+        var relativePath = String(sourcePath.dropFirst(prefix.count))
+        if relativePath.hasPrefix("/") {
+            relativePath.removeFirst()
+        }
+        return relativePath.isEmpty ? URL(fileURLWithPath: sourcePath).lastPathComponent : relativePath
     }
 
     private static func rootSources(

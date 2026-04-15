@@ -15,3 +15,10 @@
 - 根因：UI 组织关系和真实文件系统位置没有分清。
 - 预防动作：文件夹移动只能更新 `source_directories.parent_source_directory_id`，不得调用文件系统移动/删除，也不得批量改写 `file_instances.path`。
 - 合并前验证：检查 diff 中移动逻辑只更新来源目录父级，并运行 `swift test` 与 `scripts/pre_merge_gate.sh`。
+
+## POV 收尾
+- 适用范围：完工、合并、push、交付可打开 app。
+- 问题模式：改动在隔离 worktree 里验证通过，但用户打开老目录 app 看不到变化。
+- 根因：开发路径和用户固定打开路径不同，打包产物没有回写到固定仓库目录。
+- 预防动作：最终合并、验证、打包必须在 `/Users/hechuan/workspace/photo-asset-manager` 执行；`.build/` 和 `.app` 只生成不提交。
+- 合并前验证：运行 `swift test`、`swift build`、`scripts/pre_merge_gate.sh`、`./scripts/package_app.sh`，并确认 app 路径是 `.build/app/PhotoAssetManager.app`。

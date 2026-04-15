@@ -72,6 +72,19 @@ struct SidebarUXTests {
         #expect(!source.contains("node.depth > 0 && node.hasChildren"))
     }
 
+    @Test func folderTreeCanCollapseRootsAndUsesRelativeDisplayNames() throws {
+        let content = try contentViewSource()
+        let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
+
+        #expect(models.contains("var displayName: String"))
+        #expect(models.contains("displayName: displayName(for: source, parent: parent)"))
+        #expect(models.contains("guard expandedIDs.contains(source.id) else { return nodes }"))
+        #expect(!models.contains("guard depth == 0 || expandedIDs.contains(source.id) else { return nodes }"))
+        #expect(models.contains("relativePath.hasPrefix(\"/\")"))
+        #expect(content.contains("displayName: node.displayName"))
+        #expect(content.contains("Text(displayName)"))
+    }
+
     private func contentViewSource() throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile
