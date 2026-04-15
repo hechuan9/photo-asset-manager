@@ -40,6 +40,15 @@ struct ContentView: View {
                 .disabled(library.selectedAsset == nil || library.isBusy)
             }
         }
+        .sheet(isPresented: Binding(
+            get: { library.blockingTask != nil },
+            set: { _ in }
+        )) {
+            if let task = library.blockingTask {
+                BlockingTaskProgressView(task: task)
+                    .interactiveDismissDisabled(true)
+            }
+        }
         .alert("操作失败", isPresented: Binding(
             get: { library.lastError != nil },
             set: { if !$0 { library.lastError = nil } }
@@ -48,6 +57,64 @@ struct ContentView: View {
         } message: {
             Text(library.lastError ?? "")
         }
+    }
+}
+
+struct BlockingTaskProgressView: View {
+    var task: BlockingTaskReport
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(task.title)
+                .font(.title3)
+                .fontWeight(.semibold)
+
+            if task.totalItems > 0 {
+                ProgressView(value: Double(task.completedItems), total: Double(task.totalItems))
+                HStack {
+                    Text("\(task.completedItems) / \(task.totalItems)")
+                    Spacer()
+                    Text(percentText)
+                }
+                .foregroundStyle(.secondary)
+            } else {
+                ProgressView()
+                Text("正在准备...")
+                    .foregroundStyle(.secondary)
+            }
+
+            if !task.phase.isEmpty {
+                Text(task.phase)
+                    .fontWeight(.medium)
+            }
+
+            if !task.currentPath.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("当前文件")
+                        .foregroundStyle(.secondary)
+                    Text(task.currentPath)
+                        .lineLimit(3)
+                        .textSelection(.enabled)
+                }
+            }
+
+            if !task.message.isEmpty {
+                Text(task.message)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("任务进行中，请保持应用打开。其它操作会等这个任务结束后再继续。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 460)
+        .padding(24)
+    }
+
+    private var percentText: String {
+        guard task.totalItems > 0 else { return "0%" }
+        let percent = Int((Double(task.completedItems) / Double(task.totalItems) * 100).rounded())
+        return "\(percent)%"
     }
 }
 
@@ -118,36 +185,6 @@ struct SidebarView: View {
                         }
                         .disabled(library.isBusy)
                     }
-                }
-            }
-
-            if let task = library.blockingTask {
-                Section(task.title) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if task.totalItems > 0 {
-                            ProgressView(value: Double(task.completedItems), total: Double(task.totalItems))
-                            Text("\(task.completedItems) / \(task.totalItems)")
-                                .foregroundStyle(.secondary)
-                        } else {
-                            ProgressView()
-                        }
-                        if !task.phase.isEmpty {
-                            Text(task.phase)
-                                .fontWeight(.medium)
-                        }
-                        if !task.currentPath.isEmpty {
-                            Text(task.currentPath)
-                                .lineLimit(2)
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                        }
-                        if !task.message.isEmpty {
-                            Text(task.message)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .font(.callout)
-                    .padding(.vertical, 4)
                 }
             }
 

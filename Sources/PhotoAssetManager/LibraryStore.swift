@@ -310,54 +310,59 @@ final class LibraryStore: ObservableObject {
     }
 
     private func migrateDerivativeStorage(to destinationRoot: URL) {
-        do {
-            blockingTask = BlockingTaskReport(title: "迁移缩略图", phase: "准备迁移", currentPath: destinationRoot.path)
-            migrationReport = nil
-            try FileManager.default.createDirectory(at: destinationRoot.appendingPathComponent("thumbnails", isDirectory: true), withIntermediateDirectories: true)
-            let thumbnails = try database.thumbnailFileInstances()
-            blockingTask?.totalItems = thumbnails.count
-            blockingTask?.phase = thumbnails.isEmpty ? "没有可迁移缩略图" : "复制并校验"
-            var copied = 0
-            var skippedMissing = 0
-            for (index, thumbnail) in thumbnails.enumerated() {
-                let source = URL(fileURLWithPath: thumbnail.path)
-                blockingTask?.currentPath = source.path
-                blockingTask?.completedItems = index
-                blockingTask?.skippedItems = skippedMissing
-                guard FileManager.default.fileExists(atPath: source.path) else {
-                    skippedMissing += 1
-                    blockingTask?.completedItems = index + 1
+        blockingTask = BlockingTaskReport(title: "迁移缩略图", phase: "准备迁移", currentPath: destinationRoot.path)
+        migrationReport = nil
+        Task {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            do {
+                try FileManager.default.createDirectory(at: destinationRoot.appendingPathComponent("thumbnails", isDirectory: true), withIntermediateDirectories: true)
+                let thumbnails = try database.thumbnailFileInstances()
+                blockingTask?.totalItems = thumbnails.count
+                blockingTask?.phase = thumbnails.isEmpty ? "没有可迁移缩略图" : "复制并校验"
+                await Task.yield()
+                var copied = 0
+                var skippedMissing = 0
+                for (index, thumbnail) in thumbnails.enumerated() {
+                    let source = URL(fileURLWithPath: thumbnail.path)
+                    blockingTask?.currentPath = source.path
+                    blockingTask?.completedItems = index
                     blockingTask?.skippedItems = skippedMissing
+                    guard FileManager.default.fileExists(atPath: source.path) else {
+                        skippedMissing += 1
+                        blockingTask?.completedItems = index + 1
+                        blockingTask?.skippedItems = skippedMissing
+                        blockingTask?.message = "已迁移 \(copied)，跳过 \(skippedMissing)"
+                        await Task.yield()
+                        continue
+                    }
+                    let destination = destinationRoot
+                        .appendingPathComponent("thumbnails", isDirectory: true)
+                        .appendingPathComponent(source.lastPathComponent)
+                    if !FileManager.default.fileExists(atPath: destination.path) {
+                        try FileManager.default.copyItem(at: source, to: destination)
+                    }
+                    let sourceHash = try FileHasher.sha256(url: source)
+                    let destinationHash = try FileHasher.sha256(url: destination)
+                    guard sourceHash == destinationHash else {
+                        throw FileOperationError.hashMismatch(source: sourceHash, destination: destinationHash)
+                    }
+                    let size = try Int64(destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+                    try database.updateFileInstanceLocation(id: thumbnail.id, path: destination.path, hash: destinationHash, sizeBytes: size)
+                    copied += 1
+                    blockingTask?.completedItems = index + 1
                     blockingTask?.message = "已迁移 \(copied)，跳过 \(skippedMissing)"
-                    RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.001))
-                    continue
+                    await Task.yield()
                 }
-                let destination = destinationRoot
-                    .appendingPathComponent("thumbnails", isDirectory: true)
-                    .appendingPathComponent(source.lastPathComponent)
-                if !FileManager.default.fileExists(atPath: destination.path) {
-                    try FileManager.default.copyItem(at: source, to: destination)
-                }
-                let sourceHash = try FileHasher.sha256(url: source)
-                let destinationHash = try FileHasher.sha256(url: destination)
-                guard sourceHash == destinationHash else {
-                    throw FileOperationError.hashMismatch(source: sourceHash, destination: destinationHash)
-                }
-                let size = try Int64(destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
-                try database.updateFileInstanceLocation(id: thumbnail.id, path: destination.path, hash: destinationHash, sizeBytes: size)
-                copied += 1
-                blockingTask?.completedItems = index + 1
-                blockingTask?.message = "已迁移 \(copied)，跳过 \(skippedMissing)"
-                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.001))
+                try database.setDerivativeStoragePath(destinationRoot.path)
+                derivativeStorageURL = destinationRoot
+                migrationReport = "缩略图迁移完成：\(copied) 个已迁移，\(skippedMissing) 个源文件缺失。旧文件未删除。"
+                blockingTask = nil
+                refresh()
+            } catch {
+                blockingTask = nil
+                lastError = error.fullTrace
             }
-            try database.setDerivativeStoragePath(destinationRoot.path)
-            derivativeStorageURL = destinationRoot
-            migrationReport = "缩略图迁移完成：\(copied) 个已迁移，\(skippedMissing) 个源文件缺失。旧文件未删除。"
-            blockingTask = nil
-            refresh()
-        } catch {
-            blockingTask = nil
-            lastError = error.fullTrace
         }
     }
 
