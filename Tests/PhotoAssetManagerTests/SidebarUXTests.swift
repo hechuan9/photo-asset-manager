@@ -210,6 +210,8 @@ struct SidebarUXTests {
         let store = try libraryStoreSource()
         let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
         let operations = try sourceFile("Sources/PhotoAssetManager/FileOperations.swift")
+        let rewriteBody = functionBody(named: "rewriteFolderMovePaths", in: database)
+        let continueMoveBody = functionBody(named: "continueFolderMove", in: store)
 
         #expect(database.contains("CREATE TABLE IF NOT EXISTS folder_move_jobs"))
         #expect(database.contains("CREATE TABLE IF NOT EXISTS folder_move_items"))
@@ -226,6 +228,10 @@ struct SidebarUXTests {
         #expect(store.contains("title: \"移动文件夹\""))
         #expect(content.contains("FolderMoveTargetDialog("))
         #expect(content.contains("FolderActionMenuItems("))
+        #expect(database.contains("func refreshBrowseGraphForFolderMove"))
+        #expect(rewriteBody.contains("refreshBrowseGraphForFolderMove(job: job)"))
+        #expect(!rewriteBody.contains("rebuildBrowseGraph()"))
+        #expect(continueMoveBody.contains("phase: \"更新索引\""))
     }
 
     @Test func folderMoveOpensTargetDialogForRegisteredAndIndexedFolders() throws {

@@ -314,7 +314,7 @@ final class SQLiteDatabase: @unchecked Sendable {
     func upsertBrowseFolderNode(path: String, storageKind: StorageKind) throws -> BrowseNode {
         let normalizedPath = Self.normalizedDirectoryPath(path)
         let id = UUID()
-        let displayName = normalizedPath == "/" ? "/" : URL(fileURLWithPath: normalizedPath, isDirectory: true).lastPathComponent
+        let displayName = Self.lastPathComponent(of: normalizedPath)
         try execute(
             """
             INSERT INTO browse_nodes (id, kind, canonical_key, display_name, display_path, storage_kind)
@@ -404,7 +404,7 @@ final class SQLiteDatabase: @unchecked Sendable {
     }
 
     func upsertBrowseFolderMembership(filePath: String, fileInstanceID: UUID, storageKind: StorageKind) throws {
-        let folderPath = Self.normalizedDirectoryPath(URL(fileURLWithPath: filePath).deletingLastPathComponent().path)
+        let folderPath = Self.parentDirectoryPath(ofFilePath: filePath)
         let folders = Self.ancestorDirectoryPaths(to: folderPath)
         guard !folders.isEmpty else { return }
 
@@ -903,7 +903,52 @@ final class SQLiteDatabase: @unchecked Sendable {
             try? execute("ROLLBACK")
             throw error
         }
-        try rebuildBrowseGraph()
+        try refreshBrowseGraphForFolderMove(job: job)
+    }
+
+    func refreshBrowseGraphForFolderMove(job: FolderMoveJob) throws {
+        let rows = try prepare(
+            """
+            SELECT fi.id, fi.path, fi.storage_kind
+            FROM file_instances fi
+            JOIN folder_move_items fmi ON fmi.file_instance_id = fi.id
+            WHERE fmi.job_id = ?
+              AND fi.file_role IN ('raw_original', 'jpeg_original', 'sidecar', 'export')
+            ORDER BY fi.path
+            """,
+            [.text(job.id.uuidString)]
+        ) { statement in
+            (
+                UUID(uuidString: statement.text(0)),
+                statement.text(1),
+                StorageKind(rawValue: statement.text(2)) ?? .local
+            )
+        }
+
+        guard !rows.isEmpty else { return }
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try execute(
+                """
+                DELETE FROM browse_nodes
+                WHERE kind = ?
+                  AND (canonical_key = ? OR canonical_key LIKE ? || '/%')
+                """,
+                [
+                    .text(BrowseNodeKind.folder.rawValue),
+                    .text(job.sourcePath),
+                    .text(job.sourcePath)
+                ]
+            )
+            for row in rows {
+                guard let fileInstanceID = row.0 else { continue }
+                try upsertBrowseFolderMembership(filePath: row.1, fileInstanceID: fileInstanceID, storageKind: row.2)
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
     }
 
     func failFolderMoveJob(id: UUID, error: Error) throws {
@@ -1730,21 +1775,32 @@ private extension SQLiteDatabase {
         return path.hasSuffix("/") ? String(path.dropLast()) : path
     }
 
+    static func parentDirectoryPath(ofFilePath path: String) -> String {
+        let normalizedPath = normalizedDirectoryPath(path)
+        guard normalizedPath != "/" else { return "/" }
+        guard let separator = normalizedPath.lastIndex(of: "/") else { return "/" }
+        if separator == normalizedPath.startIndex {
+            return "/"
+        }
+        return String(normalizedPath[..<separator])
+    }
+
+    static func lastPathComponent(of path: String) -> String {
+        let normalizedPath = normalizedDirectoryPath(path)
+        guard normalizedPath != "/" else { return "/" }
+        guard let separator = normalizedPath.lastIndex(of: "/") else { return normalizedPath }
+        return String(normalizedPath[normalizedPath.index(after: separator)...])
+    }
+
     static func ancestorDirectoryPaths(to folderPath: String) -> [String] {
         let normalizedPath = normalizedDirectoryPath(folderPath)
-        let components = URL(fileURLWithPath: normalizedPath, isDirectory: true).pathComponents
-        guard !components.isEmpty else { return [] }
+        guard normalizedPath.hasPrefix("/") else { return [normalizedPath] }
+        let components = normalizedPath.split(separator: "/", omittingEmptySubsequences: true)
 
-        var paths: [String] = []
+        var paths = ["/"]
         var current = ""
         for component in components {
-            if component == "/" {
-                current = "/"
-            } else if current == "/" {
-                current += component
-            } else {
-                current += "/" + component
-            }
+            current += "/" + component
             paths.append(current)
         }
         return paths

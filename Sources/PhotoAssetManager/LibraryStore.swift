@@ -745,6 +745,14 @@ final class LibraryStore: ObservableObject {
                         message: "\(item.sourcePath) -> \(item.destinationPath)"
                     )
                 }
+                blockingTask = BlockingTaskReport(
+                    title: "移动文件夹",
+                    phase: "更新索引",
+                    currentPath: job.destinationPath,
+                    totalItems: job.totalFiles,
+                    completedItems: job.totalFiles,
+                    message: "\(job.sourcePath) -> \(job.destinationPath)"
+                )
                 try database.rewriteFolderMovePaths(job: job, parentID: parentID)
                 sourceDirectories = try database.sourceDirectories()
                 indexedBrowseFolders = try database.browseFolders()
