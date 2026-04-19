@@ -311,6 +311,22 @@ struct PhotoImportPlanItem: Hashable, Sendable {
     var contentHash: String
 }
 
+struct AssetFileMoveRequest: Identifiable, Hashable, Sendable {
+    var id: String {
+        (assetIDs.map(\.uuidString).sorted() + [target.path]).joined(separator: "|")
+    }
+
+    var assetIDs: [UUID]
+    var target: FolderMoveTarget
+}
+
+struct AssetFileMovePlanItem: Hashable, Sendable {
+    var fileInstanceID: UUID
+    var sourcePath: String
+    var destinationPath: String
+    var contentHash: String
+}
+
 struct IndexedFolderTree: Sendable {
     private let childrenByParentPath: [String: [BrowseNode]]
 

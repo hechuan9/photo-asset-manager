@@ -473,6 +473,38 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
+    func movableFileInstances(assetIDs: [UUID]) throws -> [FileInstance] {
+        let ids = Array(Set(assetIDs)).sorted { $0.uuidString < $1.uuidString }
+        guard !ids.isEmpty else { return [] }
+        let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ", ")
+        let sql = """
+        SELECT id, asset_id, path, device_id, storage_kind, file_role, authority_role,
+               sync_status, size_bytes, content_hash, last_seen_at, availability
+        FROM file_instances
+        WHERE asset_id IN (\(placeholders))
+          AND availability = ?
+          AND file_role IN ('raw_original', 'jpeg_original', 'sidecar', 'export')
+        ORDER BY asset_id, authority_role, file_role, path
+        """
+        let values = ids.map { SQLiteValue.text($0.uuidString) } + [.text(Availability.online.rawValue)]
+        return try prepare(sql, values) { statement in
+            FileInstance(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                assetID: UUID(uuidString: statement.text(1)) ?? UUID(),
+                path: statement.text(2),
+                deviceID: statement.text(3),
+                storageKind: StorageKind(rawValue: statement.text(4)) ?? .local,
+                fileRole: FileRole(rawValue: statement.text(5)) ?? .jpegOriginal,
+                authorityRole: AuthorityRole(rawValue: statement.text(6)) ?? .sourceCopy,
+                syncStatus: SyncStatus(rawValue: statement.text(7)) ?? .needsArchive,
+                sizeBytes: statement.int64(8),
+                contentHash: statement.text(9),
+                lastSeenAt: DateCoding.decode(statement.text(10)) ?? Date(),
+                availability: Availability(rawValue: statement.text(11)) ?? .missing
+            )
+        }
+    }
+
     func upsertScannedFile(_ scanned: ScannedFile, batchID: UUID) throws -> Bool {
         let existingAssetID = try assetID(contentHash: scanned.contentHash, metadataFingerprint: scanned.metadataFingerprint)
         let assetID = existingAssetID ?? UUID()
@@ -875,6 +907,55 @@ final class SQLiteDatabase: @unchecked Sendable {
             try execute(
                 "UPDATE folder_move_jobs SET completed_files = completed_files + 1, updated_at = ? WHERE id = ?",
                 [.text(now), .text(item.jobID.uuidString)]
+            )
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    func completeAssetFileMoveItem(_ item: AssetFileMovePlanItem, hash: String, sizeBytes: Int64) throws {
+        let now = DateCoding.encode(Date())
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try execute(
+                """
+                UPDATE file_instances
+                SET path = ?, storage_kind = ?, content_hash = ?, size_bytes = ?, last_seen_at = ?, availability = ?
+                WHERE id = ?
+                """,
+                [
+                    .text(item.destinationPath),
+                    .text(storageKindForPath(item.destinationPath).rawValue),
+                    .text(hash),
+                    .int(sizeBytes),
+                    .text(now),
+                    .text(Availability.online.rawValue),
+                    .text(item.fileInstanceID.uuidString)
+                ]
+            )
+            try execute(
+                "UPDATE assets SET updated_at = ? WHERE id = (SELECT asset_id FROM file_instances WHERE id = ?)",
+                [.text(now), .text(item.fileInstanceID.uuidString)]
+            )
+            try upsertBrowseFolderMembership(
+                filePath: item.destinationPath,
+                fileInstanceID: item.fileInstanceID,
+                storageKind: storageKindForPath(item.destinationPath)
+            )
+            try execute(
+                """
+                INSERT INTO operation_logs (id, action, source_path, destination_path, status, detail, created_at)
+                VALUES (?, 'move_asset_file', ?, ?, 'success', ?, ?)
+                """,
+                [
+                    .text(UUID().uuidString),
+                    .text(item.sourcePath),
+                    .text(item.destinationPath),
+                    .text("file_instance_id=\(item.fileInstanceID.uuidString)"),
+                    .text(now)
+                ]
             )
             try execute("COMMIT")
         } catch {

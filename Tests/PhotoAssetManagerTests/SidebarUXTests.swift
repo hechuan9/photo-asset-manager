@@ -314,6 +314,55 @@ struct SidebarUXTests {
         #expect(!copyBody.contains("emptySourceDirectoryTree"))
     }
 
+    @Test func selectedAssetsCanBeDraggedToFolderAfterConfirmation() throws {
+        let content = try contentViewSource()
+        let store = try libraryStoreSource()
+        let operations = try sourceFile("Sources/PhotoAssetManager/FileOperations.swift")
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+        let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
+
+        #expect(models.contains("struct AssetFileMoveRequest"))
+        #expect(models.contains("struct AssetFileMovePlanItem"))
+        #expect(store.contains("@Published var selectedAssetIDs: Set<UUID>"))
+        #expect(store.contains("func selectAsset(_ asset: Asset, modifiers: EventModifiers)"))
+        #expect(store.contains("func moveAssets(_ assetIDs: [UUID], to target: FolderMoveTarget)"))
+        #expect(database.contains("func movableFileInstances(assetIDs: [UUID])"))
+        #expect(database.contains("func completeAssetFileMoveItem"))
+        #expect(database.contains("SET path = ?, storage_kind = ?"))
+        #expect(operations.contains("func buildAssetFileMovePlan"))
+        #expect(operations.contains("func moveAssetFiles"))
+        #expect(operations.contains("copyItem(at: source, to: destination)"))
+        #expect(operations.contains("removeItem(at: source)"))
+
+        #expect(content.contains("@State private var pendingAssetFileMoveRequest: AssetFileMoveRequest?"))
+        #expect(content.contains("AssetFileMoveConfirmationDialog("))
+        #expect(content.contains(".draggable(assetDragPayload(for: asset))"))
+        #expect(content.contains(".dropDestination(for: String.self)"))
+        #expect(content.contains("openAssetMoveConfirmation"))
+        #expect(content.contains("library.moveAssets(request.assetIDs, to: request.target)"))
+        #expect(content.contains("ModifierAwareClickView"))
+        #expect(content.contains("select(asset, modifiers)"))
+        #expect(!content.contains("NSEvent.modifierFlags"))
+
+        let confirmationBody = structBody(named: "AssetFileMoveConfirmationDialog", in: content)
+        #expect(confirmationBody.contains("Text(\"移动选中文件？\")"))
+        #expect(confirmationBody.contains("Button(\"确认移动\")"))
+        #expect(confirmationBody.contains("request.assetIDs.count"))
+    }
+
+    @Test func shiftSelectionUsesCurrentAnchorAndSelectsContiguousRange() throws {
+        let store = try libraryStoreSource()
+        let selectBody = functionBody(named: "selectAsset", in: store)
+        let refreshBody = functionBody(named: "refresh", in: store)
+        let finishSelectingFolderBody = functionBody(named: "finishSelectingFolder", in: store)
+
+        #expect(refreshBody.contains("assetSelectionAnchorID = selectedAssetID"))
+        #expect(finishSelectingFolderBody.contains("assetSelectionAnchorID = result.selectedAssetID"))
+        #expect(selectBody.contains("let bounds = min(anchorIndex, selectedIndex)...max(anchorIndex, selectedIndex)"))
+        #expect(selectBody.contains("selectedAssetIDs = Set(assets[bounds].map(\\.id))"))
+        #expect(!selectBody.contains("selectedAssetIDs.formUnion(assets[bounds].map(\\.id))"))
+    }
+
     private func contentViewSource() throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile

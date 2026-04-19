@@ -339,6 +339,7 @@ struct SidebarView: View {
     @EnvironmentObject private var library: LibraryStore
     @State private var expandedFolderNodeIDs: Set<String> = []
     @State private var pendingMoveSource: FolderMoveSource?
+    @State private var pendingAssetFileMoveRequest: AssetFileMoveRequest?
 
     var body: some View {
         List(selection: Binding(
@@ -387,6 +388,9 @@ struct SidebarView: View {
                             },
                             openMoveDialog: { source in
                                 pendingMoveSource = source
+                            },
+                            openAssetMoveConfirmation: { request in
+                                pendingAssetFileMoveRequest = request
                             }
                         )
                     }
@@ -457,6 +461,14 @@ struct SidebarView: View {
                 source: source,
                 close: {
                     pendingMoveSource = nil
+                }
+            )
+        }
+        .sheet(item: $pendingAssetFileMoveRequest) { request in
+            AssetFileMoveConfirmationDialog(
+                request: request,
+                close: {
+                    pendingAssetFileMoveRequest = nil
                 }
             )
         }
@@ -592,6 +604,7 @@ struct SourceDirectoryNodeRow: View {
     var toggleExpansion: () -> Void
     var select: () -> Void
     var openMoveDialog: (FolderMoveSource) -> Void
+    var openAssetMoveConfirmation: (AssetFileMoveRequest) -> Void
 
     private var moveSource: FolderMoveSource {
         node.source.map(FolderMoveSource.init(source:)) ?? FolderMoveSource(path: node.path)
@@ -657,6 +670,72 @@ struct SourceDirectoryNodeRow: View {
                 openMoveDialog: openMoveDialog
             )
         }
+        .dropDestination(for: String.self) { items, _ in
+            guard !library.isBusy,
+                  let assetIDs = items.lazy.compactMap(AssetDragPayload.assetIDs).first,
+                  !assetIDs.isEmpty else {
+                return false
+            }
+            openAssetMoveConfirmation(AssetFileMoveRequest(
+                assetIDs: assetIDs,
+                target: FolderMoveTarget(path: node.path, displayName: node.displayName)
+            ))
+            return true
+        } isTargeted: { targeted in
+            isHovering = targeted
+        }
+    }
+}
+
+struct AssetFileMoveConfirmationDialog: View {
+    @EnvironmentObject private var library: LibraryStore
+    var request: AssetFileMoveRequest
+    var close: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("移动选中文件？")
+                .font(.headline)
+            Text("将移动 \(request.assetIDs.count) 个选中资产的在线原片、sidecar 和导出文件。移动会先复制并校验 hash，通过后才删除源文件。")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(request.target.path)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) {
+                    close()
+                }
+                Button("确认移动") {
+                    library.moveAssets(request.assetIDs, to: request.target)
+                    close()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(library.isBusy)
+            }
+        }
+        .frame(width: 440, alignment: .leading)
+        .padding(18)
+    }
+}
+
+private enum AssetDragPayload {
+    private static let prefix = "photo-asset-manager.assets"
+
+    static func string(assetIDs: [UUID]) -> String {
+        ([prefix] + assetIDs.map(\.uuidString)).joined(separator: "\n")
+    }
+
+    static func assetIDs(from payload: String) -> [UUID]? {
+        let lines = payload.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        guard lines.first == prefix else { return nil }
+        let ids = lines.dropFirst().compactMap(UUID.init(uuidString:))
+        return ids.isEmpty ? nil : ids
     }
 }
 
@@ -1054,9 +1133,10 @@ enum JustifiedAssetGridLayout {
 struct JustifiedAssetGrid: View {
     var assets: [Asset]
     var selectedAssetID: UUID?
+    var selectedAssetIDs: Set<UUID>
     var aspectRatios: [UUID: CGFloat]
     var availableWidth: CGFloat
-    var select: (Asset) -> Void
+    var select: (Asset, EventModifiers) -> Void
     var loadMore: (UUID) -> Void
     var updateAspectRatio: (UUID, CGFloat) -> Void
 
@@ -1076,13 +1156,15 @@ struct JustifiedAssetGrid: View {
             ForEach(rows) { row in
                 HStack(spacing: spacing) {
                     ForEach(row.assets) { asset in
-                        AssetTile(asset: asset, selected: asset.id == selectedAssetID) { ratio in
+                        AssetTile(asset: asset, selected: selectedAssetIDs.contains(asset.id) || asset.id == selectedAssetID) { ratio in
                             updateAspectRatio(asset.id, ratio)
                         }
                         .frame(width: row.width(for: asset), height: row.height)
                         .onTapGesture {
-                            select(asset)
+                            let modifiers = ModifierAwareClickView.currentModifiers()
+                            select(asset, modifiers)
                         }
+                        .draggable(assetDragPayload(for: asset))
                         .onAppear {
                             loadMore(asset.id)
                         }
@@ -1092,6 +1174,26 @@ struct JustifiedAssetGrid: View {
             }
         }
         .padding(spacing)
+    }
+
+    private func assetDragPayload(for asset: Asset) -> String {
+        let draggedIDs = selectedAssetIDs.contains(asset.id) ? Array(selectedAssetIDs) : [asset.id]
+        return AssetDragPayload.string(assetIDs: draggedIDs.sorted { $0.uuidString < $1.uuidString })
+    }
+}
+
+private enum ModifierAwareClickView {
+    @MainActor
+    static func currentModifiers() -> EventModifiers {
+        var modifiers: EventModifiers = []
+        let flags = NSApp.currentEvent?.modifierFlags ?? []
+        if flags.contains(.command) {
+            modifiers.insert(.command)
+        }
+        if flags.contains(.shift) {
+            modifiers.insert(.shift)
+        }
+        return modifiers
     }
 }
 
@@ -1111,11 +1213,11 @@ struct AssetBrowserView: View {
                         JustifiedAssetGrid(
                             assets: library.assets,
                             selectedAssetID: library.selectedAssetID,
+                            selectedAssetIDs: library.selectedAssetIDs,
                             aspectRatios: aspectRatios,
                             availableWidth: proxy.size.width,
-                            select: { asset in
-                                library.selectedAssetID = asset.id
-                                library.loadSelectedFiles()
+                            select: { asset, modifiers in
+                                library.selectAsset(asset, modifiers: modifiers)
                             },
                             loadMore: { assetID in
                                 library.loadMoreAssetsIfNeeded(currentAssetID: assetID)
@@ -1205,6 +1307,7 @@ struct AssetTile: View {
         }
         .clipped()
         .clipShape(RoundedRectangle(cornerRadius: 0))
+        .border(Color(nsColor: .selectedContentBackgroundColor), width: selected ? 3 : 0)
         .contentShape(Rectangle())
         .accessibilityLabel(asset.originalFilename)
     }

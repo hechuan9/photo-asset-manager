@@ -1,10 +1,12 @@
 import AppKit
 import Foundation
+import SwiftUI
 
 @MainActor
 final class LibraryStore: ObservableObject {
     @Published var assets: [Asset] = []
     @Published var selectedAssetID: UUID?
+    @Published var selectedAssetIDs: Set<UUID> = []
     @Published var selectedFiles: [FileInstance] = []
     @Published var filter = LibraryFilter()
     @Published var counts: [AssetStatus: Int] = [:]
@@ -31,6 +33,7 @@ final class LibraryStore: ObservableObject {
     private var startupOrganizationTask: Task<Void, Never>?
     private var folderSelectionTask: Task<Void, Never>?
     private var folderSelectionID: UUID?
+    private var assetSelectionAnchorID: UUID?
     private var startupNASMountSucceeded = false
     private let assetPageSize = 96
     private let assetLoadAheadThreshold = 24
@@ -362,6 +365,13 @@ final class LibraryStore: ObservableObject {
             if selectedAssetID == nil || !assets.contains(where: { $0.id == selectedAssetID }) {
                 selectedAssetID = assets.first?.id
             }
+            selectedAssetIDs.formIntersection(Set(assets.map(\.id)))
+            if let selectedAssetID, selectedAssetIDs.isEmpty {
+                selectedAssetIDs = [selectedAssetID]
+            }
+            if assetSelectionAnchorID == nil || !assets.contains(where: { $0.id == assetSelectionAnchorID }) {
+                assetSelectionAnchorID = selectedAssetID
+            }
             loadSelectedFiles()
         } catch {
             lastError = error.fullTrace
@@ -392,6 +402,35 @@ final class LibraryStore: ObservableObject {
         guard let currentIndex = assets.firstIndex(where: { $0.id == currentAssetID }) else { return }
         guard assets.distance(from: currentIndex, to: assets.endIndex) <= assetLoadAheadThreshold else { return }
         loadMoreAssets()
+    }
+
+    func selectAsset(_ asset: Asset, modifiers: EventModifiers) {
+        let isRangeSelection = modifiers.contains(.shift)
+        let isToggleSelection = modifiers.contains(.command)
+
+        if isRangeSelection, let anchor = assetSelectionAnchorID,
+           let anchorIndex = assets.firstIndex(where: { $0.id == anchor }),
+           let selectedIndex = assets.firstIndex(where: { $0.id == asset.id }) {
+            let bounds = min(anchorIndex, selectedIndex)...max(anchorIndex, selectedIndex)
+            selectedAssetIDs = Set(assets[bounds].map(\.id))
+        } else if isToggleSelection {
+            if selectedAssetIDs.contains(asset.id), selectedAssetIDs.count > 1 {
+                selectedAssetIDs.remove(asset.id)
+            } else {
+                selectedAssetIDs.insert(asset.id)
+            }
+            assetSelectionAnchorID = asset.id
+        } else {
+            selectedAssetIDs = [asset.id]
+            assetSelectionAnchorID = asset.id
+        }
+
+        if selectedAssetIDs.contains(asset.id) {
+            selectedAssetID = asset.id
+        } else {
+            selectedAssetID = selectedAssetIDs.sorted { $0.uuidString < $1.uuidString }.first
+        }
+        loadSelectedFiles()
     }
 
     func startAvailabilityRefreshInBackground(force: Bool = false) {
@@ -660,6 +699,8 @@ final class LibraryStore: ObservableObject {
         )
         assets = []
         selectedAssetID = nil
+        selectedAssetIDs = []
+        assetSelectionAnchorID = nil
         selectedFiles = []
         hasMoreAssets = false
         lastError = nil
@@ -735,6 +776,8 @@ final class LibraryStore: ObservableObject {
             filter.browseSelection = result.selection
             assets = result.assets
             selectedAssetID = result.selectedAssetID
+            selectedAssetIDs = result.selectedAssetID.map { [$0] } ?? []
+            assetSelectionAnchorID = result.selectedAssetID
             selectedFiles = result.selectedFiles
             hasMoreAssets = result.hasMoreAssets
         } catch is CancellationError {
@@ -812,6 +855,69 @@ final class LibraryStore: ObservableObject {
 
     func open(file: FileInstance) {
         fileOperations.open(file)
+    }
+
+    func moveAssets(_ assetIDs: [UUID], to target: FolderMoveTarget) {
+        guard !isBusy else { return }
+        let assetIDs = Array(Set(assetIDs)).sorted { $0.uuidString < $1.uuidString }
+        guard !assetIDs.isEmpty else { return }
+        availabilityTask?.cancel()
+        availabilityTask = nil
+        backgroundTask = nil
+        blockingTask = BlockingTaskReport(
+            title: "移动文件",
+            phase: "准备移动",
+            currentPath: target.path,
+            totalItems: assetIDs.count,
+            message: "准备移动 \(assetIDs.count) 个资产的文件到 \(target.path)"
+        )
+        lastError = nil
+
+        let database = database
+        Task.detached(priority: .userInitiated) {
+            do {
+                let plan = try FileOperations().buildAssetFileMovePlan(
+                    assetIDs: assetIDs,
+                    destinationTarget: target,
+                    database: database
+                )
+                await MainActor.run {
+                    self.blockingTask = BlockingTaskReport(
+                        title: "移动文件",
+                        phase: "复制、校验并删除源文件",
+                        currentPath: target.path,
+                        totalItems: plan.count,
+                        message: "移动 \(plan.count) 个文件到 \(target.path)"
+                    )
+                }
+                try await FileOperations().moveAssetFiles(items: plan, database: database) { item, index in
+                    await MainActor.run {
+                        self.blockingTask = BlockingTaskReport(
+                            title: "移动文件",
+                            phase: "复制、校验并删除源文件",
+                            currentPath: item.sourcePath,
+                            totalItems: plan.count,
+                            completedItems: index,
+                            message: "\(item.sourcePath) -> \(item.destinationPath)"
+                        )
+                    }
+                }
+                let sourceDirectories = try database.sourceDirectories()
+                let indexedBrowseFolders = try database.browseFolders()
+                await MainActor.run {
+                    self.sourceDirectories = sourceDirectories
+                    self.indexedBrowseFolders = indexedBrowseFolders
+                    self.blockingTask = nil
+                    self.refresh()
+                    self.startAvailabilityRefreshInBackground()
+                }
+            } catch {
+                await MainActor.run {
+                    self.blockingTask = nil
+                    self.lastError = error.fullTrace
+                }
+            }
+        }
     }
 
     private func archive(asset: Asset, nasRoot: URL) {
