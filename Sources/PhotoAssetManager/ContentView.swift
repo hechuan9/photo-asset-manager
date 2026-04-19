@@ -355,13 +355,6 @@ struct SidebarView: View {
             }
             .buttonStyle(.plain)
 
-            Section("工作流") {
-                ForEach(AssetStatus.allCases) { status in
-                    StatusRow(status: status, count: library.counts[status] ?? 0)
-                        .tag(Optional(status))
-                }
-            }
-
             Section {
                 if library.sourceDirectories.isEmpty {
                     Text("还没有文件夹")
@@ -534,20 +527,6 @@ struct ThumbnailStoragePopover: View {
             }
             .frame(width: 320, alignment: .leading)
             .padding(14)
-        }
-    }
-}
-
-struct StatusRow: View {
-    var status: AssetStatus
-    var count: Int
-
-    var body: some View {
-        HStack {
-            Text(status.label)
-            Spacer()
-            Text("\(count)")
-                .foregroundStyle(.secondary)
         }
     }
 }
@@ -1469,8 +1448,7 @@ struct FilterBar: View {
                     library.refresh()
                 }
                 Button("重置") {
-                    let status = library.filter.status
-                    library.filter = LibraryFilter(status: status)
+                    library.filter = LibraryFilter()
                     library.refresh()
                 }
             }

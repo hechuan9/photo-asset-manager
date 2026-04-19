@@ -49,6 +49,18 @@ struct SidebarUXTests {
         #expect(source.contains("ThumbnailStoragePopover()"))
     }
 
+    @Test func sidebarDoesNotShowWorkflowStatusShortcuts() throws {
+        let source = try contentViewSource()
+        let sidebarBody = structBody(named: "SidebarView", in: source)
+        let filterBarBody = structBody(named: "FilterBar", in: source)
+
+        #expect(!sidebarBody.contains("Section(\"工作流\")"))
+        #expect(!sidebarBody.contains("AssetStatus.allCases"))
+        #expect(!source.contains("struct StatusRow"))
+        #expect(filterBarBody.contains("library.filter = LibraryFilter()"))
+        #expect(!filterBarBody.contains("LibraryFilter(status: status)"))
+    }
+
     @Test func folderSidebarUsesTreeWithChildDisclosureAndMoveMenu() throws {
         let source = try contentViewSource()
         let store = try libraryStoreSource()
