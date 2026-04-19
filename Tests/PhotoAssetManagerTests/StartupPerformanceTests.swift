@@ -46,6 +46,42 @@ struct StartupPerformanceTests {
         #expect(!content.contains("Button(\"加载更多\")"))
     }
 
+    @Test func filteredAssetQueriesPageBeforeAggregatingFileInstances() throws {
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+        let queryAssetsBody = functionBody(named: "queryAssets", in: database)
+
+        #expect(queryAssetsBody.contains("WITH matching_assets AS"))
+        #expect(queryAssetsBody.contains("page AS ("))
+        #expect(queryAssetsBody.contains("JOIN matching_assets ma ON ma.asset_id = a.id"))
+        #expect(queryAssetsBody.contains("FROM page p"))
+        #expect(queryAssetsBody.contains("LEFT JOIN file_instances fi ON fi.asset_id = a.id"))
+    }
+
+    @Test func folderSelectionReadsAssetsOffMainActorWithTimingLogs() throws {
+        let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+        let selectFolderBody = functionBody(named: "selectFolder", in: store)
+        let finishSelectingFolderBody = functionBody(named: "finishSelectingFolder", in: store)
+
+        #expect(database.contains("final class SQLiteDatabase: @unchecked Sendable"))
+        #expect(database.contains("readOnly: Bool = false"))
+        #expect(store.contains("private let databasePath: URL"))
+        #expect(store.contains("struct FolderSelectionLoadResult: Sendable"))
+        #expect(selectFolderBody.contains("Task(priority: .userInitiated)"))
+        #expect(finishSelectingFolderBody.contains("Task.detached(priority: .userInitiated)"))
+        #expect(finishSelectingFolderBody.contains("SQLiteDatabase(path: databasePath, migrateSchema: false, readOnly: true)"))
+        #expect(finishSelectingFolderBody.contains("PerformanceLog.measure"))
+    }
+
+    @Test func performanceLogsArePersistentAndIncludeFolderClickBoundary() throws {
+        let log = try sourceFile("Sources/PhotoAssetManager/PerformanceLog.swift")
+        let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
+        let selectFolderBody = functionBody(named: "selectFolder", in: store)
+
+        #expect(log.contains("logger.notice"))
+        #expect(selectFolderBody.contains("PerformanceLog.event(\"folder-selection-click\""))
+    }
+
     @Test func browseGraphPersistsFolderMembershipAndFiltersAssetQueries() throws {
         let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
 
@@ -142,7 +178,11 @@ struct StartupPerformanceTests {
         #expect(content.contains("final class ImagePreviewCache"))
         #expect(content.contains("NSCache<NSString, NSImage>"))
         #expect(content.contains("final class ImagePreviewLoader: ObservableObject"))
-        #expect(loaderBody.contains("Task.detached"))
+        #expect(loaderBody.contains("decodeTask?.cancel()"))
+        #expect(loaderBody.contains("Task.detached(priority: .utility)"))
+        #expect(loaderBody.contains("Task.isCancelled"))
+        #expect(loaderBody.contains("PerformanceLog.measure"))
+        #expect(!loaderBody.contains("Task.detached(priority: .userInitiated)"))
         #expect(loaderBody.contains("ImagePreviewCache.shared"))
         #expect(previewBody.contains("@StateObject private var loader = ImagePreviewLoader()"))
         #expect(previewBody.contains(".task(id: cacheKey)"))

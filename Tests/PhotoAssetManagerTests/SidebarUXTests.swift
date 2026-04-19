@@ -72,6 +72,22 @@ struct SidebarUXTests {
         #expect(!source.contains("node.depth > 0 && node.hasChildren"))
     }
 
+    @Test func folderRowsFeelLikePressedButtons() throws {
+        let source = try contentViewSource()
+        let rowBody = structBody(named: "SourceDirectoryNodeRow", in: source)
+        let styleBody = structBody(named: "FolderRowButtonStyle", in: source)
+
+        #expect(rowBody.contains("@State private var isHovering"))
+        #expect(rowBody.contains("Button(action: select)"))
+        #expect(rowBody.contains("FolderRowButtonStyle(isSelected: isSelected, isHovering: isHovering)"))
+        #expect(rowBody.contains(".onHover"))
+        #expect(rowBody.contains(".disabled(library.pendingBrowseSelection != nil)"))
+        #expect(styleBody.contains("configuration.isPressed"))
+        #expect(styleBody.contains("Color.accentColor.opacity"))
+        #expect(styleBody.contains("RoundedRectangle(cornerRadius: 6)"))
+        #expect(styleBody.contains(".scaleEffect(configuration.isPressed ? 0.985 : 1.0)"))
+    }
+
     @Test func folderTreeCanCollapseRootsAndUsesRelativeDisplayNames() throws {
         let content = try contentViewSource()
         let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
@@ -122,7 +138,7 @@ struct SidebarUXTests {
         #expect(models.contains("var browseSelection: BrowseSelection?"))
         #expect(models.contains("struct IndexedFolderTree"))
         #expect(store.contains("func selectFolder(path: String)"))
-        #expect(store.contains("try database.browseFolder(path: normalizedPath)"))
+        #expect(store.contains("try readDatabase.browseFolder(path: normalizedPath)"))
         #expect(!functionBody(named: "selectFolder", in: store).contains("upsertBrowseFolderNode"))
         #expect(store.contains("func clearBrowseSelection()"))
         #expect(store.contains("func setBrowseScope(_ scope: BrowseScope)"))
@@ -133,6 +149,27 @@ struct SidebarUXTests {
         #expect(app.contains("FolderScopeCommands"))
         #expect(app.contains("仅当前文件夹"))
         #expect(app.contains("包含子文件夹"))
+    }
+
+    @Test func folderSelectionShowsImmediatePendingFeedbackBeforeAssetsFinishLoading() throws {
+        let content = try contentViewSource()
+        let store = try libraryStoreSource()
+        let selectFolderBody = functionBody(named: "selectFolder", in: store)
+        let finishSelectingFolderBody = functionBody(named: "finishSelectingFolder", in: store)
+
+        #expect(store.contains("@Published var pendingBrowseSelection: BrowseSelection?"))
+        #expect(selectFolderBody.contains("pendingBrowseSelection = selection"))
+        #expect(selectFolderBody.contains("blockingTask = BlockingTaskReport"))
+        #expect(selectFolderBody.contains("assets = []"))
+        #expect(selectFolderBody.contains("selectedAssetID = nil"))
+        #expect(selectFolderBody.contains("selectedFiles = []"))
+        #expect(selectFolderBody.contains("Task(priority: .userInitiated) { [weak self] in"))
+        #expect(selectFolderBody.contains("await Task.yield()"))
+        #expect(!selectFolderBody.contains("refresh()"))
+        #expect(finishSelectingFolderBody.contains("defer"))
+        #expect(finishSelectingFolderBody.contains("blockingTask = nil"))
+        #expect(content.contains("library.pendingBrowseSelection?.path == node.path"))
+        #expect(store.contains("正在打开文件夹"))
     }
 
     private func contentViewSource() throws -> String {
@@ -173,6 +210,31 @@ struct SidebarUXTests {
 
     private func functionBody(named name: String, in source: String) -> String {
         guard let range = source.range(of: "func \(name)") else { return "" }
+        let suffix = source[range.lowerBound...]
+        guard let openBrace = suffix.firstIndex(of: "{") else { return "" }
+
+        var depth = 0
+        var body = ""
+        for character in suffix[openBrace...] {
+            if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+            }
+            body.append(character)
+            if depth == 0 {
+                return body
+            }
+        }
+        return body
+    }
+
+    private func structBody(named name: String, in source: String) -> String {
+        body(after: "struct \(name)", in: source)
+    }
+
+    private func body(after marker: String, in source: String) -> String {
+        guard let range = source.range(of: marker) else { return "" }
         let suffix = source[range.lowerBound...]
         guard let openBrace = suffix.firstIndex(of: "{") else { return "" }
 

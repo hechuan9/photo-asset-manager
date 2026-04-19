@@ -61,9 +61,9 @@
 ## 文件夹浏览性能
 - 适用范围：文件夹切换、资产网格分页、缩略图/预览渲染。
 - 问题模式：打开大目录或子文件夹时，首屏一次加载过多资产，或 SwiftUI `body` 同步读取 NAS 缩略图/原片，导致 UI 卡顿。
-- 根因：查询分页粒度过大，滚动续页依赖手动操作；预览加载和图片解码落在主线程 render 路径上。
-- 预防动作：文件夹切换只加载小页资产，滚动接近末尾自动续页；缩略图和原片 fallback 必须异步加载并通过内存缓存复用，`AssetPreviewImage.body` 不得直接调用 `NSImage(contentsOfFile:)` 或 `ImageRenderer.renderableImage`。
-- 合并前验证：运行覆盖 `assetPageSize = 96`、`loadMoreAssetsIfNeeded`、自动 `.onAppear` 续页、`ImagePreviewCache`、`Task.detached`、以及预览 body 禁止同步图片读取的测试，并执行 `swift test`、`scripts/pre_merge_gate.sh`、`./scripts/package_app.sh`。
+- 根因：查询分页粒度过大，滚动续页依赖手动操作；预览加载和图片解码落在主线程 render 路径上；目录切换的 SQL/解码边界如果没有可持久查询的耗时日志，会继续靠体感猜测。
+- 预防动作：文件夹切换只加载小页资产，滚动接近末尾自动续页；目录打开必须先给 blocking/选中反馈，资产读取走后台只读 SQLite 连接，过滤查询先分页再聚合；缩略图和原片 fallback 必须可取消、异步加载并通过内存缓存复用，`AssetPreviewImage.body` 不得直接调用 `NSImage(contentsOfFile:)` 或 `ImageRenderer.renderableImage`；性能诊断日志使用可查的 `notice` 级别并覆盖 click/load/decode 边界。
+- 合并前验证：运行覆盖 `assetPageSize = 96`、`loadMoreAssetsIfNeeded`、自动 `.onAppear` 续页、`ImagePreviewCache`、可取消图片 decode、目录选择后台只读查询、`PerformanceLog` notice 日志、以及预览 body 禁止同步图片读取的测试，并执行 `swift test`、`scripts/pre_merge_gate.sh`、`./scripts/package_app.sh`。
 
 ## 启动 NAS 挂载
 - 适用范围：应用启动、NAS 来源目录、文件状态校验、索引整理。

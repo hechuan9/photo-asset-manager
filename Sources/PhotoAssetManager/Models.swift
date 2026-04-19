@@ -18,7 +18,7 @@ enum StorageKind: String, CaseIterable, Codable, Identifiable, Sendable {
     }
 }
 
-enum FileRole: String, CaseIterable, Codable, Identifiable {
+enum FileRole: String, CaseIterable, Codable, Identifiable, Sendable {
     case rawOriginal = "raw_original"
     case jpegOriginal = "jpeg_original"
     case sidecar
@@ -40,7 +40,7 @@ enum FileRole: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-enum AuthorityRole: String, CaseIterable, Codable, Identifiable {
+enum AuthorityRole: String, CaseIterable, Codable, Identifiable, Sendable {
     case canonical
     case workingCopy = "working_copy"
     case sourceCopy = "source_copy"
@@ -58,7 +58,7 @@ enum AuthorityRole: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-enum SyncStatus: String, CaseIterable, Codable, Identifiable {
+enum SyncStatus: String, CaseIterable, Codable, Identifiable, Sendable {
     case synced
     case needsArchive = "needs_archive"
     case needsSync = "needs_sync"
@@ -84,7 +84,7 @@ enum Availability: String, Codable, Sendable {
     case missing
 }
 
-enum AssetStatus: String, CaseIterable, Identifiable {
+enum AssetStatus: String, CaseIterable, Identifiable, Sendable {
     case inbox
     case working
     case needsArchive
@@ -106,29 +106,29 @@ enum AssetStatus: String, CaseIterable, Identifiable {
     }
 }
 
-enum VersionKind: String, Codable {
+enum VersionKind: String, Codable, Sendable {
     case original
     case editRecipe = "edit_recipe"
     case export
 }
 
-enum CollectionKind: String, Codable {
+enum CollectionKind: String, Codable, Sendable {
     case project
     case album
     case smartAlbum = "smart_album"
 }
 
-enum BrowseNodeKind: String, CaseIterable, Codable, Identifiable {
+enum BrowseNodeKind: String, CaseIterable, Codable, Identifiable, Sendable {
     case folder
 
     var id: String { rawValue }
 }
 
-enum BrowseEdgeKind: String, Codable {
+enum BrowseEdgeKind: String, Codable, Sendable {
     case filesystemContainment = "filesystem_containment"
 }
 
-enum BrowseMembershipKind: String, Codable {
+enum BrowseMembershipKind: String, Codable, Sendable {
     case directFileInstance = "direct_file_instance"
 }
 
@@ -146,7 +146,7 @@ enum BrowseScope: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-struct BrowseNode: Identifiable, Hashable {
+struct BrowseNode: Identifiable, Hashable, Sendable {
     let id: UUID
     var kind: BrowseNodeKind
     var canonicalKey: String
@@ -155,7 +155,7 @@ struct BrowseNode: Identifiable, Hashable {
     var storageKind: StorageKind
 }
 
-struct BrowseSelection: Equatable, Hashable {
+struct BrowseSelection: Equatable, Hashable, Sendable {
     var nodeID: UUID
     var kind: BrowseNodeKind
     var path: String
@@ -163,7 +163,7 @@ struct BrowseSelection: Equatable, Hashable {
     var scope: BrowseScope
 }
 
-struct Asset: Identifiable, Hashable {
+struct Asset: Identifiable, Hashable, Sendable {
     let id: UUID
     var captureTime: Date?
     var cameraMake: String
@@ -183,7 +183,7 @@ struct Asset: Identifiable, Hashable {
     var thumbnailPath: String?
 }
 
-struct FileInstance: Identifiable, Hashable {
+struct FileInstance: Identifiable, Hashable, Sendable {
     let id: UUID
     var assetID: UUID
     var path: String
@@ -198,7 +198,7 @@ struct FileInstance: Identifiable, Hashable {
     var availability: Availability
 }
 
-struct AssetVersion: Identifiable, Hashable {
+struct AssetVersion: Identifiable, Hashable, Sendable {
     let id: UUID
     var assetID: UUID
     var name: String
@@ -209,14 +209,14 @@ struct AssetVersion: Identifiable, Hashable {
     var notes: String
 }
 
-struct PhotoCollection: Identifiable, Hashable {
+struct PhotoCollection: Identifiable, Hashable, Sendable {
     let id: UUID
     var name: String
     var collectionKind: CollectionKind
     var description: String
 }
 
-struct ImportBatch: Identifiable, Hashable {
+struct ImportBatch: Identifiable, Hashable, Sendable {
     let id: UUID
     var sourcePath: String
     var deviceID: String
@@ -235,7 +235,7 @@ struct SourceDirectory: Identifiable, Hashable, Sendable {
     var lastScannedAt: Date?
 }
 
-struct SourceDirectoryNode: Identifiable, Hashable {
+struct SourceDirectoryNode: Identifiable, Hashable, Sendable {
     var id: String
     var source: SourceDirectory?
     var path: String
@@ -244,7 +244,7 @@ struct SourceDirectoryNode: Identifiable, Hashable {
     var hasChildren: Bool
 }
 
-struct IndexedFolderTree {
+struct IndexedFolderTree: Sendable {
     private let childrenByParentPath: [String: [BrowseNode]]
 
     init(_ folders: [BrowseNode]) {
@@ -465,7 +465,7 @@ enum SourceDirectoryTreeBuilder {
     }
 }
 
-struct LibraryFilter: Equatable {
+struct LibraryFilter: Equatable, Sendable {
     var status: AssetStatus?
     var browseSelection: BrowseSelection?
     var searchText = ""
@@ -476,7 +476,7 @@ struct LibraryFilter: Equatable {
     var directory = ""
 }
 
-struct ScanReport {
+struct ScanReport: Sendable {
     var phase = ""
     var currentPath = ""
     var discoveredFiles = 0
@@ -489,7 +489,7 @@ struct ScanReport {
     var errors: [String] = []
 }
 
-struct BlockingTaskReport {
+struct BlockingTaskReport: Sendable {
     var title = ""
     var phase = ""
     var currentPath = ""

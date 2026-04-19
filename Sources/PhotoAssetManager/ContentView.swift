@@ -223,7 +223,7 @@ struct SidebarView: View {
                             node: node,
                             interruptedScanPath: library.interruptedScanPath,
                             isExpanded: expandedFolderNodeIDs.contains(node.id),
-                            isSelected: library.filter.browseSelection?.path == node.path,
+                            isSelected: library.filter.browseSelection?.path == node.path || library.pendingBrowseSelection?.path == node.path,
                             toggleExpansion: {
                                 if expandedFolderNodeIDs.contains(node.id) {
                                     expandedFolderNodeIDs.remove(node.id)
@@ -388,6 +388,7 @@ struct SourceDirectoryRow: View {
     var path: String
     var displayName: String
     var interruptedScanPath: String?
+    var showsMenu = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -397,7 +398,7 @@ struct SourceDirectoryRow: View {
                     .foregroundStyle(AppPalette.folderText)
                     .textSelection(.enabled)
                 Spacer()
-                if let source {
+                if showsMenu, let source {
                     Menu {
                         Button("刷新") {
                             library.scanSource(source)
@@ -437,6 +438,7 @@ struct SourceDirectoryRow: View {
 
 struct SourceDirectoryNodeRow: View {
     @EnvironmentObject private var library: LibraryStore
+    @State private var isHovering = false
     var node: SourceDirectoryNode
     var interruptedScanPath: String?
     var isExpanded: Bool
@@ -450,30 +452,57 @@ struct SourceDirectoryNodeRow: View {
             Spacer()
                 .frame(width: CGFloat(node.depth) * 14)
             if node.hasChildren {
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 12, height: 18)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        toggleExpansion()
-                    }
+                Button {
+                    toggleExpansion()
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(library.pendingBrowseSelection != nil)
             } else {
                 Spacer()
-                    .frame(width: 12)
+                    .frame(width: 14)
             }
-            SourceDirectoryRow(
-                source: node.source,
-                path: node.path,
-                displayName: node.displayName,
-                interruptedScanPath: interruptedScanPath
-            )
-        }
-        .contentShape(Rectangle())
-        .background(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .onTapGesture {
-            select()
+
+            Button(action: select) {
+                SourceDirectoryRow(
+                    source: node.source,
+                    path: node.path,
+                    displayName: node.displayName,
+                    interruptedScanPath: interruptedScanPath,
+                    showsMenu: false
+                )
+            }
+            .buttonStyle(FolderRowButtonStyle(isSelected: isSelected, isHovering: isHovering))
+            .disabled(library.pendingBrowseSelection != nil)
+            .onHover { hovering in
+                isHovering = hovering
+            }
+
+            if let source = node.source {
+                Menu {
+                    Button("刷新") {
+                        library.scanSource(source)
+                    }
+                    if node.depth > 0 {
+                        Button("移动到...") {
+                            move()
+                        }
+                    }
+                    Button("移除", role: .destructive) {
+                        library.removeSourceDirectory(source)
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .frame(width: 22, height: 24)
+                }
+                .menuStyle(.borderlessButton)
+                .disabled(library.isBusy)
+            }
         }
         .contextMenu {
             if let source = node.source {
@@ -490,6 +519,46 @@ struct SourceDirectoryNodeRow: View {
                 }
             }
         }
+    }
+}
+
+struct FolderRowButtonStyle: ButtonStyle {
+    var isSelected: Bool
+    var isHovering: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(backgroundColor(isPressed: configuration.isPressed))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(borderColor(isPressed: configuration.isPressed), lineWidth: isSelected || configuration.isPressed ? 1 : 0)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .scaleEffect(configuration.isPressed ? 0.985 : 1.0)
+            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+    }
+
+    private func backgroundColor(isPressed: Bool) -> Color {
+        if isPressed {
+            return Color.accentColor.opacity(0.24)
+        }
+        if isSelected {
+            return Color.accentColor.opacity(0.16)
+        }
+        if isHovering {
+            return Color.primary.opacity(0.07)
+        }
+        return Color.clear
+    }
+
+    private func borderColor(isPressed: Bool) -> Color {
+        if isPressed || isSelected {
+            return Color.accentColor.opacity(0.55)
+        }
+        return Color.clear
     }
 }
 
@@ -702,9 +771,15 @@ final class ImagePreviewCache {
 final class ImagePreviewLoader: ObservableObject {
     @Published var image: NSImage?
     private var loadedCacheKey: String?
+    private var decodeTask: Task<NSImage?, Never>?
+
+    deinit {
+        decodeTask?.cancel()
+    }
 
     func load(thumbnailPath: String?, primaryPath: String?, cacheKey: String) async {
         guard loadedCacheKey != cacheKey else { return }
+        decodeTask?.cancel()
         loadedCacheKey = cacheKey
 
         if let cached = ImagePreviewCache.shared.image(forKey: cacheKey) {
@@ -713,17 +788,28 @@ final class ImagePreviewLoader: ObservableObject {
         }
 
         image = nil
-        let loaded = await Task.detached(priority: .userInitiated) { () -> NSImage? in
-            if let thumbnailPath, let image = NSImage(contentsOfFile: thumbnailPath) {
-                return image
+        let task = Task.detached(priority: .utility) { () -> NSImage? in
+            PerformanceLog.measure("image-preview-decode") {
+                guard !Task.isCancelled else { return nil }
+                if let thumbnailPath, let image = NSImage(contentsOfFile: thumbnailPath) {
+                    return image
+                }
+                guard !Task.isCancelled else { return nil }
+                if let primaryPath {
+                    return ImageRenderer.renderableImage(url: URL(fileURLWithPath: primaryPath))
+                }
+                return nil
             }
-            if let primaryPath {
-                return ImageRenderer.renderableImage(url: URL(fileURLWithPath: primaryPath))
+        }
+        decodeTask = task
+        defer {
+            if Task.isCancelled {
+                task.cancel()
             }
-            return nil
-        }.value
+        }
+        let loaded = await task.value
 
-        guard loadedCacheKey == cacheKey else { return }
+        guard !Task.isCancelled, loadedCacheKey == cacheKey else { return }
         if let loaded {
             ImagePreviewCache.shared.insert(loaded, forKey: cacheKey)
         }

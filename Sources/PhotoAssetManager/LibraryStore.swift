@@ -20,13 +20,17 @@ final class LibraryStore: ObservableObject {
     @Published var blockingTask: BlockingTaskReport?
     @Published var backgroundTask: BackgroundTaskReport?
     @Published var hasMoreAssets = false
+    @Published var pendingBrowseSelection: BrowseSelection?
 
+    private let databasePath: URL
     private let database: SQLiteDatabase
     private let scanner: PhotoScanner
     private let fileOperations = FileOperations()
     private let nasMountManager = NASMountManager()
     private var availabilityTask: Task<Void, Never>?
     private var startupOrganizationTask: Task<Void, Never>?
+    private var folderSelectionTask: Task<Void, Never>?
+    private var folderSelectionID: UUID?
     private var startupNASMountSucceeded = false
     private let assetPageSize = 96
     private let assetLoadAheadThreshold = 24
@@ -35,7 +39,9 @@ final class LibraryStore: ObservableObject {
     init() {
         do {
             let support = try Self.applicationSupport()
-            database = try SQLiteDatabase(path: support.appendingPathComponent("Library.sqlite"))
+            let libraryDatabasePath = support.appendingPathComponent("Library.sqlite")
+            databasePath = libraryDatabasePath
+            database = try SQLiteDatabase(path: libraryDatabasePath)
             scanner = PhotoScanner()
             try database.markInterruptedImportBatches()
             interruptedScanPath = try database.latestInterruptedScanPath()
@@ -52,6 +58,7 @@ final class LibraryStore: ObservableObject {
     deinit {
         availabilityTask?.cancel()
         startupOrganizationTask?.cancel()
+        folderSelectionTask?.cancel()
     }
 
     var selectedAsset: Asset? {
@@ -471,23 +478,43 @@ final class LibraryStore: ObservableObject {
     }
 
     func selectFolder(path: String) {
-        do {
-            let normalizedPath = Self.normalizedDirectoryPath(path)
-            let node = try database.browseFolder(path: normalizedPath)
-            filter.browseSelection = BrowseSelection(
-                nodeID: node?.id ?? UUID(),
-                kind: node?.kind ?? .folder,
-                path: node?.displayPath ?? normalizedPath,
-                displayName: node?.displayName ?? URL(fileURLWithPath: normalizedPath, isDirectory: true).lastPathComponent,
-                scope: filter.browseSelection?.scope ?? .recursive
-            )
-            refresh()
-        } catch {
-            lastError = error.fullTrace
+        let normalizedPath = Self.normalizedDirectoryPath(path)
+        PerformanceLog.event("folder-selection-click", detail: normalizedPath)
+        let selectionID = UUID()
+        let selection = BrowseSelection(
+            nodeID: UUID(),
+            kind: .folder,
+            path: normalizedPath,
+            displayName: URL(fileURLWithPath: normalizedPath, isDirectory: true).lastPathComponent,
+            scope: filter.browseSelection?.scope ?? .recursive
+        )
+        filter.browseSelection = selection
+        pendingBrowseSelection = selection
+        folderSelectionID = selectionID
+        blockingTask = BlockingTaskReport(
+            title: "正在打开文件夹",
+            phase: "正在打开",
+            currentPath: normalizedPath,
+            message: "已选中该文件夹，正在加载照片。"
+        )
+        assets = []
+        selectedAssetID = nil
+        selectedFiles = []
+        hasMoreAssets = false
+        lastError = nil
+
+        folderSelectionTask?.cancel()
+        folderSelectionTask = Task(priority: .userInitiated) { [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            await self?.finishSelectingFolder(path: normalizedPath, scope: selection.scope, selectionID: selectionID)
         }
     }
 
     func clearBrowseSelection() {
+        folderSelectionTask?.cancel()
+        folderSelectionID = nil
+        pendingBrowseSelection = nil
         filter.browseSelection = nil
         refresh()
     }
@@ -496,7 +523,64 @@ final class LibraryStore: ObservableObject {
         guard var selection = filter.browseSelection else { return }
         selection.scope = scope
         filter.browseSelection = selection
+        pendingBrowseSelection = selection
         refresh()
+        pendingBrowseSelection = nil
+    }
+
+    private func finishSelectingFolder(path: String, scope: BrowseScope, selectionID: UUID) async {
+        defer {
+            if folderSelectionID == selectionID {
+                pendingBrowseSelection = nil
+                blockingTask = nil
+                folderSelectionTask = nil
+                folderSelectionID = nil
+            }
+        }
+
+        do {
+            let databasePath = databasePath
+            let filterSnapshot = filter
+            let assetPageSize = assetPageSize
+            let result = try await Task.detached(priority: .userInitiated) { () throws -> FolderSelectionLoadResult in
+                try Task.checkCancellation()
+                return try PerformanceLog.measure("folder-selection-load") {
+                    let readDatabase = try SQLiteDatabase(path: databasePath, migrateSchema: false, readOnly: true)
+                    let normalizedPath = SourceDirectoryTreeBuilder.normalizedDirectoryPath(path)
+                    let node = try readDatabase.browseFolder(path: normalizedPath)
+                    let selection = BrowseSelection(
+                        nodeID: node?.id ?? UUID(),
+                        kind: node?.kind ?? .folder,
+                        path: node?.displayPath ?? normalizedPath,
+                        displayName: node?.displayName ?? URL(fileURLWithPath: normalizedPath, isDirectory: true).lastPathComponent,
+                        scope: scope
+                    )
+                    var filtered = filterSnapshot
+                    filtered.browseSelection = selection
+                    let page = try readDatabase.queryAssets(filter: filtered, limit: assetPageSize + 1)
+                    let assets = Array(page.prefix(assetPageSize))
+                    let selectedAssetID = assets.first?.id
+                    let selectedFiles = try selectedAssetID.map { try readDatabase.fileInstances(assetID: $0) } ?? []
+                    return FolderSelectionLoadResult(
+                        selection: selection,
+                        assets: assets,
+                        selectedAssetID: selectedAssetID,
+                        selectedFiles: selectedFiles,
+                        hasMoreAssets: page.count > assetPageSize
+                    )
+                }
+            }.value
+            guard folderSelectionID == selectionID else { return }
+            filter.browseSelection = result.selection
+            assets = result.assets
+            selectedAssetID = result.selectedAssetID
+            selectedFiles = result.selectedFiles
+            hasMoreAssets = result.hasMoreAssets
+        } catch is CancellationError {
+        } catch {
+            guard folderSelectionID == selectionID else { return }
+            lastError = error.fullTrace
+        }
     }
 
     func loadSelectedFiles() {
@@ -724,4 +808,12 @@ private extension Array {
             Array(self[start..<Swift.min(start + size, count)])
         }
     }
+}
+
+struct FolderSelectionLoadResult: Sendable {
+    var selection: BrowseSelection
+    var assets: [Asset]
+    var selectedAssetID: UUID?
+    var selectedFiles: [FileInstance]
+    var hasMoreAssets: Bool
 }

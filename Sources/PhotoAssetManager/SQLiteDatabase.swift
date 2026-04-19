@@ -17,19 +17,31 @@ enum DatabaseError: LocalizedError {
     }
 }
 
-@MainActor
-final class SQLiteDatabase {
+final class SQLiteDatabase: @unchecked Sendable {
     private var db: OpaquePointer?
 
-    init(path: URL) throws {
+    init(path: URL, migrateSchema: Bool = true, readOnly: Bool = false) throws {
         let directory = path.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        if sqlite3_open(path.path, &db) != SQLITE_OK {
+        if !readOnly {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        let flags = readOnly
+            ? SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+            : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        if sqlite3_open_v2(path.path, &db, flags, nil) != SQLITE_OK {
             throw DatabaseError.openFailed(lastError)
         }
         try execute("PRAGMA foreign_keys = ON")
-        try execute("PRAGMA journal_mode = WAL")
-        try migrate()
+        if !readOnly {
+            try execute("PRAGMA journal_mode = WAL")
+        }
+        if migrateSchema {
+            try migrate()
+        }
+    }
+
+    deinit {
+        sqlite3_close(db)
     }
 
     var lastError: String {
@@ -140,6 +152,19 @@ final class SQLiteDatabase {
         } else {
             let whereClause = "WHERE " + conditions.joined(separator: " AND ")
             sql = """
+            WITH matching_assets AS (
+                SELECT DISTINCT a.id AS asset_id
+                FROM assets a
+                LEFT JOIN file_instances fi ON fi.asset_id = a.id
+                \(whereClause)
+            ),
+            page AS (
+                SELECT a.id
+                FROM assets a
+                JOIN matching_assets ma ON ma.asset_id = a.id
+                ORDER BY COALESCE(a.capture_time, a.created_at) DESC
+                LIMIT ? OFFSET ?
+            )
             SELECT
                 a.id, a.capture_time, a.camera_make, a.camera_model, a.lens_model,
                 a.original_filename, a.content_fingerprint, a.metadata_fingerprint,
@@ -155,12 +180,11 @@ final class SQLiteDatabase {
                 MAX(CASE WHEN fi.sync_status = 'needs_archive' THEN 1 ELSE 0 END) AS has_needs_archive,
                 MAX(CASE WHEN fi.storage_kind = 'nas' AND fi.authority_role = 'canonical' THEN 1 ELSE 0 END) AS has_archived_copy,
                 MAX(CASE WHEN fi.authority_role = 'working_copy' THEN 1 ELSE 0 END) AS has_working_copy
-            FROM assets a
+            FROM page p
+            JOIN assets a ON a.id = p.id
             LEFT JOIN file_instances fi ON fi.asset_id = a.id
-            \(whereClause)
             GROUP BY a.id
             ORDER BY COALESCE(a.capture_time, a.created_at) DESC
-            LIMIT ? OFFSET ?
             """
         }
         values.append(.int(Int64(limit)))
