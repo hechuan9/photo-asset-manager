@@ -173,7 +173,9 @@ final class LibraryStore: ObservableObject {
             return
         }
         do {
+            try database.removeBrowseFolderTree(path: source.path)
             try database.removeSourceDirectory(id: sourceDirectoryID)
+            clearBrowseSelectionIfNeeded(removedPath: source.path)
             finishFolderRemovalRefresh()
         } catch {
             lastError = error.fullTrace
@@ -1005,6 +1007,7 @@ final class LibraryStore: ObservableObject {
         Task.detached(priority: .userInitiated) { [source, database] in
             do {
                 try FileOperations().deleteEmptyFolderTree(at: URL(fileURLWithPath: source.path, isDirectory: true), storageKind: source.storageKind)
+                try database.removeBrowseFolderTree(path: source.path)
                 if let sourceDirectoryID = source.sourceDirectoryID {
                     try database.removeSourceDirectory(id: sourceDirectoryID)
                 }

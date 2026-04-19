@@ -327,6 +327,7 @@ struct StartupPerformanceTests {
     @Test func removingFolderRequiresConfirmationAndDeletesByStorageKind() throws {
         let content = try sourceFile("Sources/PhotoAssetManager/ContentView.swift")
         let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
         let operations = try sourceFile("Sources/PhotoAssetManager/FileOperations.swift")
 
         #expect(content.contains("@State private var pendingFolderRemovalSource: FolderMoveSource?"))
@@ -336,6 +337,10 @@ struct StartupPerformanceTests {
         #expect(content.contains("Button(\"彻底删除\", role: .destructive)"))
         #expect(store.contains("func removeFolder(_ source: FolderMoveSource, deleteEmptyFolder: Bool)"))
         #expect(store.contains("deleteEmptyFolderTree(at: URL(fileURLWithPath: source.path, isDirectory: true), storageKind: source.storageKind)"))
+        #expect(store.contains("try database.removeBrowseFolderTree(path: source.path)"))
+        #expect(database.contains("func removeBrowseFolderTree(path: String) throws"))
+        #expect(functionBody(named: "removeBrowseFolderTree", in: database).contains("DELETE FROM browse_nodes"))
+        #expect(functionBody(named: "removeBrowseFolderTree", in: database).contains("canonical_key = ? OR canonical_key LIKE ? || '/%'"))
         #expect(operations.contains("func deleteEmptyFolderTree(at url: URL, storageKind: StorageKind) throws"))
         #expect(functionBody(named: "deleteEmptyFolderTree", in: operations).contains("case .local:"))
         #expect(functionBody(named: "deleteEmptyFolderTree", in: operations).contains("case .nas, .externalDrive:"))

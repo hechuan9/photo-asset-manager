@@ -379,6 +379,22 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
+    func removeBrowseFolderTree(path: String) throws {
+        let normalizedPath = Self.normalizedDirectoryPath(path)
+        try execute(
+            """
+            DELETE FROM browse_nodes
+            WHERE kind = ?
+              AND (canonical_key = ? OR canonical_key LIKE ? || '/%')
+            """,
+            [
+                .text(BrowseNodeKind.folder.rawValue),
+                .text(normalizedPath),
+                .text(normalizedPath)
+            ]
+        )
+    }
+
     func browseNodeIDs(selection: BrowseSelection) throws -> [UUID] {
         switch selection.scope {
         case BrowseScope.direct:
