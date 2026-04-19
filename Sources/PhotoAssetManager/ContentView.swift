@@ -1195,6 +1195,7 @@ struct JustifiedAssetGrid: View {
     var aspectRatios: [UUID: CGFloat]
     var availableWidth: CGFloat
     var select: (Asset, EventModifiers) -> Void
+    var openLoupe: (Asset) -> Void
     var loadMore: (UUID) -> Void
     var updateAspectRatio: (UUID, CGFloat) -> Void
 
@@ -1221,6 +1222,9 @@ struct JustifiedAssetGrid: View {
                         .onTapGesture {
                             let modifiers = ModifierAwareClickView.currentModifiers()
                             select(asset, modifiers)
+                        }
+                        .onTapGesture(count: 2) {
+                            openLoupe(asset)
                         }
                         .draggable(assetDragPayload(for: asset))
                         .onAppear {
@@ -1258,37 +1262,138 @@ private enum ModifierAwareClickView {
 struct AssetBrowserView: View {
     @EnvironmentObject private var library: LibraryStore
     @State private var aspectRatios: [UUID: CGFloat] = [:]
+    @State private var loupeAssetID: UUID?
+
+    var body: some View {
+        Group {
+            if let loupeAssetID, let loupeAsset = library.assets.first(where: { $0.id == loupeAssetID }) {
+                LightroomLoupeView(
+                    asset: loupeAsset,
+                    assets: library.assets,
+                    select: { asset in
+                        library.selectAsset(asset, modifiers: [])
+                        self.loupeAssetID = asset.id
+                    },
+                    close: {
+                        self.loupeAssetID = nil
+                    }
+                )
+            } else {
+                VStack(spacing: 0) {
+                    FilterBar()
+                    Divider()
+                    if library.assets.isEmpty {
+                        EmptyLibraryView()
+                    } else {
+                        GeometryReader { proxy in
+                            ScrollView {
+                                JustifiedAssetGrid(
+                                    assets: library.assets,
+                                    selectedAssetID: library.selectedAssetID,
+                                    selectedAssetIDs: library.selectedAssetIDs,
+                                    aspectRatios: aspectRatios,
+                                    availableWidth: proxy.size.width,
+                                    select: { asset, modifiers in
+                                        library.selectAsset(asset, modifiers: modifiers)
+                                    },
+                                    openLoupe: { asset in
+                                        library.selectAsset(asset, modifiers: [])
+                                        loupeAssetID = asset.id
+                                    },
+                                    loadMore: { assetID in
+                                        library.loadMoreAssetsIfNeeded(currentAssetID: assetID)
+                                    },
+                                    updateAspectRatio: { assetID, ratio in
+                                        aspectRatios[assetID] = ratio
+                                    }
+                                )
+                            }
+                        }
+                        .background(Color.black)
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct LightroomLoupeView: View {
+    var asset: Asset
+    var assets: [Asset]
+    var select: (Asset) -> Void
+    var close: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            FilterBar()
-            Divider()
-            if library.assets.isEmpty {
-                EmptyLibraryView()
-            } else {
-                GeometryReader { proxy in
-                    ScrollView {
-                        JustifiedAssetGrid(
-                            assets: library.assets,
-                            selectedAssetID: library.selectedAssetID,
-                            selectedAssetIDs: library.selectedAssetIDs,
-                            aspectRatios: aspectRatios,
-                            availableWidth: proxy.size.width,
-                            select: { asset, modifiers in
-                                library.selectAsset(asset, modifiers: modifiers)
-                            },
-                            loadMore: { assetID in
-                                library.loadMoreAssetsIfNeeded(currentAssetID: assetID)
-                            },
-                            updateAspectRatio: { assetID, ratio in
-                                aspectRatios[assetID] = ratio
-                            }
-                        )
-                    }
+            HStack {
+                Button("返回图库") {
+                    close()
                 }
-                .background(Color.black)
+                .keyboardShortcut(.escape, modifiers: [])
+                .buttonStyle(.bordered)
+
+                Spacer()
+
+                Text(asset.originalFilename)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            ZStack {
+                Color.black
+                AssetPreviewImage(asset: asset, contentMode: .fit, placeholderSize: 72)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 16)
+            }
+
+            LoupeFilmstripView(
+                assets: assets,
+                selectedAssetID: asset.id,
+                select: select
+            )
         }
+        .background(Color.black)
+    }
+}
+
+struct LoupeFilmstripView: View {
+    var assets: [Asset]
+    var selectedAssetID: UUID
+    var select: (Asset) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+                ForEach(assets) { filmstripAsset in
+                    Button {
+                        select(filmstripAsset)
+                    } label: {
+                        ZStack {
+                            Color.black
+                            AssetPreviewImage(asset: filmstripAsset, contentMode: .fill, placeholderSize: 18)
+                        }
+                        .frame(width: 70, height: 52)
+                        .clipped()
+                        .overlay {
+                            Rectangle()
+                                .stroke(
+                                    filmstripAsset.id == selectedAssetID ? Color.white : Color.clear,
+                                    lineWidth: 2
+                                )
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 2)
+            .padding(.vertical, 3)
+        }
+        .frame(height: 60)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.35))
     }
 }
 

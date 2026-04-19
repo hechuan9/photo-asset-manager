@@ -205,6 +205,32 @@ struct SidebarUXTests {
         #expect(!tileBody.contains("asset.rating"))
     }
 
+    @Test func doubleClickOpensLightroomStyleLoupeWithFilmstrip() throws {
+        let content = try contentViewSource()
+        let browserBody = structBody(named: "AssetBrowserView", in: content)
+        let gridBody = structBody(named: "JustifiedAssetGrid", in: content)
+        let loupeBody = structBody(named: "LightroomLoupeView", in: content)
+        let filmstripBody = structBody(named: "LoupeFilmstripView", in: content)
+
+        #expect(content.contains("@State private var loupeAssetID: UUID?"))
+        #expect(browserBody.contains("if let loupeAssetID, let loupeAsset = library.assets.first(where: { $0.id == loupeAssetID })"))
+        #expect(browserBody.contains("LightroomLoupeView("))
+        #expect(browserBody.contains("openLoupe: { asset in"))
+        #expect(browserBody.contains("loupeAssetID = asset.id"))
+        #expect(gridBody.contains("var openLoupe: (Asset) -> Void"))
+        #expect(gridBody.contains(".onTapGesture(count: 2)"))
+        #expect(gridBody.contains("openLoupe(asset)"))
+        #expect(loupeBody.contains("AssetPreviewImage(asset: asset, contentMode: .fit, placeholderSize: 72)"))
+        #expect(loupeBody.contains("LoupeFilmstripView("))
+        #expect(loupeBody.contains("Button(\"返回图库\")"))
+        #expect(loupeBody.contains(".keyboardShortcut(.escape, modifiers: [])"))
+        #expect(loupeBody.contains(".background(Color.black)"))
+        #expect(filmstripBody.contains("ScrollView(.horizontal"))
+        #expect(filmstripBody.contains("ForEach(assets)"))
+        #expect(filmstripBody.contains("AssetPreviewImage(asset: filmstripAsset, contentMode: .fill, placeholderSize: 18)"))
+        #expect(filmstripBody.contains("select(filmstripAsset)"))
+    }
+
     @Test func folderMoveUsesRecoverableBlockingFileMoveJobs() throws {
         let content = try contentViewSource()
         let store = try libraryStoreSource()
