@@ -315,6 +315,13 @@ final class LibraryStore: ObservableObject {
             var completedSources = 0
             var scanErrors: [String] = []
             var shouldClearBlockingTask = true
+            defer {
+                isScanning = false
+                if shouldClearBlockingTask {
+                    blockingTask = nil
+                }
+                startupOrganizationTask = nil
+            }
 
             do {
                 let mountReport = await mountNASRootsAtStartup()
@@ -328,8 +335,6 @@ final class LibraryStore: ObservableObject {
                         message: "请确认 NAS 可访问后重启应用，暂不扫描或校验文件状态。"
                     )
                     startupNASMountSucceeded = false
-                    isScanning = false
-                    startupOrganizationTask = nil
                     return
                 }
                 startupNASMountSucceeded = true
@@ -399,11 +404,6 @@ final class LibraryStore: ObservableObject {
             } catch {
                 lastError = error.fullTrace
             }
-            isScanning = false
-            if shouldClearBlockingTask {
-                blockingTask = nil
-            }
-            startupOrganizationTask = nil
         }
     }
 

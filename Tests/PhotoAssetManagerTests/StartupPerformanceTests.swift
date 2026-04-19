@@ -155,6 +155,17 @@ struct StartupPerformanceTests {
         #expect(mountManager.contains("uniqueVolumeRoots"))
     }
 
+    @Test func startupMountCleanupRunsWhenNoIndexOrganizationIsNeeded() throws {
+        let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
+        let startupBody = functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store)
+
+        #expect(startupBody.contains("defer {"))
+        #expect(startupBody.contains("isScanning = false"))
+        #expect(startupBody.contains("blockingTask = nil"))
+        #expect(startupBody.contains("startupOrganizationTask = nil"))
+        #expect(startupBody.contains("guard !sources.isEmpty else"))
+    }
+
     private func sourceFile(_ path: String) throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile
