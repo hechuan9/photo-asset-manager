@@ -284,6 +284,16 @@ struct SidebarUXTests {
         #expect(filmstripBody.contains("select(filmstripAsset)"))
     }
 
+    @Test func detailHeaderDoesNotRepeatSelectedAssetThumbnail() throws {
+        let content = try contentViewSource()
+        let headerBody = structBody(named: "PreviewHeader", in: content)
+
+        #expect(!headerBody.contains("AssetPreviewImage("))
+        #expect(!headerBody.contains("placeholderSize: 46"))
+        #expect(headerBody.contains("Text(asset.originalFilename)"))
+        #expect(headerBody.contains("asset.primaryPath ?? \"当前没有可访问原片路径\""))
+    }
+
     @Test func folderMoveUsesRecoverableBlockingFileMoveJobs() throws {
         let content = try contentViewSource()
         let store = try libraryStoreSource()

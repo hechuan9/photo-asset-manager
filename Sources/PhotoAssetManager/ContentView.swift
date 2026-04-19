@@ -1647,14 +1647,6 @@ struct PreviewHeader: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ZStack {
-                Rectangle()
-                    .fill(Color(nsColor: .controlBackgroundColor))
-                AssetPreviewImage(asset: asset, contentMode: .fit, placeholderSize: 46)
-            }
-            .frame(height: 240)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-
             Text(asset.originalFilename)
                 .font(.title3)
                 .fontWeight(.semibold)
