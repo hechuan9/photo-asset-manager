@@ -1219,13 +1219,21 @@ struct JustifiedAssetGrid: View {
                             updateAspectRatio(asset.id, ratio)
                         }
                         .frame(width: row.width(for: asset), height: row.height)
-                        .onTapGesture {
-                            let modifiers = ModifierAwareClickView.currentModifiers()
-                            select(asset, modifiers)
-                        }
-                        .onTapGesture(count: 2) {
-                            openLoupe(asset)
-                        }
+                        .highPriorityGesture(
+                            ExclusiveGesture(
+                                TapGesture(count: 2),
+                                TapGesture(count: 1)
+                            )
+                            .onEnded { value in
+                                switch value {
+                                case .first:
+                                    openLoupe(asset)
+                                case .second:
+                                    let modifiers = ModifierAwareClickView.currentModifiers()
+                                    select(asset, modifiers)
+                                }
+                            }
+                        )
                         .draggable(assetDragPayload(for: asset))
                         .onAppear {
                             loadMore(asset.id)
