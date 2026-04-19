@@ -601,7 +601,7 @@ struct MoveSourceDirectorySheet: View {
 
 struct AssetBrowserView: View {
     @EnvironmentObject private var library: LibraryStore
-    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 210), spacing: 14)]
+    private let columns = [GridItem(.adaptive(minimum: 220, maximum: 360), spacing: 2)]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -611,7 +611,7 @@ struct AssetBrowserView: View {
                 EmptyLibraryView()
             } else {
                 ScrollView {
-                    LazyVGrid(columns: columns, spacing: 14) {
+                    LazyVGrid(columns: columns, spacing: 2) {
                         ForEach(library.assets) { asset in
                             AssetTile(asset: asset, selected: asset.id == library.selectedAssetID)
                                 .onTapGesture {
@@ -623,8 +623,9 @@ struct AssetBrowserView: View {
                                 }
                         }
                     }
-                    .padding(16)
+                    .padding(2)
                 }
+                .background(Color(nsColor: .textBackgroundColor))
             }
         }
     }
@@ -690,33 +691,19 @@ struct AssetTile: View {
     var selected: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack {
-                Rectangle()
-                    .fill(Color(nsColor: .controlBackgroundColor))
-                AssetPreviewImage(asset: asset, contentMode: .fill, placeholderSize: 34)
-            }
-            .aspectRatio(1.25, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay {
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(selected ? Color.accentColor : Color.clear, lineWidth: 3)
-            }
-
-            Text(asset.originalFilename)
-                .font(.callout)
-                .lineLimit(1)
-            HStack {
-                Text(asset.status.label)
-                Spacer()
-                Text(asset.rating > 0 ? String(repeating: "*", count: asset.rating) : "未评分")
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
+        ZStack {
+            Rectangle()
+                .fill(Color(nsColor: .controlBackgroundColor))
+            AssetPreviewImage(asset: asset, contentMode: .fill, placeholderSize: 34)
         }
-        .padding(8)
-        .background(selected ? Color.accentColor.opacity(0.12) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .frame(height: 168)
+        .clipShape(RoundedRectangle(cornerRadius: 0))
+        .overlay {
+            RoundedRectangle(cornerRadius: 0)
+                .stroke(selected ? Color.accentColor : Color.clear, lineWidth: 3)
+        }
+        .contentShape(Rectangle())
+        .accessibilityLabel(asset.originalFilename)
     }
 }
 

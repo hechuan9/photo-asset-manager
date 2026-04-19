@@ -172,6 +172,22 @@ struct SidebarUXTests {
         #expect(store.contains("正在打开文件夹"))
     }
 
+    @Test func assetBrowserUsesLightroomStyleFilledTilesWithoutMetadata() throws {
+        let content = try contentViewSource()
+        let browserBody = structBody(named: "AssetBrowserView", in: content)
+        let tileBody = structBody(named: "AssetTile", in: content)
+
+        #expect(browserBody.contains("GridItem(.adaptive(minimum: 220, maximum: 360), spacing: 2)"))
+        #expect(browserBody.contains("LazyVGrid(columns: columns, spacing: 2)"))
+        #expect(browserBody.contains(".background(Color(nsColor: .textBackgroundColor))"))
+        #expect(tileBody.contains(".frame(height: 168)"))
+        #expect(tileBody.contains("AssetPreviewImage(asset: asset, contentMode: .fill, placeholderSize: 34)"))
+        #expect(tileBody.contains("RoundedRectangle(cornerRadius: 0)"))
+        #expect(!tileBody.contains("Text(asset.originalFilename)"))
+        #expect(!tileBody.contains("asset.status.label"))
+        #expect(!tileBody.contains("asset.rating"))
+    }
+
     private func contentViewSource() throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile
