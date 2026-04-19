@@ -61,6 +61,29 @@ struct SidebarUXTests {
         #expect(!filterBarBody.contains("LibraryFilter(status: status)"))
     }
 
+    @Test func filterBarUsesLightroomStyleFirstThreeFilterGroupsAndSortMenu() throws {
+        let source = try contentViewSource()
+        let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+        let filterBarBody = structBody(named: "FilterBar", in: source)
+
+        #expect(models.contains("enum LibrarySortOrder"))
+        #expect(models.contains("case captureTimeAscending"))
+        #expect(models.contains("case captureTimeDescending"))
+        #expect(models.contains("var sortOrder: LibrarySortOrder = .captureTimeDescending"))
+        #expect(database.contains("filter.sortOrder.sqlDirection"))
+        #expect(!database.contains("ORDER BY COALESCE(capture_time, created_at) DESC"))
+        #expect(filterBarBody.contains("LightroomRatingFilterGroup("))
+        #expect(filterBarBody.contains("LightroomFlagFilterGroup("))
+        #expect(filterBarBody.contains("LightroomColorLabelFilterGroup("))
+        #expect(filterBarBody.contains("Picker(\"整理顺序\""))
+        #expect(filterBarBody.contains("library.setMinimumRatingFilter"))
+        #expect(filterBarBody.contains("library.setFlaggedOnlyFilter"))
+        #expect(filterBarBody.contains("library.setSortOrder"))
+        #expect(!filterBarBody.contains("TextField(\"相机\""))
+        #expect(!filterBarBody.contains("Stepper(\"最低"))
+    }
+
     @Test func folderSidebarUsesTreeWithChildDisclosureAndMoveMenu() throws {
         let source = try contentViewSource()
         let store = try libraryStoreSource()

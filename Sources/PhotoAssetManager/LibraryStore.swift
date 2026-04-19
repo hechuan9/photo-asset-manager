@@ -697,6 +697,30 @@ final class LibraryStore: ObservableObject {
         refresh()
     }
 
+    func setMinimumRatingFilter(_ rating: Int) {
+        filter.minimumRating = max(0, min(5, rating))
+        refresh()
+    }
+
+    func setFlaggedOnlyFilter(_ flaggedOnly: Bool) {
+        filter.flaggedOnly = flaggedOnly
+        refresh()
+    }
+
+    func toggleColorLabelFilter(_ colorLabel: AssetColorLabel) {
+        if filter.colorLabels.contains(colorLabel) {
+            filter.colorLabels.remove(colorLabel)
+        } else {
+            filter.colorLabels.insert(colorLabel)
+        }
+        refresh()
+    }
+
+    func setSortOrder(_ sortOrder: LibrarySortOrder) {
+        filter.sortOrder = sortOrder
+        refresh()
+    }
+
     func selectFolder(path: String) {
         let normalizedPath = Self.normalizedDirectoryPath(path)
         PerformanceLog.event("folder-selection-click", detail: normalizedPath)

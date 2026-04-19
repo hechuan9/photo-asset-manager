@@ -1506,38 +1506,165 @@ struct FilterBar: View {
     @EnvironmentObject private var library: LibraryStore
 
     var body: some View {
-        VStack(spacing: 10) {
-            HStack {
-                TextField("搜索文件名、标签、路径", text: $library.filter.searchText)
-                    .textFieldStyle(.roundedBorder)
-                TextField("相机", text: $library.filter.camera)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 140)
-                TextField("扩展名", text: $library.filter.fileExtension)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 100)
-                Stepper("最低 \(library.filter.minimumRating) 星", value: $library.filter.minimumRating, in: 0...5)
-                    .frame(width: 130)
-                Button("应用") {
-                    library.refresh()
-                }
-                Button("重置") {
-                    library.filter = LibraryFilter()
-                    library.refresh()
+        HStack(spacing: 0) {
+            LightroomRatingFilterGroup(
+                minimumRating: library.filter.minimumRating,
+                setMinimumRating: library.setMinimumRatingFilter
+            )
+            LightroomFilterDivider()
+            LightroomFlagFilterGroup(
+                flaggedOnly: library.filter.flaggedOnly,
+                setFlaggedOnly: library.setFlaggedOnlyFilter
+            )
+            LightroomFilterDivider()
+            LightroomColorLabelFilterGroup(
+                selectedLabels: library.filter.colorLabels,
+                toggleColorLabel: library.toggleColorLabelFilter
+            )
+            LightroomFilterDivider()
+
+            Spacer(minLength: 12)
+
+            Picker("整理顺序", selection: Binding(
+                get: { library.filter.sortOrder },
+                set: { library.setSortOrder($0) }
+            )) {
+                ForEach(LibrarySortOrder.allCases) { sortOrder in
+                    Text(sortOrder.label).tag(sortOrder)
                 }
             }
-            HStack {
-                TextField("标签", text: $library.filter.tag)
-                    .textFieldStyle(.roundedBorder)
-                TextField("目录前缀", text: $library.filter.directory)
-                    .textFieldStyle(.roundedBorder)
-                Button("记录导出") {
-                    library.recordExportForSelected()
+            .pickerStyle(.menu)
+            .frame(width: 150)
+
+            TextField("搜索", text: $library.filter.searchText)
+                .textFieldStyle(.plain)
+                .onSubmit {
+                    library.refresh()
                 }
-                .disabled(library.selectedAsset == nil)
+                .padding(.horizontal, 8)
+                .frame(width: 220, height: 28)
+                .background(Color.black.opacity(0.22))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+
+            Button("应用") {
+                library.refresh()
+            }
+            .buttonStyle(.borderless)
+
+            Button("重置") {
+                library.filter = LibraryFilter()
+                library.refresh()
+            }
+            .buttonStyle(.borderless)
+
+            Button("记录导出") {
+                library.recordExportForSelected()
+            }
+            .buttonStyle(.borderless)
+            .disabled(library.selectedAsset == nil)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 44)
+        .background(Color(nsColor: NSColor(calibratedWhite: 0.12, alpha: 1)))
+    }
+}
+
+struct LightroomRatingFilterGroup: View {
+    var minimumRating: Int
+    var setMinimumRating: (Int) -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Button {
+                setMinimumRating(0)
+            } label: {
+                Image(systemName: "greaterthan.circle.fill")
+                    .foregroundStyle(minimumRating == 0 ? Color.white : Color.secondary)
+            }
+            .buttonStyle(.plain)
+
+            ForEach(1...5, id: \.self) { rating in
+                Button {
+                    setMinimumRating(rating)
+                } label: {
+                    Image(systemName: "star.fill")
+                        .foregroundStyle(rating <= minimumRating ? Color.white : Color.secondary)
+                }
+                .buttonStyle(.plain)
             }
         }
-        .padding(12)
+        .frame(width: 142)
+    }
+}
+
+struct LightroomFlagFilterGroup: View {
+    var flaggedOnly: Bool
+    var setFlaggedOnly: (Bool) -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button {
+                setFlaggedOnly(!flaggedOnly)
+            } label: {
+                Image(systemName: flaggedOnly ? "flag.fill" : "flag")
+                    .foregroundStyle(flaggedOnly ? Color.white : Color.secondary)
+            }
+            .buttonStyle(.plain)
+
+            Image(systemName: "flag")
+                .foregroundStyle(Color.secondary.opacity(0.45))
+            Image(systemName: "flag.slash")
+                .foregroundStyle(Color.secondary.opacity(0.45))
+        }
+        .frame(width: 116)
+    }
+}
+
+struct LightroomColorLabelFilterGroup: View {
+    var selectedLabels: Set<AssetColorLabel>
+    var toggleColorLabel: (AssetColorLabel) -> Void
+
+    var body: some View {
+        HStack(spacing: 7) {
+            ForEach(AssetColorLabel.allCases) { label in
+                Button {
+                    toggleColorLabel(label)
+                } label: {
+                    Circle()
+                        .fill(color(for: label))
+                        .frame(width: 16, height: 16)
+                        .overlay(
+                            Circle()
+                                .stroke(selectedLabels.contains(label) ? Color.white : Color.clear, lineWidth: 2)
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(label.label)
+            }
+        }
+        .frame(width: 128)
+    }
+
+    private func color(for label: AssetColorLabel) -> Color {
+        switch label {
+        case .red: Color(red: 0.65, green: 0.22, blue: 0.19)
+        case .yellow: Color(red: 0.66, green: 0.65, blue: 0.22)
+        case .green: Color(red: 0.33, green: 0.55, blue: 0.31)
+        case .blue: Color(red: 0.25, green: 0.42, blue: 0.63)
+        case .purple: Color(red: 0.46, green: 0.29, blue: 0.61)
+        }
+    }
+}
+
+struct LightroomFilterDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.08))
+            .frame(width: 1, height: 44)
+            .padding(.horizontal, 10)
     }
 }
 
@@ -1790,6 +1917,25 @@ struct AssetMetadataEditor: View {
                     library.update(asset: copy)
                 }
             ))
+
+            HStack {
+                Text("颜色")
+                Picker("", selection: Binding(
+                    get: { asset.colorLabel },
+                    set: { value in
+                        var copy = asset
+                        copy.colorLabel = value
+                        library.update(asset: copy)
+                    }
+                )) {
+                    Text("无").tag(Optional<AssetColorLabel>.none)
+                    ForEach(AssetColorLabel.allCases) { label in
+                        Text(label.label).tag(Optional(label))
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 120)
+            }
 
             HStack {
                 TextField("标签，用逗号分隔", text: $draftTags)

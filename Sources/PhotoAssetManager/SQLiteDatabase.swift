@@ -85,6 +85,15 @@ final class SQLiteDatabase: @unchecked Sendable {
             conditions.append("a.rating >= ?")
             values.append(.int(Int64(filter.minimumRating)))
         }
+        if filter.flaggedOnly {
+            conditions.append("a.flag = 1")
+        }
+        if !filter.colorLabels.isEmpty {
+            let labels = filter.colorLabels.sorted { $0.rawValue < $1.rawValue }
+            let placeholders = Array(repeating: "?", count: labels.count).joined(separator: ", ")
+            conditions.append("a.color_label IN (\(placeholders))")
+            values.append(contentsOf: labels.map { .text($0.rawValue) })
+        }
         if !filter.tag.isEmpty {
             conditions.append("a.tags LIKE ?")
             values.append(.text("%\(filter.tag)%"))
@@ -118,6 +127,7 @@ final class SQLiteDatabase: @unchecked Sendable {
         if !statusCondition.isEmpty {
             conditions.append(statusCondition)
         }
+        let sortDirection = filter.sortOrder.sqlDirection
 
         let sql: String
         if conditions.isEmpty {
@@ -125,13 +135,13 @@ final class SQLiteDatabase: @unchecked Sendable {
             WITH page AS (
                 SELECT id
                 FROM assets
-                ORDER BY COALESCE(capture_time, created_at) DESC
+                ORDER BY COALESCE(capture_time, created_at) \(sortDirection)
                 LIMIT ? OFFSET ?
             )
             SELECT
                 a.id, a.capture_time, a.camera_make, a.camera_model, a.lens_model,
                 a.original_filename, a.content_fingerprint, a.metadata_fingerprint,
-                a.rating, a.flag, a.tags, a.created_at, a.updated_at,
+                a.rating, a.flag, a.color_label, a.tags, a.created_at, a.updated_at,
                 COUNT(fi.id) AS file_count,
                 MIN(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') THEN fi.path ELSE NULL END) AS primary_path,
                 COALESCE(
@@ -147,7 +157,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             JOIN assets a ON a.id = p.id
             LEFT JOIN file_instances fi ON fi.asset_id = a.id
             GROUP BY a.id
-            ORDER BY COALESCE(a.capture_time, a.created_at) DESC
+            ORDER BY COALESCE(a.capture_time, a.created_at) \(sortDirection)
             """
         } else {
             let whereClause = "WHERE " + conditions.joined(separator: " AND ")
@@ -162,13 +172,13 @@ final class SQLiteDatabase: @unchecked Sendable {
                 SELECT a.id
                 FROM assets a
                 JOIN matching_assets ma ON ma.asset_id = a.id
-                ORDER BY COALESCE(a.capture_time, a.created_at) DESC
+                ORDER BY COALESCE(a.capture_time, a.created_at) \(sortDirection)
                 LIMIT ? OFFSET ?
             )
             SELECT
                 a.id, a.capture_time, a.camera_make, a.camera_model, a.lens_model,
                 a.original_filename, a.content_fingerprint, a.metadata_fingerprint,
-                a.rating, a.flag, a.tags, a.created_at, a.updated_at,
+                a.rating, a.flag, a.color_label, a.tags, a.created_at, a.updated_at,
                 COUNT(fi.id) AS file_count,
                 MIN(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') THEN fi.path ELSE NULL END) AS primary_path,
                 COALESCE(
@@ -184,7 +194,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             JOIN assets a ON a.id = p.id
             LEFT JOIN file_instances fi ON fi.asset_id = a.id
             GROUP BY a.id
-            ORDER BY COALESCE(a.capture_time, a.created_at) DESC
+            ORDER BY COALESCE(a.capture_time, a.created_at) \(sortDirection)
             """
         }
         values.append(.int(Int64(limit)))
@@ -202,19 +212,20 @@ final class SQLiteDatabase: @unchecked Sendable {
                 metadataFingerprint: statement.text(7),
                 rating: Int(statement.int(8)),
                 flag: statement.int(9) == 1,
-                tags: decodeTags(statement.text(10)),
-                createdAt: DateCoding.decode(statement.text(11)) ?? Date(),
-                updatedAt: DateCoding.decode(statement.text(12)) ?? Date(),
+                colorLabel: statement.optionalText(10).flatMap(AssetColorLabel.init(rawValue:)),
+                tags: decodeTags(statement.text(11)),
+                createdAt: DateCoding.decode(statement.text(12)) ?? Date(),
+                updatedAt: DateCoding.decode(statement.text(13)) ?? Date(),
                 status: assetStatus(
-                    hasOnlineOriginal: statement.int(16) == 1,
-                    hasNeedsSync: statement.int(17) == 1,
-                    hasNeedsArchive: statement.int(18) == 1,
-                    hasArchivedCopy: statement.int(19) == 1,
-                    hasWorkingCopy: statement.int(20) == 1
+                    hasOnlineOriginal: statement.int(17) == 1,
+                    hasNeedsSync: statement.int(18) == 1,
+                    hasNeedsArchive: statement.int(19) == 1,
+                    hasArchivedCopy: statement.int(20) == 1,
+                    hasWorkingCopy: statement.int(21) == 1
                 ),
-                fileCount: Int(statement.int(13)),
-                primaryPath: statement.optionalText(14),
-                thumbnailPath: statement.optionalText(15)
+                fileCount: Int(statement.int(14)),
+                primaryPath: statement.optionalText(15),
+                thumbnailPath: statement.optionalText(16)
             )
             return asset
         }
@@ -563,8 +574,8 @@ final class SQLiteDatabase: @unchecked Sendable {
                 """
                 INSERT INTO assets (
                     id, capture_time, camera_make, camera_model, lens_model, original_filename,
-                    content_fingerprint, metadata_fingerprint, rating, flag, tags, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]', ?, ?)
+                    content_fingerprint, metadata_fingerprint, rating, flag, color_label, tags, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, '[]', ?, ?)
                 """,
                 [
                     .text(assetID.uuidString),
@@ -1286,12 +1297,13 @@ final class SQLiteDatabase: @unchecked Sendable {
         try execute(
             """
             UPDATE assets
-            SET rating = ?, flag = ?, tags = ?, updated_at = ?
+            SET rating = ?, flag = ?, color_label = ?, tags = ?, updated_at = ?
             WHERE id = ?
             """,
             [
                 .int(Int64(asset.rating)),
                 .int(asset.flag ? 1 : 0),
+                .nullableText(asset.colorLabel?.rawValue),
                 .text(encodeTags(asset.tags)),
                 .text(DateCoding.encode(Date())),
                 .text(asset.id.uuidString)
@@ -1449,6 +1461,7 @@ final class SQLiteDatabase: @unchecked Sendable {
                 metadata_fingerprint TEXT NOT NULL,
                 rating INTEGER NOT NULL DEFAULT 0,
                 flag INTEGER NOT NULL DEFAULT 0,
+                color_label TEXT,
                 tags TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -1607,6 +1620,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             column: "parent_source_directory_id",
             definition: "TEXT"
         )
+        try addColumnIfNeeded(table: "assets", column: "color_label", definition: "TEXT")
 
         try execute(
             """

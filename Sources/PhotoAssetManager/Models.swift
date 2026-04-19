@@ -106,6 +106,47 @@ enum AssetStatus: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum AssetColorLabel: String, CaseIterable, Codable, Identifiable, Sendable {
+    case red
+    case yellow
+    case green
+    case blue
+    case purple
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .red: "红色"
+        case .yellow: "黄色"
+        case .green: "绿色"
+        case .blue: "蓝色"
+        case .purple: "紫色"
+        }
+    }
+}
+
+enum LibrarySortOrder: String, CaseIterable, Identifiable, Sendable {
+    case captureTimeDescending
+    case captureTimeAscending
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .captureTimeDescending: "拍摄时间倒序"
+        case .captureTimeAscending: "拍摄时间正序"
+        }
+    }
+
+    var sqlDirection: String {
+        switch self {
+        case .captureTimeDescending: "DESC"
+        case .captureTimeAscending: "ASC"
+        }
+    }
+}
+
 enum VersionKind: String, Codable, Sendable {
     case original
     case editRecipe = "edit_recipe"
@@ -174,6 +215,7 @@ struct Asset: Identifiable, Hashable, Sendable {
     var metadataFingerprint: String
     var rating: Int
     var flag: Bool
+    var colorLabel: AssetColorLabel?
     var tags: [String]
     var createdAt: Date
     var updatedAt: Date
@@ -593,6 +635,9 @@ struct LibraryFilter: Equatable, Sendable {
     var camera = ""
     var fileExtension = ""
     var minimumRating = 0
+    var flaggedOnly = false
+    var colorLabels: Set<AssetColorLabel> = []
+    var sortOrder: LibrarySortOrder = .captureTimeDescending
     var tag = ""
     var directory = ""
 }
