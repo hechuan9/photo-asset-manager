@@ -1249,6 +1249,21 @@ final class SQLiteDatabase: @unchecked Sendable {
         )
     }
 
+    func backfillMissingCaptureTimesFromCreatedAt() throws -> Int {
+        try execute(
+            """
+            UPDATE assets
+            SET capture_time = created_at,
+                updated_at = ?
+            WHERE capture_time IS NULL
+              AND created_at IS NOT NULL
+            """,
+            [.text(DateCoding.encode(Date()))]
+        )
+        guard let db else { return 0 }
+        return Int(sqlite3_changes(db))
+    }
+
     func thumbnailFileInstances() throws -> [FileInstance] {
         let sql = """
         SELECT id, asset_id, path, device_id, storage_kind, file_role, authority_role,

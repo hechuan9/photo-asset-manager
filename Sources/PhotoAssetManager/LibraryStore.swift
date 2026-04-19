@@ -533,6 +533,41 @@ final class LibraryStore: ObservableObject {
         startAvailabilityRefreshInBackground(force: true)
     }
 
+    func fillMissingCaptureTimes() {
+        guard !isBusy else { return }
+        blockingTask = BlockingTaskReport(
+            title: "工具",
+            phase: "补齐拍摄时间",
+            message: "正在用创建时间补齐缺失的拍摄时间。"
+        )
+        lastError = nil
+
+        let database = database
+        Task.detached(priority: .userInitiated) {
+            do {
+                let updatedCount = try database.backfillMissingCaptureTimesFromCreatedAt()
+                await MainActor.run {
+                    self.refresh()
+                    self.refreshCounts()
+                    self.backgroundTask = BackgroundTaskReport(
+                        title: "工具",
+                        phase: "拍摄时间整理完成",
+                        totalItems: updatedCount,
+                        completedItems: updatedCount,
+                        message: "已补齐 \(updatedCount) 个资产",
+                        isFinished: true
+                    )
+                    self.blockingTask = nil
+                }
+            } catch {
+                await MainActor.run {
+                    self.lastError = error.fullTrace
+                    self.blockingTask = nil
+                }
+            }
+        }
+    }
+
     private func shouldRunAvailabilityRefresh(force: Bool) throws -> Bool {
         if force { return true }
         guard let lastRefresh = try database.lastAvailabilityRefreshAt() else { return true }

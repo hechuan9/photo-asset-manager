@@ -19,7 +19,8 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "PhotoAssetManagerTests"
+            name: "PhotoAssetManagerTests",
+            dependencies: ["PhotoAssetManager"]
         )
     ]
 )
