@@ -324,7 +324,7 @@ struct StartupPerformanceTests {
         #expect(startupBody.contains("guard !sources.isEmpty else"))
     }
 
-    @Test func removingFolderRequiresConfirmationAndUsesTrashForFullDelete() throws {
+    @Test func removingFolderRequiresConfirmationAndDeletesByStorageKind() throws {
         let content = try sourceFile("Sources/PhotoAssetManager/ContentView.swift")
         let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
         let operations = try sourceFile("Sources/PhotoAssetManager/FileOperations.swift")
@@ -335,9 +335,14 @@ struct StartupPerformanceTests {
         #expect(content.contains("Button(\"仅移除\")"))
         #expect(content.contains("Button(\"彻底删除\", role: .destructive)"))
         #expect(store.contains("func removeFolder(_ source: FolderMoveSource, deleteEmptyFolder: Bool)"))
-        #expect(operations.contains("func trashEmptyFolderTree(at url: URL) throws"))
-        #expect(functionBody(named: "trashEmptyFolderTree", in: operations).contains("resourceValues(forKeys: [.isRegularFileKey])"))
-        #expect(functionBody(named: "trashEmptyFolderTree", in: operations).contains("throw FileOperationError.folderContainsFiles"))
+        #expect(store.contains("deleteEmptyFolderTree(at: URL(fileURLWithPath: source.path, isDirectory: true), storageKind: source.storageKind)"))
+        #expect(operations.contains("func deleteEmptyFolderTree(at url: URL, storageKind: StorageKind) throws"))
+        #expect(functionBody(named: "deleteEmptyFolderTree", in: operations).contains("case .local:"))
+        #expect(functionBody(named: "deleteEmptyFolderTree", in: operations).contains("case .nas, .externalDrive:"))
+        #expect(functionBody(named: "deleteEmptyFolderTree", in: operations).contains("try trashEmptyFolderTree(at: url)"))
+        #expect(functionBody(named: "deleteEmptyFolderTree", in: operations).contains("try removeEmptyDirectoryTree(at: url)"))
+        #expect(functionBody(named: "ensureFolderTreeContainsOnlyDirectories", in: operations).contains("resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey])"))
+        #expect(functionBody(named: "ensureFolderTreeContainsOnlyDirectories", in: operations).contains("throw FileOperationError.folderContainsFiles"))
         #expect(functionBody(named: "trashEmptyFolderTree", in: operations).contains("fileManager.trashItem"))
         #expect(!functionBody(named: "trashEmptyFolderTree", in: operations).contains("removeItem"))
     }

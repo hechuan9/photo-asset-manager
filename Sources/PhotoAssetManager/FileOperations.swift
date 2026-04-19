@@ -13,6 +13,7 @@ enum FileOperationError: LocalizedError {
     case noImportableFiles(URL)
     case noMovableFiles
     case folderContainsFiles(URL)
+    case unsupportedFolderDeletion(URL)
 
     var errorDescription: String? {
         switch self {
@@ -27,6 +28,7 @@ enum FileOperationError: LocalizedError {
         case .noImportableFiles(let url): "没有找到可导入的照片或 sidecar 文件：\(url.path)"
         case .noMovableFiles: "没有可移动的在线照片文件。"
         case .folderContainsFiles(let url): "文件夹内仍有文件，已阻止彻底删除：\(url.path)"
+        case .unsupportedFolderDeletion(let url): "这个文件夹类型不支持物理删除：\(url.path)"
         }
     }
 }
@@ -248,26 +250,64 @@ struct FileOperations: Sendable {
         }
     }
 
-    func trashEmptyFolderTree(at url: URL) throws {
+    func deleteEmptyFolderTree(at url: URL, storageKind: StorageKind) throws {
+        try ensureFolderTreeContainsOnlyDirectories(at: url)
+        switch storageKind {
+        case .local:
+            try trashEmptyFolderTree(at: url)
+        case .nas, .externalDrive:
+            try removeEmptyDirectoryTree(at: url)
+        case .cloudPreview:
+            throw FileOperationError.unsupportedFolderDeletion(url)
+        }
+    }
+
+    private func ensureFolderTreeContainsOnlyDirectories(at url: URL) throws {
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw FileOperationError.sourceFolderMissing(url)
         }
         guard let enumerator = fileManager.enumerator(
             at: url,
-            includingPropertiesForKeys: [.isRegularFileKey],
+            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey],
             options: []
         ) else {
             throw FileOperationError.sourceFolderMissing(url)
         }
         while let item = enumerator.nextObject() as? URL {
-            let values = try item.resourceValues(forKeys: [.isRegularFileKey])
-            if values.isRegularFile == true {
+            let values = try item.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey])
+            if values.isDirectory != true || values.isSymbolicLink == true || values.isRegularFile == true {
                 throw FileOperationError.folderContainsFiles(item)
             }
         }
+    }
+
+    private func trashEmptyFolderTree(at url: URL) throws {
         var trashedURL: NSURL?
         try fileManager.trashItem(at: url, resultingItemURL: &trashedURL)
+    }
+
+    private func removeEmptyDirectoryTree(at url: URL) throws {
+        var directories = [url]
+        if let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: []
+        ) {
+            while let item = enumerator.nextObject() as? URL {
+                let values = try item.resourceValues(forKeys: [.isDirectoryKey])
+                if values.isDirectory == true {
+                    directories.append(item)
+                }
+            }
+        }
+        for directory in directories.sorted(by: { $0.path.count > $1.path.count }) {
+            let contents = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [])
+            guard contents.isEmpty else {
+                throw FileOperationError.folderContainsFiles(contents[0])
+            }
+            try fileManager.removeItem(at: directory)
+        }
     }
 
     @MainActor

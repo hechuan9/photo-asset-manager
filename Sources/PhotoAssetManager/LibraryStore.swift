@@ -1004,7 +1004,7 @@ final class LibraryStore: ObservableObject {
         let database = database
         Task.detached(priority: .userInitiated) { [source, database] in
             do {
-                try FileOperations().trashEmptyFolderTree(at: URL(fileURLWithPath: source.path, isDirectory: true))
+                try FileOperations().deleteEmptyFolderTree(at: URL(fileURLWithPath: source.path, isDirectory: true), storageKind: source.storageKind)
                 if let sourceDirectoryID = source.sourceDirectoryID {
                     try database.removeSourceDirectory(id: sourceDirectoryID)
                 }
