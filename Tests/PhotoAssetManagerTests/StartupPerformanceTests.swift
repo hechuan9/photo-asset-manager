@@ -159,6 +159,22 @@ struct StartupPerformanceTests {
         #expect(functionBody(named: "updateFileAvailability", in: database).contains("WHERE id IN"))
     }
 
+    @Test func startupAvailabilityRefreshIsThrottledAndCanBeForced() throws {
+        let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+
+        #expect(store.contains("private let availabilityRefreshInterval: TimeInterval = 24 * 60 * 60"))
+        #expect(store.contains("func startAvailabilityRefreshInBackground(force: Bool = false)"))
+        #expect(functionBody(named: "startAvailabilityRefreshInBackground", in: store).contains("shouldRunAvailabilityRefresh(force: force)"))
+        #expect(functionBody(named: "startAvailabilityRefreshInBackground", in: store).contains("database.markAvailabilityRefreshCompleted(at: Date())"))
+        #expect(store.contains("func forceAvailabilityRefreshInBackground()"))
+        #expect(functionBody(named: "forceAvailabilityRefreshInBackground", in: store).contains("startAvailabilityRefreshInBackground(force: true)"))
+        #expect(database.contains("func lastAvailabilityRefreshAt() throws -> Date?"))
+        #expect(database.contains("func markAvailabilityRefreshCompleted(at date: Date) throws"))
+        #expect(database.contains("last_availability_refresh_at"))
+        #expect(database.contains("INSERT OR IGNORE INTO app_settings (key, value)"))
+    }
+
     @Test func startupAvailabilityRefreshMountsNASRootsBeforeFileChecks() throws {
         let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
         let mountManager = try sourceFile("Sources/PhotoAssetManager/NASMountManager.swift")

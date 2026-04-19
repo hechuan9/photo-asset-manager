@@ -39,6 +39,10 @@ struct ContentView: View {
                     library.chooseAndAddFolders(scanImmediately: false)
                 }
                 .disabled(library.isBusy)
+                Button("校验文件状态") {
+                    library.forceAvailabilityRefreshInBackground()
+                }
+                .disabled(library.isBusy)
             }
             ToolbarItemGroup {
                 Button("归档到 NAS") {

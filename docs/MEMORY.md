@@ -55,8 +55,8 @@
 - 适用范围：启动后的文件可用性校验、后台状态条、SQLite 批量写回。
 - 问题模式：启动后后台任务对全库照片逐条检查并逐条写库，导致大库侧边栏和选择交互卡顿。
 - 根因：后台校验需要遍历大量 `file_instances`，如果查询缺少针对 `file_role,path` 的索引，或每条结果单独 UPDATE，主 actor 写库窗口会被拉长。
-- 预防动作：可用性目标查询必须有 `idx_file_instances_role_path` 支撑；批量写回按 availability 分组，用 `WHERE id IN (...)` 更新，避免每条文件单独 prepare/step。
-- 合并前验证：运行覆盖 `idx_file_instances_role_path`、`Dictionary(grouping: updates, by: \.availability)`、`WHERE id IN` 的测试，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。
+- 预防动作：可用性目标查询必须有 `idx_file_instances_role_path` 支撑；批量写回按 availability 分组，用 `WHERE id IN (...)` 更新，避免每条文件单独 prepare/step；启动时全量校验必须按最近完成时间节流，旧库首次升级先建立校验水位，手动入口才强制全量校验。
+- 合并前验证：运行覆盖 `idx_file_instances_role_path`、`Dictionary(grouping: updates, by: \.availability)`、`WHERE id IN`、`last_availability_refresh_at`、`INSERT OR IGNORE INTO app_settings`、`startAvailabilityRefreshInBackground(force:)` 的测试，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。
 
 ## 文件夹浏览性能
 - 适用范围：文件夹切换、资产网格分页、缩略图/预览渲染。

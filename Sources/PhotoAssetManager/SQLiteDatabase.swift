@@ -555,6 +555,24 @@ final class SQLiteDatabase {
         }
     }
 
+    func lastAvailabilityRefreshAt() throws -> Date? {
+        let value = try prepare("SELECT value FROM app_settings WHERE key = 'last_availability_refresh_at'", []) { statement in
+            statement.text(0)
+        }.first
+        return DateCoding.decode(value)
+    }
+
+    func markAvailabilityRefreshCompleted(at date: Date) throws {
+        try execute(
+            """
+            INSERT INTO app_settings (key, value)
+            VALUES ('last_availability_refresh_at', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            [.text(DateCoding.encode(date))]
+        )
+    }
+
     func createImportBatch(sourcePath: String, deviceID: String) throws -> UUID {
         let id = UUID()
         try execute(
@@ -1001,6 +1019,14 @@ final class SQLiteDatabase {
             CREATE INDEX IF NOT EXISTS idx_browse_file_instances_node ON browse_file_instances(node_id, membership_kind);
             CREATE INDEX IF NOT EXISTS idx_browse_file_instances_file ON browse_file_instances(file_instance_id);
             """
+        )
+
+        try execute(
+            """
+            INSERT OR IGNORE INTO app_settings (key, value)
+            VALUES ('last_availability_refresh_at', ?)
+            """,
+            [.text(DateCoding.encode(Date()))]
         )
 
         try addColumnIfNeeded(

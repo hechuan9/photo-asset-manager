@@ -30,6 +30,7 @@ final class LibraryStore: ObservableObject {
     private var startupNASMountSucceeded = false
     private let assetPageSize = 96
     private let assetLoadAheadThreshold = 24
+    private let availabilityRefreshInterval: TimeInterval = 24 * 60 * 60
 
     init() {
         do {
@@ -226,7 +227,7 @@ final class LibraryStore: ObservableObject {
         loadMoreAssets()
     }
 
-    func startAvailabilityRefreshInBackground() {
+    func startAvailabilityRefreshInBackground(force: Bool = false) {
         guard availabilityTask == nil else { return }
         guard startupNASMountSucceeded else {
             backgroundTask = BackgroundTaskReport(
@@ -241,6 +242,16 @@ final class LibraryStore: ObservableObject {
         availabilityTask = Task { [weak self] in
             guard let self else { return }
             do {
+                guard try shouldRunAvailabilityRefresh(force: force) else {
+                    backgroundTask = BackgroundTaskReport(
+                        title: "后台任务",
+                        phase: "文件状态最近已校验",
+                        message: "已跳过本次启动全量校验",
+                        isFinished: true
+                    )
+                    availabilityTask = nil
+                    return
+                }
                 refreshCounts()
                 let targets = try database.availabilityCheckTargets()
                 backgroundTask = BackgroundTaskReport(
@@ -268,6 +279,7 @@ final class LibraryStore: ObservableObject {
                     await Task.yield()
                 }
 
+                try database.markAvailabilityRefreshCompleted(at: Date())
                 refresh()
                 refreshCounts()
                 backgroundTask = BackgroundTaskReport(
@@ -289,6 +301,16 @@ final class LibraryStore: ObservableObject {
             }
             availabilityTask = nil
         }
+    }
+
+    func forceAvailabilityRefreshInBackground() {
+        startAvailabilityRefreshInBackground(force: true)
+    }
+
+    private func shouldRunAvailabilityRefresh(force: Bool) throws -> Bool {
+        if force { return true }
+        guard let lastRefresh = try database.lastAvailabilityRefreshAt() else { return true }
+        return Date().timeIntervalSince(lastRefresh) >= availabilityRefreshInterval
     }
 
     func sourcesNeedingStartupOrganization() throws -> [SourceDirectory] {
