@@ -701,7 +701,7 @@ struct AssetTile: View {
         .clipShape(RoundedRectangle(cornerRadius: 0))
         .overlay {
             RoundedRectangle(cornerRadius: 0)
-                .stroke(selected ? Color.white.opacity(0.86) : Color.clear, lineWidth: 2)
+                .stroke(Color.black, lineWidth: 2)
         }
         .contentShape(Rectangle())
         .accessibilityLabel(asset.originalFilename)
