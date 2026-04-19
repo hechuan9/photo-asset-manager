@@ -160,6 +160,24 @@ struct StartupPerformanceTests {
         #expect(!scanner.contains("try database.hasUnchangedFileInstance(path: url.path, sizeBytes: size)"))
     }
 
+    @Test func scannerRegistersSameBasenameSidecarsWithOriginalAsset() throws {
+        let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+        let scannedFile = structBody(named: "ScannedFile", in: scanner)
+        let scanFileBody = functionBody(named: "scanFile", in: scanner)
+        let upsertBody = functionBody(named: "upsertScannedFile", in: database)
+
+        #expect(scanner.contains("struct ScannedSidecar"))
+        #expect(scannedFile.contains("var sidecars: [ScannedSidecar]"))
+        #expect(scanner.contains("func scanSidecars(for url: URL, storageKind: StorageKind) throws -> [ScannedSidecar]"))
+        #expect(scanFileBody.contains("sidecars: try scanSidecars(for: url, storageKind: storageKind)"))
+        #expect(database.contains("func upsertScannedSidecar"))
+        #expect(upsertBody.contains("for sidecar in scanned.sidecars"))
+        #expect(upsertBody.contains("try upsertScannedSidecar(sidecar, assetID: assetID)"))
+        #expect(functionBody(named: "upsertScannedSidecar", in: database).contains(".text(FileRole.sidecar.rawValue)"))
+        #expect(functionBody(named: "upsertScannedSidecar", in: database).contains("try upsertBrowseFolderMembership(filePath: sidecar.url.path"))
+    }
+
     @Test func rawAssetsCanRenderFromPrimaryPathWhenThumbnailIsMissing() throws {
         let content = try sourceFile("Sources/PhotoAssetManager/ContentView.swift")
         let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")

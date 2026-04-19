@@ -5,6 +5,16 @@ import UniformTypeIdentifiers
 
 private let skippedDirectoryNames: Set<String> = ["#recycle", ".spotlight-v100", ".trashes", ".fseventsd"]
 
+struct ScannedSidecar {
+    var url: URL
+    var deviceID: String
+    var storageKind: StorageKind
+    var authorityRole: AuthorityRole
+    var syncStatus: SyncStatus
+    var sizeBytes: Int64
+    var contentHash: String
+}
+
 struct ScannedFile {
     var url: URL
     var deviceID: String
@@ -23,6 +33,7 @@ struct ScannedFile {
     var thumbnailURL: URL?
     var thumbnailHash: String?
     var thumbnailSize: Int64
+    var sidecars: [ScannedSidecar]
 }
 
 struct PhotoScanner: @unchecked Sendable {
@@ -71,9 +82,11 @@ struct PhotoScanner: @unchecked Sendable {
                     }
                     if let unchangedFileInstanceID {
                         let rating = ImageMetadata.read(url: url).rating
+                        let sidecars = try scanSidecars(for: url, storageKind: storageKind)
                         try await MainActor.run {
                             try database.applyScannedRatingIfEmpty(path: url.path, rating: rating)
                             try database.upsertBrowseFolderMembership(filePath: url.path, fileInstanceID: unchangedFileInstanceID, storageKind: storageKind)
+                            try database.upsertSidecarsForFileInstance(sidecars, fileInstanceID: unchangedFileInstanceID)
                         }
                         report.skippedExistingFiles += 1
                         report.scannedFiles += 1
@@ -194,8 +207,33 @@ struct PhotoScanner: @unchecked Sendable {
             rating: metadata.rating,
             thumbnailURL: thumbnail,
             thumbnailHash: thumbnail.flatMap { try? FileHasher.sha256(url: $0) },
-            thumbnailSize: thumbnail.flatMap { (try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) } ?? 0
+            thumbnailSize: thumbnail.flatMap { (try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) } ?? 0,
+            sidecars: try scanSidecars(for: url, storageKind: storageKind)
         )
+    }
+
+    func scanSidecars(for url: URL, storageKind: StorageKind) throws -> [ScannedSidecar] {
+        let directory = url.deletingLastPathComponent()
+        let baseName = url.deletingPathExtension().lastPathComponent
+        let authority = storageKind == .nas ? AuthorityRole.canonical : AuthorityRole.workingCopy
+        let syncStatus = storageKind == .nas ? SyncStatus.synced : SyncStatus.needsArchive
+
+        return try SupportedFiles.sidecarExtensions
+            .map { directory.appendingPathComponent(baseName).appendingPathExtension($0) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+            .map { sidecarURL in
+                let values = try sidecarURL.resourceValues(forKeys: [.fileSizeKey])
+                return ScannedSidecar(
+                    url: sidecarURL,
+                    deviceID: currentDeviceID(),
+                    storageKind: storageKind,
+                    authorityRole: authority,
+                    syncStatus: syncStatus,
+                    sizeBytes: Int64(values.fileSize ?? 0),
+                    contentHash: try FileHasher.sha256(url: sidecarURL)
+                )
+            }
+            .sorted { $0.url.path.localizedStandardCompare($1.url.path) == .orderedAscending }
     }
 
     private func generateThumbnail(source: URL, contentHash: String, derivativeRoot: URL?) throws -> URL? {

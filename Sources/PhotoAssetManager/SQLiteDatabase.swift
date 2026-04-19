@@ -555,7 +555,57 @@ final class SQLiteDatabase: @unchecked Sendable {
             try upsertAssetThumbnail(assetID: assetID, url: thumbnailURL, hash: scanned.thumbnailHash ?? "", sizeBytes: scanned.thumbnailSize)
         }
 
+        for sidecar in scanned.sidecars {
+            try upsertScannedSidecar(sidecar, assetID: assetID)
+        }
+
         return isNewAsset || !exists
+    }
+
+    func upsertSidecarsForFileInstance(_ sidecars: [ScannedSidecar], fileInstanceID: UUID) throws {
+        guard !sidecars.isEmpty else { return }
+        guard let assetID = try assetID(fileInstanceID: fileInstanceID) else { return }
+        for sidecar in sidecars {
+            try upsertScannedSidecar(sidecar, assetID: assetID)
+        }
+    }
+
+    func upsertScannedSidecar(_ sidecar: ScannedSidecar, assetID: UUID) throws {
+        let fileID = try fileInstanceID(path: sidecar.url.path) ?? UUID()
+        try execute(
+            """
+            INSERT INTO file_instances (
+                id, asset_id, path, device_id, storage_kind, file_role, authority_role,
+                sync_status, size_bytes, content_hash, last_seen_at, availability
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                asset_id = excluded.asset_id,
+                device_id = excluded.device_id,
+                storage_kind = excluded.storage_kind,
+                file_role = excluded.file_role,
+                authority_role = excluded.authority_role,
+                sync_status = excluded.sync_status,
+                size_bytes = excluded.size_bytes,
+                content_hash = excluded.content_hash,
+                last_seen_at = excluded.last_seen_at,
+                availability = excluded.availability
+            """,
+            [
+                .text(fileID.uuidString),
+                .text(assetID.uuidString),
+                .text(sidecar.url.path),
+                .text(sidecar.deviceID),
+                .text(sidecar.storageKind.rawValue),
+                .text(FileRole.sidecar.rawValue),
+                .text(sidecar.authorityRole.rawValue),
+                .text(sidecar.syncStatus.rawValue),
+                .int(sidecar.sizeBytes),
+                .text(sidecar.contentHash),
+                .text(DateCoding.encode(Date())),
+                .text(Availability.online.rawValue)
+            ]
+        )
+        try upsertBrowseFolderMembership(filePath: sidecar.url.path, fileInstanceID: fileID, storageKind: sidecar.storageKind)
     }
 
     func derivativeStoragePath() throws -> String? {
@@ -1499,6 +1549,15 @@ final class SQLiteDatabase: @unchecked Sendable {
     private func assetID(contentHash: String, metadataFingerprint: String) throws -> UUID? {
         let sql = "SELECT id FROM assets WHERE content_fingerprint = ? OR metadata_fingerprint = ? LIMIT 1"
         return try prepare(sql, [.text(contentHash), .text(metadataFingerprint)]) { statement in
+            UUID(uuidString: statement.text(0))
+        }.first ?? nil
+    }
+
+    private func assetID(fileInstanceID: UUID) throws -> UUID? {
+        try prepare(
+            "SELECT asset_id FROM file_instances WHERE id = ? LIMIT 1",
+            [.text(fileInstanceID.uuidString)]
+        ) { statement in
             UUID(uuidString: statement.text(0))
         }.first ?? nil
     }
