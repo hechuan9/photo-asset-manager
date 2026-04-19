@@ -12,6 +12,7 @@ struct PhotoAssetManagerApp: App {
         }
         .commands {
             FolderScopeCommands(library: library)
+            ToolCommands(library: library)
         }
     }
 }
@@ -30,6 +31,19 @@ struct FolderScopeCommands: Commands {
                 library.setBrowseScope(.recursive)
             }
             .disabled(library.filter.browseSelection == nil)
+        }
+    }
+}
+
+struct ToolCommands: Commands {
+    @ObservedObject var library: LibraryStore
+
+    var body: some Commands {
+        CommandMenu("工具") {
+            Button("补齐拍摄时间") {
+                library.fillMissingCaptureTimes()
+            }
+            .disabled(library.isBusy)
         }
     }
 }

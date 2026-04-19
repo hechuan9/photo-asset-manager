@@ -48,12 +48,6 @@ struct ContentView: View {
                     library.forceAvailabilityRefreshInBackground()
                 }
                 .disabled(library.isBusy)
-                Menu("工具") {
-                    Button("补齐拍摄时间") {
-                        library.fillMissingCaptureTimes()
-                    }
-                    .disabled(library.isBusy)
-                }
             }
             ToolbarItemGroup {
                 Button("归档到 NAS") {

@@ -241,10 +241,11 @@ struct StartupPerformanceTests {
         #expect(functionBody(named: "deduplicateAssetThumbnails", in: database).contains("file_role = 'thumbnail'"))
     }
 
-    @Test func captureTimeBackfillUsesCreatedAtOnlyForMissingValuesFromToolbarToolsMenu() throws {
+    @Test func captureTimeBackfillUsesCreatedAtOnlyForMissingValuesFromMacMenuBarToolsMenu() throws {
         let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
         let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
         let content = try sourceFile("Sources/PhotoAssetManager/ContentView.swift")
+        let app = try sourceFile("Sources/PhotoAssetManager/PhotoAssetManagerApp.swift")
 
         #expect(database.contains("func backfillMissingCaptureTimesFromCreatedAt() throws -> Int"))
         #expect(functionBody(named: "backfillMissingCaptureTimesFromCreatedAt", in: database).contains("capture_time = created_at"))
@@ -253,9 +254,12 @@ struct StartupPerformanceTests {
         #expect(store.contains("func fillMissingCaptureTimes()"))
         #expect(functionBody(named: "fillMissingCaptureTimes", in: store).contains("database.backfillMissingCaptureTimesFromCreatedAt()"))
         #expect(functionBody(named: "fillMissingCaptureTimes", in: store).contains("blockingTask = BlockingTaskReport"))
-        #expect(content.contains("Menu(\"工具\")"))
-        #expect(content.contains("Button(\"补齐拍摄时间\")"))
-        #expect(content.contains("library.fillMissingCaptureTimes()"))
+        #expect(!content.contains("Menu(\"工具\")"))
+        #expect(app.contains("ToolCommands(library: library)"))
+        #expect(app.contains("struct ToolCommands: Commands"))
+        #expect(app.contains("CommandMenu(\"工具\")"))
+        #expect(app.contains("Button(\"补齐拍摄时间\")"))
+        #expect(app.contains("library.fillMissingCaptureTimes()"))
     }
 
     @Test func assetPreviewLoadsImagesAsynchronouslyWithCache() throws {
