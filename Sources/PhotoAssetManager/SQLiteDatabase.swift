@@ -135,7 +135,7 @@ final class SQLiteDatabase: @unchecked Sendable {
                 COUNT(fi.id) AS file_count,
                 MIN(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') THEN fi.path ELSE NULL END) AS primary_path,
                 COALESCE(
-                    MAX(CASE WHEN fi.file_role = 'thumbnail' THEN fi.path ELSE NULL END),
+                    MIN(CASE WHEN fi.file_role = 'thumbnail' THEN fi.path ELSE NULL END),
                     MIN(CASE WHEN fi.file_role = 'jpeg_original' THEN fi.path ELSE NULL END)
                 ) AS thumbnail_path,
                 MAX(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') AND fi.availability = 'online' THEN 1 ELSE 0 END) AS has_online_original,
@@ -172,7 +172,7 @@ final class SQLiteDatabase: @unchecked Sendable {
                 COUNT(fi.id) AS file_count,
                 MIN(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') THEN fi.path ELSE NULL END) AS primary_path,
                 COALESCE(
-                    MAX(CASE WHEN fi.file_role = 'thumbnail' THEN fi.path ELSE NULL END),
+                    MIN(CASE WHEN fi.file_role = 'thumbnail' THEN fi.path ELSE NULL END),
                     MIN(CASE WHEN fi.file_role = 'jpeg_original' THEN fi.path ELSE NULL END)
                 ) AS thumbnail_path,
                 MAX(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') AND fi.availability = 'online' THEN 1 ELSE 0 END) AS has_online_original,
@@ -552,7 +552,7 @@ final class SQLiteDatabase: @unchecked Sendable {
         try upsertBrowseFolderMembership(filePath: scanned.url.path, fileInstanceID: fileID, storageKind: scanned.storageKind)
 
         if let thumbnailURL = scanned.thumbnailURL {
-            try upsertDerivedFile(assetID: assetID, url: thumbnailURL, role: .thumbnail, hash: scanned.thumbnailHash ?? "", sizeBytes: scanned.thumbnailSize)
+            try upsertAssetThumbnail(assetID: assetID, url: thumbnailURL, hash: scanned.thumbnailHash ?? "", sizeBytes: scanned.thumbnailSize)
         }
 
         return isNewAsset || !exists
@@ -1073,7 +1073,48 @@ final class SQLiteDatabase: @unchecked Sendable {
             WHERE status IN ('finished', 'finished_with_errors', 'resumed')
             """
         )
+        try deduplicateAssetThumbnails()
+        try execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_file_instances_one_thumbnail_per_asset
+            ON file_instances(asset_id, file_role)
+            WHERE file_role = 'thumbnail'
+            """
+        )
         try backfillBrowseGraphFromFileInstances()
+    }
+
+    func deduplicateAssetThumbnails() throws {
+        try execute(
+            """
+            DELETE FROM file_instances
+            WHERE id IN (
+                SELECT id
+                FROM (
+                    SELECT
+                        id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY asset_id
+                            ORDER BY
+                                CASE
+                                    WHEN EXISTS (
+                                        SELECT 1
+                                        FROM file_instances original
+                                        WHERE original.asset_id = ranked.asset_id
+                                          AND original.file_role = 'jpeg_original'
+                                          AND ranked.path LIKE '%' || original.content_hash || '-320.jpg'
+                                    ) THEN 0
+                                    ELSE 1
+                                END,
+                                path
+                        ) AS rank
+                    FROM file_instances ranked
+                    WHERE file_role = 'thumbnail'
+                )
+                WHERE rank > 1
+            )
+            """
+        )
     }
 
     func backfillBrowseGraphFromFileInstances() throws {
@@ -1150,14 +1191,28 @@ final class SQLiteDatabase: @unchecked Sendable {
         }.first ?? nil
     }
 
-    private func upsertDerivedFile(assetID: UUID, url: URL, role: FileRole, hash: String, sizeBytes: Int64) throws {
+    private func upsertAssetThumbnail(assetID: UUID, url: URL, hash: String, sizeBytes: Int64) throws {
+        try execute(
+            """
+            DELETE FROM file_instances
+            WHERE asset_id = ?
+              AND file_role = 'thumbnail'
+              AND path <> ?
+            """,
+            [.text(assetID.uuidString), .text(url.path)]
+        )
         try execute(
             """
             INSERT INTO file_instances (
                 id, asset_id, path, device_id, storage_kind, file_role, authority_role,
                 sync_status, size_bytes, content_hash, last_seen_at, availability
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at, availability = excluded.availability
+            ON CONFLICT(path) DO UPDATE SET
+                asset_id = excluded.asset_id,
+                size_bytes = excluded.size_bytes,
+                content_hash = excluded.content_hash,
+                last_seen_at = excluded.last_seen_at,
+                availability = excluded.availability
             """,
             [
                 .text(UUID().uuidString),
@@ -1165,7 +1220,7 @@ final class SQLiteDatabase: @unchecked Sendable {
                 .text(url.path),
                 .text(currentDeviceID()),
                 .text(StorageKind.local.rawValue),
-                .text(role.rawValue),
+                .text(FileRole.thumbnail.rawValue),
                 .text(AuthorityRole.cache.rawValue),
                 .text(SyncStatus.cacheOnly.rawValue),
                 .int(sizeBytes),

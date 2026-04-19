@@ -170,6 +170,28 @@ struct StartupPerformanceTests {
         #expect(content.contains("asset.primaryPath"))
     }
 
+    @Test func thumbnailsAreAssetScopedInsteadOfOnePerOriginalFile() throws {
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+        let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")
+
+        #expect(database.contains("func upsertAssetThumbnail(assetID: UUID, url: URL, hash: String, sizeBytes: Int64) throws"))
+        #expect(functionBody(named: "upsertScannedFile", in: database).contains("upsertAssetThumbnail(assetID: assetID"))
+        #expect(!functionBody(named: "upsertScannedFile", in: database).contains("upsertDerivedFile(assetID: assetID, url: thumbnailURL, role: .thumbnail"))
+        #expect(database.contains("CREATE UNIQUE INDEX IF NOT EXISTS idx_file_instances_one_thumbnail_per_asset"))
+        #expect(scanner.contains("thumbnailURL: thumbnail"))
+    }
+
+    @Test func thumbnailMigrationDeduplicatesExistingRawJpegPairThumbnails() throws {
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+        let migrateBody = functionBody(named: "migrate", in: database)
+
+        #expect(database.contains("func deduplicateAssetThumbnails() throws"))
+        #expect(migrateBody.contains("try deduplicateAssetThumbnails()"))
+        #expect(functionBody(named: "deduplicateAssetThumbnails", in: database).contains("ROW_NUMBER() OVER"))
+        #expect(functionBody(named: "deduplicateAssetThumbnails", in: database).contains("DELETE FROM file_instances"))
+        #expect(functionBody(named: "deduplicateAssetThumbnails", in: database).contains("file_role = 'thumbnail'"))
+    }
+
     @Test func assetPreviewLoadsImagesAsynchronouslyWithCache() throws {
         let content = try sourceFile("Sources/PhotoAssetManager/ContentView.swift")
         let previewBody = structBody(named: "AssetPreviewImage", in: content)
