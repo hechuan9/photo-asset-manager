@@ -187,6 +187,7 @@ struct BlockingTaskProgressView: View {
 struct SidebarView: View {
     @EnvironmentObject private var library: LibraryStore
     @State private var expandedFolderNodeIDs: Set<String> = []
+    @State private var pendingMoveSource: FolderMoveSource?
 
     var body: some View {
         List(selection: Binding(
@@ -232,6 +233,9 @@ struct SidebarView: View {
                             },
                             select: {
                                 library.selectFolder(path: node.path)
+                            },
+                            openMoveDialog: { source in
+                                pendingMoveSource = source
                             }
                         )
                     }
@@ -297,6 +301,14 @@ struct SidebarView: View {
         }
         .scrollContentBackground(.hidden)
         .background(AppPalette.sidebarBackground)
+        .sheet(item: $pendingMoveSource) { source in
+            FolderMoveTargetDialog(
+                source: source,
+                close: {
+                    pendingMoveSource = nil
+                }
+            )
+        }
     }
 }
 
@@ -428,6 +440,7 @@ struct SourceDirectoryNodeRow: View {
     var isSelected: Bool
     var toggleExpansion: () -> Void
     var select: () -> Void
+    var openMoveDialog: (FolderMoveSource) -> Void
 
     private var moveSource: FolderMoveSource {
         node.source.map(FolderMoveSource.init(source:)) ?? FolderMoveSource(path: node.path)
@@ -474,7 +487,8 @@ struct SourceDirectoryNodeRow: View {
                     source: node.source,
                     moveSource: moveSource,
                     interruptedScanPath: interruptedScanPath,
-                    nodePath: node.path
+                    nodePath: node.path,
+                    openMoveDialog: openMoveDialog
                 )
             } label: {
                 Image(systemName: "ellipsis")
@@ -488,7 +502,8 @@ struct SourceDirectoryNodeRow: View {
                 source: node.source,
                 moveSource: moveSource,
                 interruptedScanPath: interruptedScanPath,
-                nodePath: node.path
+                nodePath: node.path,
+                openMoveDialog: openMoveDialog
             )
         }
     }
@@ -500,6 +515,7 @@ struct FolderActionMenuItems: View {
     var moveSource: FolderMoveSource
     var interruptedScanPath: String?
     var nodePath: String
+    var openMoveDialog: (FolderMoveSource) -> Void
 
     var body: some View {
         if let source {
@@ -514,18 +530,8 @@ struct FolderActionMenuItems: View {
             Divider()
         }
 
-        Menu("移动到") {
-            let targets = library.availableFolderMoveTargets(for: moveSource)
-            if targets.isEmpty {
-                Button("没有可用目标") {}
-                    .disabled(true)
-            } else {
-                ForEach(targets) { target in
-                    Button(target.path) {
-                        library.moveFolder(moveSource, to: target)
-                    }
-                }
-            }
+        Button("移动到...") {
+            openMoveDialog(moveSource)
         }
 
         if let source {
@@ -539,6 +545,138 @@ struct FolderActionMenuItems: View {
     private var isInterruptedScanSource: Bool {
         guard let interruptedScanPath else { return false }
         return interruptedScanPath == nodePath || interruptedScanPath.hasPrefix(nodePath + "/")
+    }
+}
+
+struct FolderMoveTargetDialog: View {
+    @EnvironmentObject private var library: LibraryStore
+    var source: FolderMoveSource
+    var close: () -> Void
+    @State private var currentPath: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("移动文件夹")
+                .font(.headline)
+            Text(source.path)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+
+            Divider()
+
+            HStack(spacing: 8) {
+                Button("上一级") {
+                    currentPath = parentPath(of: currentPath ?? "")
+                }
+                .disabled(currentPath == nil)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("当前位置")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(currentPath ?? "目标根目录")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            if let currentTarget {
+                Button("移动到这里") {
+                    library.moveFolder(source, to: currentTarget)
+                    close()
+                }
+                .disabled(library.isBusy)
+            }
+
+            if childTargets.isEmpty {
+                Text("没有下一级可选目标。")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 120, alignment: .center)
+            } else {
+                List(childTargets) { target in
+                    HStack(spacing: 10) {
+                        Image(systemName: "folder")
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(displayName(for: target.path))
+                                .lineLimit(1)
+                            Text(target.path)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer()
+                        Button("移动到这里") {
+                            library.moveFolder(source, to: target)
+                            close()
+                        }
+                        .disabled(library.isBusy)
+                        Button("进入") {
+                            currentPath = target.path
+                        }
+                        .disabled(immediateChildren(of: target.path).isEmpty)
+                    }
+                }
+                .frame(minHeight: 240)
+            }
+
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) {
+                    close()
+                }
+            }
+        }
+        .frame(width: 560, height: 420, alignment: .leading)
+        .padding(18)
+    }
+
+    private var targets: [FolderMoveTarget] {
+        library.availableFolderMoveTargets(for: source)
+    }
+
+    private var currentTarget: FolderMoveTarget? {
+        guard let currentPath else { return nil }
+        return targets.first { normalizedPath($0.path) == normalizedPath(currentPath) }
+    }
+
+    private var childTargets: [FolderMoveTarget] {
+        immediateChildren(of: currentPath)
+    }
+
+    private func immediateChildren(of parent: String?) -> [FolderMoveTarget] {
+        let targetPaths = Set(targets.map { normalizedPath($0.path) })
+        return targets.filter { target in
+            let path = normalizedPath(target.path)
+            guard path != normalizedPath(source.path) else { return false }
+            let targetParent = parentPath(of: path)
+            if let parent {
+                return targetParent == normalizedPath(parent)
+            }
+            guard let targetParent else { return true }
+            return !targetPaths.contains(targetParent)
+        }
+        .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    private func parentPath(of path: String) -> String? {
+        let normalized = normalizedPath(path)
+        guard !normalized.isEmpty, normalized != "/" else { return nil }
+        let parent = URL(fileURLWithPath: normalized, isDirectory: true).deletingLastPathComponent().path
+        return normalizedPath(parent)
+    }
+
+    private func displayName(for path: String) -> String {
+        let normalized = normalizedPath(path)
+        return normalized == "/" ? "/" : URL(fileURLWithPath: normalized, isDirectory: true).lastPathComponent
+    }
+
+    private func normalizedPath(_ path: String) -> String {
+        guard path.count > 1 else { return path }
+        return path.hasSuffix("/") ? String(path.dropLast()) : path
     }
 }
 
