@@ -42,7 +42,8 @@ struct StartupPerformanceTests {
         #expect(store.contains("private let assetPageSize = 96"))
         #expect(store.contains("func loadMoreAssetsIfNeeded(currentAssetID: UUID)"))
         #expect(content.contains(".onAppear"))
-        #expect(content.contains("library.loadMoreAssetsIfNeeded(currentAssetID: asset.id)"))
+        #expect(content.contains("loadMore: { assetID in"))
+        #expect(content.contains("library.loadMoreAssetsIfNeeded(currentAssetID: assetID)"))
         #expect(!content.contains("Button(\"加载更多\")"))
     }
 

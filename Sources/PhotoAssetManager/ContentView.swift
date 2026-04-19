@@ -599,9 +599,113 @@ struct MoveSourceDirectorySheet: View {
     }
 }
 
+struct JustifiedAssetRow: Identifiable {
+    let id: UUID
+    let assets: [Asset]
+    let height: CGFloat
+    let aspectRatios: [UUID: CGFloat]
+    let spacing: CGFloat
+
+    func width(for asset: Asset) -> CGFloat {
+        height * (aspectRatios[asset.id] ?? JustifiedAssetGridLayout.defaultAspectRatio)
+    }
+}
+
+enum JustifiedAssetGridLayout {
+    static let defaultAspectRatio: CGFloat = 1.5
+
+    static func rows(
+        assets: [Asset],
+        aspectRatios: [UUID: CGFloat],
+        availableWidth: CGFloat,
+        targetHeight: CGFloat = 168,
+        spacing: CGFloat = 1
+    ) -> [JustifiedAssetRow] {
+        let availableWidth = max(1, availableWidth)
+        var rows: [JustifiedAssetRow] = []
+        var pendingAssets: [Asset] = []
+        var aspectRatioSum: CGFloat = 0
+
+        func appendPendingRow() {
+            guard !pendingAssets.isEmpty, aspectRatioSum > 0 else { return }
+            let spacingWidth = spacing * CGFloat(max(0, pendingAssets.count - 1))
+            let availableImageWidth = max(1, availableWidth - spacingWidth)
+            let rowHeight = availableImageWidth / aspectRatioSum
+            rows.append(JustifiedAssetRow(
+                id: pendingAssets[0].id,
+                assets: pendingAssets,
+                height: rowHeight,
+                aspectRatios: aspectRatios,
+                spacing: spacing
+            ))
+            pendingAssets.removeAll(keepingCapacity: true)
+            aspectRatioSum = 0
+        }
+
+        for asset in assets {
+            let ratio = max(0.2, aspectRatios[asset.id] ?? defaultAspectRatio)
+            pendingAssets.append(asset)
+            aspectRatioSum += ratio
+
+            let spacingWidth = spacing * CGFloat(max(0, pendingAssets.count - 1))
+            let rowWidthAtTargetHeight = aspectRatioSum * targetHeight + spacingWidth
+            if rowWidthAtTargetHeight >= availableWidth {
+                appendPendingRow()
+            }
+        }
+
+        appendPendingRow()
+        return rows
+    }
+}
+
+struct JustifiedAssetGrid: View {
+    var assets: [Asset]
+    var selectedAssetID: UUID?
+    var aspectRatios: [UUID: CGFloat]
+    var availableWidth: CGFloat
+    var select: (Asset) -> Void
+    var loadMore: (UUID) -> Void
+    var updateAspectRatio: (UUID, CGFloat) -> Void
+
+    private let spacing: CGFloat = 1
+    private let targetHeight: CGFloat = 168
+
+    var body: some View {
+        let rows = JustifiedAssetGridLayout.rows(
+            assets: assets,
+            aspectRatios: aspectRatios,
+            availableWidth: max(1, availableWidth - spacing * 2),
+            targetHeight: targetHeight,
+            spacing: spacing
+        )
+
+        LazyVStack(spacing: spacing) {
+            ForEach(rows) { row in
+                HStack(spacing: spacing) {
+                    ForEach(row.assets) { asset in
+                        AssetTile(asset: asset, selected: asset.id == selectedAssetID) { ratio in
+                            updateAspectRatio(asset.id, ratio)
+                        }
+                        .frame(width: row.width(for: asset), height: row.height)
+                        .onTapGesture {
+                            select(asset)
+                        }
+                        .onAppear {
+                            loadMore(asset.id)
+                        }
+                    }
+                }
+                .frame(width: max(1, availableWidth - spacing * 2), height: row.height, alignment: .leading)
+            }
+        }
+        .padding(spacing)
+    }
+}
+
 struct AssetBrowserView: View {
     @EnvironmentObject private var library: LibraryStore
-    private let columns = [GridItem(.adaptive(minimum: 220, maximum: 360), spacing: 2)]
+    @State private var aspectRatios: [UUID: CGFloat] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -610,20 +714,25 @@ struct AssetBrowserView: View {
             if library.assets.isEmpty {
                 EmptyLibraryView()
             } else {
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 2) {
-                        ForEach(library.assets) { asset in
-                            AssetTile(asset: asset, selected: asset.id == library.selectedAssetID)
-                                .onTapGesture {
-                                    library.selectedAssetID = asset.id
-                                    library.loadSelectedFiles()
-                                }
-                                .onAppear {
-                                    library.loadMoreAssetsIfNeeded(currentAssetID: asset.id)
-                                }
-                        }
+                GeometryReader { proxy in
+                    ScrollView {
+                        JustifiedAssetGrid(
+                            assets: library.assets,
+                            selectedAssetID: library.selectedAssetID,
+                            aspectRatios: aspectRatios,
+                            availableWidth: proxy.size.width,
+                            select: { asset in
+                                library.selectedAssetID = asset.id
+                                library.loadSelectedFiles()
+                            },
+                            loadMore: { assetID in
+                                library.loadMoreAssetsIfNeeded(currentAssetID: assetID)
+                            },
+                            updateAspectRatio: { assetID, ratio in
+                                aspectRatios[assetID] = ratio
+                            }
+                        )
                     }
-                    .padding(2)
                 }
                 .background(Color.black)
             }
@@ -689,20 +798,21 @@ struct EmptyLibraryView: View {
 struct AssetTile: View {
     var asset: Asset
     var selected: Bool
+    var onAspectRatioChange: (CGFloat) -> Void = { _ in }
 
     var body: some View {
         ZStack {
             Rectangle()
-                .fill(Color(nsColor: .controlBackgroundColor))
-            AssetPreviewImage(asset: asset, contentMode: .fill, placeholderSize: 34)
+                .fill(Color.black)
+            AssetPreviewImage(
+                asset: asset,
+                contentMode: .fit,
+                placeholderSize: 34,
+                onAspectRatioChange: onAspectRatioChange
+            )
         }
-        .frame(height: 168)
         .clipped()
         .clipShape(RoundedRectangle(cornerRadius: 0))
-        .overlay {
-            RoundedRectangle(cornerRadius: 0)
-                .stroke(Color.black, lineWidth: 2)
-        }
         .contentShape(Rectangle())
         .accessibilityLabel(asset.originalFilename)
     }
@@ -712,6 +822,7 @@ struct AssetPreviewImage: View {
     var asset: Asset
     var contentMode: ContentMode
     var placeholderSize: CGFloat
+    var onAspectRatioChange: (CGFloat) -> Void = { _ in }
     @StateObject private var loader = ImagePreviewLoader()
 
     var body: some View {
@@ -720,6 +831,9 @@ struct AssetPreviewImage: View {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
+                    .onAppear {
+                        reportAspectRatio(image.size)
+                    }
             } else {
                 Image(systemName: "photo")
                     .font(.system(size: placeholderSize))
@@ -733,6 +847,11 @@ struct AssetPreviewImage: View {
 
     private var cacheKey: String {
         asset.thumbnailPath ?? asset.primaryPath ?? asset.id.uuidString
+    }
+
+    private func reportAspectRatio(_ size: NSSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        onAspectRatioChange(size.width / size.height)
     }
 }
 
