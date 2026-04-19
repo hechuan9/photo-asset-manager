@@ -150,6 +150,17 @@ struct StartupPerformanceTests {
         #expect(database.contains("func backfillBrowseGraphFromFileInstances() throws"))
     }
 
+    @Test func importBatchBackfillDoesNotCreateNestedTopLevelSources() throws {
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+
+        #expect(database.contains("func pruneNestedImportBatchSourceDirectories() throws"))
+        #expect(functionBody(named: "migrate", in: database).contains("try pruneNestedImportBatchSourceDirectories()"))
+        #expect(database.contains("NOT EXISTS ("))
+        #expect(database.contains("ancestor.path || '/%'"))
+        #expect(functionBody(named: "pruneNestedImportBatchSourceDirectories", in: database).contains("DELETE FROM source_directories"))
+        #expect(functionBody(named: "pruneNestedImportBatchSourceDirectories", in: database).contains("import_batches ib"))
+    }
+
     @Test func rescanningUnchangedFilesRepairsBrowseMembership() throws {
         let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")
         let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")

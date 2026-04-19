@@ -1451,8 +1451,15 @@ final class SQLiteDatabase: @unchecked Sendable {
                 imported_at
             FROM import_batches
             WHERE status IN ('finished', 'finished_with_errors', 'resumed')
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM source_directories ancestor
+                  WHERE ancestor.is_tracked = 1
+                    AND source_path LIKE ancestor.path || '/%'
+              )
             """
         )
+        try pruneNestedImportBatchSourceDirectories()
         try deduplicateAssetThumbnails()
         try execute(
             """
@@ -1462,6 +1469,28 @@ final class SQLiteDatabase: @unchecked Sendable {
             """
         )
         try backfillBrowseGraphFromFileInstances()
+    }
+
+    func pruneNestedImportBatchSourceDirectories() throws {
+        try execute(
+            """
+            DELETE FROM source_directories
+            WHERE id IN (
+                SELECT sd.id
+                FROM source_directories sd
+                JOIN import_batches ib
+                  ON ib.id = sd.id
+                 AND ib.source_path = sd.path
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM source_directories ancestor
+                    WHERE ancestor.id <> sd.id
+                      AND ancestor.is_tracked = 1
+                      AND sd.path LIKE ancestor.path || '/%'
+                )
+            )
+            """
+        )
     }
 
     func deduplicateAssetThumbnails() throws {
