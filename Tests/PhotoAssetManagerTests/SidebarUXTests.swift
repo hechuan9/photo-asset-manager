@@ -82,6 +82,8 @@ struct SidebarUXTests {
         #expect(filterBarBody.contains("library.setSortOrder"))
         #expect(!filterBarBody.contains("TextField(\"相机\""))
         #expect(!filterBarBody.contains("Stepper(\"最低"))
+        #expect(!filterBarBody.contains("Button(\"记录导出\""))
+        #expect(!filterBarBody.contains("library.recordExportForSelected"))
     }
 
     @Test func folderSidebarUsesTreeWithChildDisclosureAndMoveMenu() throws {

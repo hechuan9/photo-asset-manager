@@ -1559,12 +1559,6 @@ struct FilterBar: View {
                 library.refresh()
             }
             .buttonStyle(.borderless)
-
-            Button("记录导出") {
-                library.recordExportForSelected()
-            }
-            .buttonStyle(.borderless)
-            .disabled(library.selectedAsset == nil)
         }
         .padding(.horizontal, 10)
         .frame(height: 44)
