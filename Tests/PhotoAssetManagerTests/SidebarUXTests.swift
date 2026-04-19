@@ -115,6 +115,22 @@ struct SidebarUXTests {
         #expect(content.contains("Text(displayName)"))
     }
 
+    @Test func folderSidebarUsesCompactLightroomRowsWithoutPathMetadata() throws {
+        let content = try contentViewSource()
+        let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
+        let rowBody = structBody(named: "SourceDirectoryRow", in: content)
+        let nodeRowBody = structBody(named: "SourceDirectoryNodeRow", in: content)
+
+        #expect(models.contains("guard let parent else { return URL(fileURLWithPath: sourcePath).lastPathComponent }"))
+        #expect(rowBody.contains("HStack(spacing: 6)"))
+        #expect(rowBody.contains(".lineLimit(1)"))
+        #expect(rowBody.contains(".padding(.vertical, 1)"))
+        #expect(nodeRowBody.contains(".frame(width: CGFloat(node.depth) * 10)"))
+        #expect(nodeRowBody.contains(".frame(width: 12, height: 20)"))
+        #expect(!rowBody.contains("lastScannedAt"))
+        #expect(!rowBody.contains(".textSelection(.enabled)"))
+    }
+
     @Test func folderTreeExpandsIndexedBrowseGraphSubdirectoriesWithoutPureBlackSidebar() throws {
         let content = try contentViewSource()
         let sidebarBody = structBody(named: "SidebarView", in: content)

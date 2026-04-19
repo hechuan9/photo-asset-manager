@@ -562,44 +562,36 @@ struct SourceDirectoryRow: View {
     var openRemovalDialog: ((FolderMoveSource) -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(displayName)
-                    .lineLimit(2)
-                    .foregroundStyle(AppPalette.folderText)
-                    .textSelection(.enabled)
-                Spacer()
-                if showsMenu, let source {
-                    Menu {
-                        Button("刷新") {
-                            library.scanSource(source)
-                        }
-                        if isInterruptedScanSource {
-                            Button("继续扫描") {
-                                library.resumeInterruptedScan()
-                            }
-                        }
-                        Divider()
-                        Button("移除", role: .destructive) {
-                            openRemovalDialog?(FolderMoveSource(source: source))
-                        }
-                        .disabled(openRemovalDialog == nil)
-                    } label: {
-                        Image(systemName: "ellipsis")
+        HStack(spacing: 6) {
+            Text(displayName)
+                .lineLimit(1)
+                .foregroundStyle(AppPalette.folderText)
+            Spacer(minLength: 4)
+            if showsMenu, let source {
+                Menu {
+                    Button("刷新") {
+                        library.scanSource(source)
                     }
-                    .menuStyle(.borderlessButton)
-                    .disabled(library.isBusy)
-                    .help("文件夹操作")
+                    if isInterruptedScanSource {
+                        Button("继续扫描") {
+                            library.resumeInterruptedScan()
+                        }
+                    }
+                    Divider()
+                    Button("移除", role: .destructive) {
+                        openRemovalDialog?(FolderMoveSource(source: source))
+                    }
+                    .disabled(openRemovalDialog == nil)
+                } label: {
+                    Image(systemName: "ellipsis")
                 }
-            }
-            if let lastScannedAt = source?.lastScannedAt {
-                Text("上次扫描 \(lastScannedAt.formatted(date: .abbreviated, time: .shortened))")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                .menuStyle(.borderlessButton)
+                .disabled(library.isBusy)
+                .help("文件夹操作")
             }
         }
         .font(.callout)
-        .padding(.vertical, 4)
+        .padding(.vertical, 1)
     }
 
     private var isInterruptedScanSource: Bool {
@@ -626,9 +618,9 @@ struct SourceDirectoryNodeRow: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
+        HStack(alignment: .center, spacing: 4) {
             Spacer()
-                .frame(width: CGFloat(node.depth) * 14)
+                .frame(width: CGFloat(node.depth) * 10)
             if node.hasChildren {
                 Button {
                     toggleExpansion()
@@ -636,14 +628,14 @@ struct SourceDirectoryNodeRow: View {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .frame(width: 14, height: 24)
+                        .frame(width: 12, height: 20)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(library.pendingBrowseSelection != nil)
             } else {
                 Spacer()
-                    .frame(width: 14)
+                    .frame(width: 12)
             }
 
             Button(action: select) {

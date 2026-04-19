@@ -502,7 +502,7 @@ enum SourceDirectoryTreeBuilder {
 
     private static func displayName(for source: SourceDirectory, parent: SourceDirectory?) -> String {
         let sourcePath = normalizedDirectoryPath(source.path)
-        guard let parent else { return sourcePath }
+        guard let parent else { return URL(fileURLWithPath: sourcePath).lastPathComponent }
 
         let parentPath = normalizedDirectoryPath(parent.path)
         let prefix = parentPath == "/" ? "/" : parentPath + "/"
