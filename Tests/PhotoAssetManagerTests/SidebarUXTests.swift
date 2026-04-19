@@ -280,7 +280,8 @@ struct SidebarUXTests {
         #expect(loupeBody.contains(".background(Color.black)"))
         #expect(filmstripBody.contains("ScrollView(.horizontal"))
         #expect(filmstripBody.contains("ForEach(assets)"))
-        #expect(filmstripBody.contains("AssetPreviewImage(asset: filmstripAsset, contentMode: .fill, placeholderSize: 18)"))
+        #expect(filmstripBody.contains("AssetPreviewImage(asset: filmstripAsset, contentMode: .fit, placeholderSize: 18)"))
+        #expect(!filmstripBody.contains("contentMode: .fill"))
         #expect(filmstripBody.contains("select(filmstripAsset)"))
     }
 
@@ -466,6 +467,11 @@ struct SidebarUXTests {
         #expect(store.contains("func deleteAssets(_ assetIDs: [UUID])"))
         #expect(store.contains("FileOperations().deleteAssetFiles"))
         #expect(store.contains("try database.deletableFileInstances(assetIDs: assetIDs)"))
+        let deleteAssetsBody = functionBody(named: "deleteAssets", in: store)
+        #expect(deleteAssetsBody.contains("let visibleDeletionFiles = files.filter { $0.fileRole != .thumbnail }"))
+        #expect(deleteAssetsBody.contains("guard file.fileRole != .thumbnail else { return }"))
+        #expect(deleteAssetsBody.contains("totalItems: visibleDeletionFiles.count"))
+        #expect(!deleteAssetsBody.contains("totalItems: files.count"))
 
         #expect(database.contains("func deletableFileInstances(assetIDs: [UUID]) throws -> [FileInstance]"))
         #expect(database.contains("func removeDeletedFileInstance(_ file: FileInstance, deletionMethod: AssetFileDeletionMethod) throws"))

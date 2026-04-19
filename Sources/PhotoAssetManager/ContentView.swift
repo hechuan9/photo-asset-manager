@@ -1479,7 +1479,7 @@ struct LoupeFilmstripView: View {
                     } label: {
                         ZStack {
                             Color.black
-                            AssetPreviewImage(asset: filmstripAsset, contentMode: .fill, placeholderSize: 18)
+                            AssetPreviewImage(asset: filmstripAsset, contentMode: .fit, placeholderSize: 18)
                         }
                         .frame(width: 70, height: 52)
                         .clipped()

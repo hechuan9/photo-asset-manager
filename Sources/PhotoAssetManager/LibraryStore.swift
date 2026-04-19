@@ -959,22 +959,25 @@ final class LibraryStore: ObservableObject {
         Task.detached(priority: .userInitiated) {
             do {
                 let files = try database.deletableFileInstances(assetIDs: assetIDs)
+                let visibleDeletionFiles = files.filter { $0.fileRole != .thumbnail }
+                let visibleDeletionFileOffsets = Dictionary(uniqueKeysWithValues: visibleDeletionFiles.enumerated().map { ($0.element.id, $0.offset) })
                 await MainActor.run {
                     self.blockingTask = BlockingTaskReport(
                         title: "删除照片",
                         phase: "移入废纸篓或文件系统删除",
-                        totalItems: files.count,
-                        message: "删除 \(files.count) 个在线文件"
+                        totalItems: visibleDeletionFiles.count,
+                        message: visibleDeletionFiles.isEmpty ? "后台清理缩略图" : "删除 \(visibleDeletionFiles.count) 个在线文件，缩略图后台清理"
                     )
                 }
                 try await FileOperations().deleteAssetFiles(files: files, database: database) { file, index in
+                    guard file.fileRole != .thumbnail else { return }
                     await MainActor.run {
                         self.blockingTask = BlockingTaskReport(
                             title: "删除照片",
                             phase: "移入废纸篓或文件系统删除",
                             currentPath: file.path,
-                            totalItems: files.count,
-                            completedItems: index,
+                            totalItems: visibleDeletionFiles.count,
+                            completedItems: visibleDeletionFileOffsets[file.id] ?? index,
                             message: file.fileRole.label
                         )
                     }
