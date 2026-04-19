@@ -255,6 +255,25 @@ struct SidebarUXTests {
         #expect(store.contains("func moveFolder(_ source: FolderMoveSource, to target: FolderMoveTarget)"))
     }
 
+    @Test func folderMoveDialogCanCreateTargetFolderInCurrentDirectory() throws {
+        let content = try contentViewSource()
+        let dialogBody = structBody(named: "FolderMoveTargetDialog", in: content)
+        let createDialogBody = structBody(named: "FolderCreateDialog", in: content)
+
+        #expect(dialogBody.contains("@State private var createdTargets: [FolderMoveTarget]"))
+        #expect(dialogBody.contains("@State private var pendingCreateFolderParentPath: String?"))
+        #expect(dialogBody.contains("Button(\"添加文件夹\")"))
+        #expect(dialogBody.contains("pendingCreateFolderParentPath = currentPath"))
+        #expect(dialogBody.contains("FolderCreateDialog("))
+        #expect(dialogBody.contains("try FileManager.default.createDirectory"))
+        #expect(dialogBody.contains("createdTargets.append(created)"))
+        #expect(dialogBody.contains("currentPath = created.path"))
+        #expect(createDialogBody.contains("TextField(\"文件夹名称\""))
+        #expect(createDialogBody.contains("Button(\"创建\")"))
+        #expect(createDialogBody.contains("error.fullTrace"))
+        #expect(createDialogBody.contains("cancel()"))
+    }
+
     private func contentViewSource() throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile

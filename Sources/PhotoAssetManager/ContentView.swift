@@ -553,6 +553,8 @@ struct FolderMoveTargetDialog: View {
     var source: FolderMoveSource
     var close: () -> Void
     @State private var currentPath: String?
+    @State private var createdTargets: [FolderMoveTarget] = []
+    @State private var pendingCreateFolderParentPath: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -580,6 +582,13 @@ struct FolderMoveTargetDialog: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
+
+                Spacer()
+
+                Button("添加文件夹") {
+                    pendingCreateFolderParentPath = currentPath
+                }
+                .disabled(currentPath == nil || library.isBusy)
             }
 
             if let currentTarget {
@@ -632,10 +641,31 @@ struct FolderMoveTargetDialog: View {
         }
         .frame(width: 560, height: 420, alignment: .leading)
         .padding(18)
+        .sheet(isPresented: Binding(
+            get: { pendingCreateFolderParentPath != nil },
+            set: { if !$0 { pendingCreateFolderParentPath = nil } }
+        )) {
+            if let parentPath = pendingCreateFolderParentPath {
+                FolderCreateDialog(
+                    parentPath: parentPath,
+                    create: { name in
+                        try createFolder(parentPath: parentPath, name: name)
+                    },
+                    cancel: {
+                        pendingCreateFolderParentPath = nil
+                    }
+                )
+            }
+        }
     }
 
     private var targets: [FolderMoveTarget] {
-        library.availableFolderMoveTargets(for: source)
+        var targetsByPath: [String: FolderMoveTarget] = [:]
+        for target in library.availableFolderMoveTargets(for: source) + createdTargets {
+            let path = normalizedPath(target.path)
+            targetsByPath[path] = FolderMoveTarget(path: path, displayName: target.displayName)
+        }
+        return targetsByPath.values.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
 
     private var currentTarget: FolderMoveTarget? {
@@ -677,6 +707,96 @@ struct FolderMoveTargetDialog: View {
     private func normalizedPath(_ path: String) -> String {
         guard path.count > 1 else { return path }
         return path.hasSuffix("/") ? String(path.dropLast()) : path
+    }
+
+    private func createFolder(parentPath: String, name: String) throws {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { throw FolderCreateError.emptyName }
+        guard !trimmedName.contains("/") else { throw FolderCreateError.nameContainsSeparator }
+
+        let parentURL = URL(fileURLWithPath: normalizedPath(parentPath), isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: parentURL.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw FolderCreateError.parentUnavailable(parentURL.path)
+        }
+        guard FileManager.default.isWritableFile(atPath: parentURL.path) else {
+            throw FileOperationError.cannotWrite(parentURL)
+        }
+
+        let destinationURL = parentURL.appendingPathComponent(trimmedName, isDirectory: true)
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            throw FileOperationError.destinationExists(destinationURL)
+        }
+
+        try FileManager.default.createDirectory(at: destinationURL, withIntermediateDirectories: false)
+        let created = FolderMoveTarget(path: normalizedPath(destinationURL.path), displayName: trimmedName)
+        createdTargets.removeAll { normalizedPath($0.path) == created.path }
+        createdTargets.append(created)
+        currentPath = created.path
+        pendingCreateFolderParentPath = nil
+    }
+}
+
+struct FolderCreateDialog: View {
+    var parentPath: String
+    var create: (String) throws -> Void
+    var cancel: () -> Void
+    @State private var folderName = ""
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("创建文件夹")
+                .font(.headline)
+            Text(parentPath)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+
+            TextField("文件夹名称", text: $folderName)
+                .textFieldStyle(.roundedBorder)
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) {
+                    cancel()
+                }
+                Button("创建") {
+                    do {
+                        try create(folderName)
+                    } catch {
+                        errorMessage = error.fullTrace
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .frame(width: 420, alignment: .leading)
+        .padding(18)
+    }
+}
+
+private enum FolderCreateError: LocalizedError {
+    case emptyName
+    case nameContainsSeparator
+    case parentUnavailable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyName:
+            "文件夹名称不能为空"
+        case .nameContainsSeparator:
+            "文件夹名称不能包含路径分隔符"
+        case .parentUnavailable(let path):
+            "当前目录不可用：\(path)"
+        }
     }
 }
 
