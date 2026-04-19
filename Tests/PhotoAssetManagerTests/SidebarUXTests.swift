@@ -227,6 +227,7 @@ struct SidebarUXTests {
         #expect(gridBody.contains("case .first:"))
         #expect(gridBody.contains("case .second:"))
         #expect(gridBody.contains("openLoupe(asset)"))
+        #expect(gridBody.contains(".draggable(assetDragPayload(for: asset))\n                        .highPriorityGesture("))
         #expect(!gridBody.contains(".onTapGesture {"))
         #expect(!gridBody.contains(".onTapGesture(count: 2)"))
         #expect(loupeBody.contains("AssetPreviewImage(asset: asset, contentMode: .fit, placeholderSize: 72)"))

@@ -1219,6 +1219,7 @@ struct JustifiedAssetGrid: View {
                             updateAspectRatio(asset.id, ratio)
                         }
                         .frame(width: row.width(for: asset), height: row.height)
+                        .draggable(assetDragPayload(for: asset))
                         .highPriorityGesture(
                             ExclusiveGesture(
                                 TapGesture(count: 2),
@@ -1234,7 +1235,6 @@ struct JustifiedAssetGrid: View {
                                 }
                             }
                         )
-                        .draggable(assetDragPayload(for: asset))
                         .onAppear {
                             loadMore(asset.id)
                         }
