@@ -697,10 +697,11 @@ struct AssetTile: View {
             AssetPreviewImage(asset: asset, contentMode: .fill, placeholderSize: 34)
         }
         .frame(height: 168)
+        .clipped()
         .clipShape(RoundedRectangle(cornerRadius: 0))
         .overlay {
             RoundedRectangle(cornerRadius: 0)
-                .stroke(selected ? Color.accentColor : Color.clear, lineWidth: 3)
+                .stroke(selected ? Color.white.opacity(0.86) : Color.clear, lineWidth: 2)
         }
         .contentShape(Rectangle())
         .accessibilityLabel(asset.originalFilename)
