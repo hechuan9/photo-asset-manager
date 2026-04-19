@@ -12,6 +12,7 @@ enum FileOperationError: LocalizedError {
     case sourceFileMissing(URL)
     case noImportableFiles(URL)
     case noMovableFiles
+    case folderContainsFiles(URL)
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +26,7 @@ enum FileOperationError: LocalizedError {
         case .sourceFileMissing(let url): "源文件不存在：\(url.path)"
         case .noImportableFiles(let url): "没有找到可导入的照片或 sidecar 文件：\(url.path)"
         case .noMovableFiles: "没有可移动的在线照片文件。"
+        case .folderContainsFiles(let url): "文件夹内仍有文件，已阻止彻底删除：\(url.path)"
         }
     }
 }
@@ -244,6 +246,28 @@ struct FileOperations: Sendable {
             let destination = URL(fileURLWithPath: item.destinationPath)
             try moveAssetFileItem(item, source: source, destination: destination, database: database)
         }
+    }
+
+    func trashEmptyFolderTree(at url: URL) throws {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw FileOperationError.sourceFolderMissing(url)
+        }
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: []
+        ) else {
+            throw FileOperationError.sourceFolderMissing(url)
+        }
+        while let item = enumerator.nextObject() as? URL {
+            let values = try item.resourceValues(forKeys: [.isRegularFileKey])
+            if values.isRegularFile == true {
+                throw FileOperationError.folderContainsFiles(item)
+            }
+        }
+        var trashedURL: NSURL?
+        try fileManager.trashItem(at: url, resultingItemURL: &trashedURL)
     }
 
     @MainActor

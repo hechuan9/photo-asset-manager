@@ -324,6 +324,24 @@ struct StartupPerformanceTests {
         #expect(startupBody.contains("guard !sources.isEmpty else"))
     }
 
+    @Test func removingFolderRequiresConfirmationAndUsesTrashForFullDelete() throws {
+        let content = try sourceFile("Sources/PhotoAssetManager/ContentView.swift")
+        let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
+        let operations = try sourceFile("Sources/PhotoAssetManager/FileOperations.swift")
+
+        #expect(content.contains("@State private var pendingFolderRemovalSource: FolderMoveSource?"))
+        #expect(content.contains("FolderRemovalConfirmationDialog("))
+        #expect(content.contains("openRemovalDialog(moveSource)"))
+        #expect(content.contains("Button(\"仅移除\")"))
+        #expect(content.contains("Button(\"彻底删除\", role: .destructive)"))
+        #expect(store.contains("func removeFolder(_ source: FolderMoveSource, deleteEmptyFolder: Bool)"))
+        #expect(operations.contains("func trashEmptyFolderTree(at url: URL) throws"))
+        #expect(functionBody(named: "trashEmptyFolderTree", in: operations).contains("resourceValues(forKeys: [.isRegularFileKey])"))
+        #expect(functionBody(named: "trashEmptyFolderTree", in: operations).contains("throw FileOperationError.folderContainsFiles"))
+        #expect(functionBody(named: "trashEmptyFolderTree", in: operations).contains("fileManager.trashItem"))
+        #expect(!functionBody(named: "trashEmptyFolderTree", in: operations).contains("removeItem"))
+    }
+
     private func sourceFile(_ path: String) throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile

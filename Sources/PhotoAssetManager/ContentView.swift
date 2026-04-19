@@ -339,6 +339,7 @@ struct SidebarView: View {
     @EnvironmentObject private var library: LibraryStore
     @State private var expandedFolderNodeIDs: Set<String> = []
     @State private var pendingMoveSource: FolderMoveSource?
+    @State private var pendingFolderRemovalSource: FolderMoveSource?
     @State private var pendingAssetFileMoveRequest: AssetFileMoveRequest?
 
     var body: some View {
@@ -388,6 +389,9 @@ struct SidebarView: View {
                             },
                             openMoveDialog: { source in
                                 pendingMoveSource = source
+                            },
+                            openRemovalDialog: { source in
+                                pendingFolderRemovalSource = source
                             },
                             openAssetMoveConfirmation: { request in
                                 pendingAssetFileMoveRequest = request
@@ -461,6 +465,14 @@ struct SidebarView: View {
                 source: source,
                 close: {
                     pendingMoveSource = nil
+                }
+            )
+        }
+        .sheet(item: $pendingFolderRemovalSource) { source in
+            FolderRemovalConfirmationDialog(
+                source: source,
+                close: {
+                    pendingFolderRemovalSource = nil
                 }
             )
         }
@@ -547,6 +559,7 @@ struct SourceDirectoryRow: View {
     var displayName: String
     var interruptedScanPath: String?
     var showsMenu = true
+    var openRemovalDialog: ((FolderMoveSource) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -568,8 +581,9 @@ struct SourceDirectoryRow: View {
                         }
                         Divider()
                         Button("移除", role: .destructive) {
-                            library.removeSourceDirectory(source)
+                            openRemovalDialog?(FolderMoveSource(source: source))
                         }
+                        .disabled(openRemovalDialog == nil)
                     } label: {
                         Image(systemName: "ellipsis")
                     }
@@ -604,6 +618,7 @@ struct SourceDirectoryNodeRow: View {
     var toggleExpansion: () -> Void
     var select: () -> Void
     var openMoveDialog: (FolderMoveSource) -> Void
+    var openRemovalDialog: (FolderMoveSource) -> Void
     var openAssetMoveConfirmation: (AssetFileMoveRequest) -> Void
 
     private var moveSource: FolderMoveSource {
@@ -652,7 +667,8 @@ struct SourceDirectoryNodeRow: View {
                     moveSource: moveSource,
                     interruptedScanPath: interruptedScanPath,
                     nodePath: node.path,
-                    openMoveDialog: openMoveDialog
+                    openMoveDialog: openMoveDialog,
+                    openRemovalDialog: openRemovalDialog
                 )
             } label: {
                 Image(systemName: "ellipsis")
@@ -667,7 +683,8 @@ struct SourceDirectoryNodeRow: View {
                 moveSource: moveSource,
                 interruptedScanPath: interruptedScanPath,
                 nodePath: node.path,
-                openMoveDialog: openMoveDialog
+                openMoveDialog: openMoveDialog,
+                openRemovalDialog: openRemovalDialog
             )
         }
         .dropDestination(for: String.self) { items, _ in
@@ -724,6 +741,48 @@ struct AssetFileMoveConfirmationDialog: View {
     }
 }
 
+struct FolderRemovalConfirmationDialog: View {
+    @EnvironmentObject private var library: LibraryStore
+    var source: FolderMoveSource
+    var close: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("移除文件夹？")
+                .font(.headline)
+            Text("仅移除会把这个文件夹从资料库列表中移除，不检查也不改动磁盘文件。彻底删除会先扫描文件夹；只要发现任何文件，就阻止删除。")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(source.path)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) {
+                    close()
+                }
+                Button("仅移除") {
+                    library.removeFolder(source, deleteEmptyFolder: false)
+                    close()
+                }
+                .disabled(library.isBusy || source.sourceDirectoryID == nil)
+                Button("彻底删除", role: .destructive) {
+                    library.removeFolder(source, deleteEmptyFolder: true)
+                    close()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(library.isBusy)
+            }
+        }
+        .frame(width: 460, alignment: .leading)
+        .padding(18)
+    }
+}
+
 private enum AssetDragPayload {
     private static let prefix = "photo-asset-manager.assets"
 
@@ -746,6 +805,7 @@ struct FolderActionMenuItems: View {
     var interruptedScanPath: String?
     var nodePath: String
     var openMoveDialog: (FolderMoveSource) -> Void
+    var openRemovalDialog: (FolderMoveSource) -> Void
 
     var body: some View {
         if let source {
@@ -764,11 +824,9 @@ struct FolderActionMenuItems: View {
             openMoveDialog(moveSource)
         }
 
-        if let source {
-            Divider()
-            Button("移除", role: .destructive) {
-                library.removeSourceDirectory(source)
-            }
+        Divider()
+        Button("移除", role: .destructive) {
+            openRemovalDialog(moveSource)
         }
     }
 

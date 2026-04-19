@@ -162,6 +162,24 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    func removeFolder(_ source: FolderMoveSource, deleteEmptyFolder: Bool) {
+        guard !isBusy else { return }
+        if deleteEmptyFolder {
+            trashFolderAfterEmptyScan(source)
+            return
+        }
+        guard let sourceDirectoryID = source.sourceDirectoryID else {
+            lastError = "只有已添加到资料库的文件夹可以仅移除。"
+            return
+        }
+        do {
+            try database.removeSourceDirectory(id: sourceDirectoryID)
+            finishFolderRemovalRefresh()
+        } catch {
+            lastError = error.fullTrace
+        }
+    }
+
     func moveSourceDirectory(_ source: SourceDirectory, to parent: SourceDirectory?) {
         guard !isBusy else { return }
         guard let parent else { return }
@@ -970,6 +988,56 @@ final class LibraryStore: ObservableObject {
                     self.blockingTask = nil
                     self.lastError = error.fullTrace
                 }
+            }
+        }
+    }
+
+    private func trashFolderAfterEmptyScan(_ source: FolderMoveSource) {
+        blockingTask = BlockingTaskReport(
+            title: "彻底删除文件夹",
+            phase: "扫描文件夹",
+            currentPath: source.path,
+            message: "正在确认文件夹内没有任何文件。"
+        )
+        lastError = nil
+
+        let database = database
+        Task.detached(priority: .userInitiated) { [source, database] in
+            do {
+                try FileOperations().trashEmptyFolderTree(at: URL(fileURLWithPath: source.path, isDirectory: true))
+                if let sourceDirectoryID = source.sourceDirectoryID {
+                    try database.removeSourceDirectory(id: sourceDirectoryID)
+                }
+                let sourceDirectories = try database.sourceDirectories()
+                let indexedBrowseFolders = try database.browseFolders()
+                await MainActor.run {
+                    self.sourceDirectories = sourceDirectories
+                    self.indexedBrowseFolders = indexedBrowseFolders
+                    self.blockingTask = nil
+                    self.clearBrowseSelectionIfNeeded(removedPath: source.path)
+                    self.refresh()
+                }
+            } catch {
+                await MainActor.run {
+                    self.blockingTask = nil
+                    self.lastError = error.fullTrace
+                }
+            }
+        }
+    }
+
+    private func finishFolderRemovalRefresh() {
+        sourceDirectories = (try? database.sourceDirectories()) ?? sourceDirectories
+        indexedBrowseFolders = (try? database.browseFolders()) ?? indexedBrowseFolders
+        refresh()
+    }
+
+    private func clearBrowseSelectionIfNeeded(removedPath: String) {
+        let normalizedPath = Self.normalizedDirectoryPath(removedPath)
+        if let selection = filter.browseSelection {
+            let selectedPath = Self.normalizedDirectoryPath(selection.path)
+            if selectedPath == normalizedPath || selectedPath.hasPrefix(normalizedPath + "/") {
+                clearBrowseSelection()
             }
         }
     }
