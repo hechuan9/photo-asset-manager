@@ -269,6 +269,13 @@ struct FolderMoveTarget: Identifiable, Hashable, Sendable {
     var displayName: String
 }
 
+struct PhotoImportTarget: Identifiable, Hashable, Sendable {
+    var id: String { path }
+    var path: String
+    var displayName: String
+    var storageKind: StorageKind
+}
+
 struct FolderMoveJob: Identifiable, Hashable, Sendable {
     let id: UUID
     var sourceDirectoryID: UUID
@@ -295,6 +302,12 @@ struct FolderMovePlanItem: Hashable, Sendable {
     var sourcePath: String
     var destinationPath: String
     var fileInstanceID: UUID?
+    var contentHash: String
+}
+
+struct PhotoImportPlanItem: Hashable, Sendable {
+    var sourcePath: String
+    var destinationPath: String
     var contentHash: String
 }
 

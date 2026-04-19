@@ -10,6 +10,7 @@ enum FileOperationError: LocalizedError {
     case sourceFolderMissing(URL)
     case destinationInsideSource(URL)
     case sourceFileMissing(URL)
+    case noImportableFiles(URL)
 
     var errorDescription: String? {
         switch self {
@@ -21,6 +22,7 @@ enum FileOperationError: LocalizedError {
         case .sourceFolderMissing(let url): "源文件夹不存在：\(url.path)"
         case .destinationInsideSource(let url): "不能移动到源文件夹内部：\(url.path)"
         case .sourceFileMissing(let url): "源文件不存在：\(url.path)"
+        case .noImportableFiles(let url): "没有找到可导入的照片或 sidecar 文件：\(url.path)"
         }
     }
 }
@@ -115,6 +117,55 @@ struct FileOperations: Sendable {
         return (destination, items.sorted { $0.sourcePath.localizedStandardCompare($1.sourcePath) == .orderedAscending })
     }
 
+    func buildPhotoImportPlan(source: URL, destinationTarget: PhotoImportTarget) throws -> (destination: URL, items: [PhotoImportPlanItem]) {
+        let sourcePath = normalizedDirectoryPath(source.path)
+        let destinationParent = URL(fileURLWithPath: destinationTarget.path, isDirectory: true)
+        let destination = destinationParent.appendingPathComponent(source.lastPathComponent, isDirectory: true)
+        let destinationPath = normalizedDirectoryPath(destination.path)
+
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: sourcePath, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw FileOperationError.sourceFolderMissing(source)
+        }
+        guard directoryWritable(destinationParent) else {
+            throw FileOperationError.cannotWrite(destinationParent)
+        }
+        if destinationPath == sourcePath || destinationPath.hasPrefix(sourcePath + "/") {
+            throw FileOperationError.destinationInsideSource(destination)
+        }
+        if fileManager.fileExists(atPath: destinationPath) {
+            throw FileOperationError.destinationExists(destination)
+        }
+
+        guard let enumerator = fileManager.enumerator(
+            at: source,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            throw FileOperationError.sourceFolderMissing(source)
+        }
+
+        var items: [PhotoImportPlanItem] = []
+        while let url = enumerator.nextObject() as? URL {
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+            guard values.isRegularFile == true else { continue }
+            guard SupportedFiles.isPhoto(url) || SupportedFiles.isSidecar(url) else { continue }
+            let sourceFilePath = normalizedDirectoryPath(url.path)
+            let relativePath = relativeFilePath(sourceFilePath, under: sourcePath)
+            let destinationFile = destination.appendingPathComponent(relativePath, isDirectory: false)
+            items.append(PhotoImportPlanItem(
+                sourcePath: sourceFilePath,
+                destinationPath: destinationFile.path,
+                contentHash: try FileHasher.sha256(url: url)
+            ))
+        }
+
+        guard !items.isEmpty else {
+            throw FileOperationError.noImportableFiles(source)
+        }
+        return (destination, items.sorted { $0.sourcePath.localizedStandardCompare($1.sourcePath) == .orderedAscending })
+    }
+
     func moveFolder(job: FolderMoveJob, database: SQLiteDatabase, progress: (FolderMoveJob, FolderMoveItem) async throws -> Void) async throws {
         let destinationURL = URL(fileURLWithPath: job.destinationPath, isDirectory: true)
         try fileManager.createDirectory(at: destinationURL, withIntermediateDirectories: true)
@@ -127,6 +178,30 @@ struct FileOperations: Sendable {
             try moveFolderItem(item, source: source, destination: destination, database: database)
         }
         try emptySourceDirectoryTree(root: URL(fileURLWithPath: job.sourcePath, isDirectory: true))
+    }
+
+    func copyImportedFolder(destination: URL, items: [PhotoImportPlanItem], progress: (PhotoImportPlanItem, Int) async throws -> Void) async throws {
+        try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+        for (index, item) in items.enumerated() {
+            try await progress(item, index)
+            let source = URL(fileURLWithPath: item.sourcePath)
+            let destination = URL(fileURLWithPath: item.destinationPath)
+            let parent = destination.deletingLastPathComponent()
+            try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+            if fileManager.fileExists(atPath: destination.path) {
+                throw FileOperationError.destinationExists(destination)
+            }
+            let sourceHash = try FileHasher.sha256(url: source)
+            guard sourceHash == item.contentHash else {
+                throw FileOperationError.hashMismatch(source: item.contentHash, destination: sourceHash)
+            }
+            try fileManager.copyItem(at: source, to: destination)
+            let destinationHash = try FileHasher.sha256(url: destination)
+            guard sourceHash == destinationHash else {
+                try? fileManager.removeItem(at: destination)
+                throw FileOperationError.hashMismatch(source: sourceHash, destination: destinationHash)
+            }
+        }
     }
 
     @MainActor

@@ -83,6 +83,16 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    func choosePhotoImportSource() -> URL? {
+        guard !isBusy else { return nil }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "选择要导入的库外照片文件夹"
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
     func addSourceDirectories(_ urls: [URL], scanImmediately: Bool) {
         guard !isBusy else { return }
         guard !urls.isEmpty else { return }
@@ -171,6 +181,131 @@ final class LibraryStore: ObservableObject {
             sources: sourceDirectories,
             indexedBrowseFolders: indexedBrowseFolders
         )
+    }
+
+    func availablePhotoImportTargets() -> [PhotoImportTarget] {
+        var targetsByPath: [String: PhotoImportTarget] = [:]
+        for source in sourceDirectories {
+            let path = Self.normalizedDirectoryPath(source.path)
+            targetsByPath[path] = PhotoImportTarget(
+                path: path,
+                displayName: path,
+                storageKind: source.storageKind
+            )
+        }
+        for folder in indexedBrowseFolders {
+            let path = Self.normalizedDirectoryPath(folder.displayPath)
+            targetsByPath[path] = PhotoImportTarget(
+                path: path,
+                displayName: folder.displayName,
+                storageKind: folder.storageKind
+            )
+        }
+        return targetsByPath.values.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    func importPhotoFolder(_ source: URL, to target: PhotoImportTarget) {
+        guard !isBusy else { return }
+        let sourcePath = Self.normalizedDirectoryPath(source.path)
+        guard !isLibraryPath(sourcePath) else {
+            lastError = "导入来源已经在资料库中：\(sourcePath)"
+            return
+        }
+        availabilityTask?.cancel()
+        availabilityTask = nil
+        backgroundTask = nil
+        blockingTask = BlockingTaskReport(
+            title: "导入照片",
+            phase: "准备导入",
+            currentPath: sourcePath,
+            message: "\(sourcePath) -> \(target.path)"
+        )
+        scanReport = ScanReport()
+        lastError = nil
+
+        let database = database
+        let scanner = scanner
+        let derivativeStorageURL = derivativeStorageURL
+        Task.detached(priority: .userInitiated) {
+            do {
+                let plan = try FileOperations().buildPhotoImportPlan(source: source, destinationTarget: target)
+                await MainActor.run {
+                    self.blockingTask = BlockingTaskReport(
+                        title: "导入照片",
+                        phase: "复制并校验",
+                        currentPath: sourcePath,
+                        totalItems: plan.items.count,
+                        message: "\(sourcePath) -> \(plan.destination.path)"
+                    )
+                }
+
+                try await FileOperations().copyImportedFolder(destination: plan.destination, items: plan.items) { item, index in
+                    await MainActor.run {
+                        self.blockingTask = BlockingTaskReport(
+                            title: "导入照片",
+                            phase: "复制并校验",
+                            currentPath: item.sourcePath,
+                            totalItems: plan.items.count,
+                            completedItems: index,
+                            message: "\(item.sourcePath) -> \(item.destinationPath)"
+                        )
+                    }
+                }
+
+                await MainActor.run {
+                    self.isScanning = true
+                    self.blockingTask = BlockingTaskReport(
+                        title: "导入照片",
+                        phase: "扫描导入结果",
+                        currentPath: plan.destination.path,
+                        totalItems: plan.items.count,
+                        completedItems: plan.items.count,
+                        message: "正在把复制后的文件写入资料库。"
+                    )
+                }
+                let report = await scanner.scanDirectory(
+                    plan.destination,
+                    storageKind: target.storageKind,
+                    derivativeRoot: derivativeStorageURL,
+                    database: database
+                ) { report in
+                    self.scanReport = report
+                    self.blockingTask = BlockingTaskReport(
+                        title: "导入照片",
+                        phase: report.phase.isEmpty ? "扫描导入结果" : report.phase,
+                        currentPath: report.currentPath.isEmpty ? plan.destination.path : report.currentPath,
+                        totalItems: report.totalFiles > 0 ? report.totalFiles : plan.items.count,
+                        completedItems: report.scannedFiles,
+                        skippedItems: report.skippedFiles,
+                        message: "新增 \(report.importedAssets)，位置更新 \(report.newLocations)"
+                    )
+                }
+
+                try database.markSourceDirectoryScanned(path: target.path)
+                let sourceDirectories = try database.sourceDirectories()
+                let indexedBrowseFolders = try database.browseFolders()
+                let interruptedScanPath = try database.latestInterruptedScanPath()
+                await MainActor.run {
+                    self.scanReport = report
+                    self.isScanning = false
+                    self.sourceDirectories = sourceDirectories
+                    self.indexedBrowseFolders = indexedBrowseFolders
+                    self.interruptedScanPath = interruptedScanPath
+                    self.blockingTask = nil
+                    if !report.errors.isEmpty {
+                        self.lastError = report.errors.joined(separator: "\n\n")
+                    }
+                    self.refresh()
+                    self.startAvailabilityRefreshInBackground()
+                }
+            } catch {
+                await MainActor.run {
+                    self.isScanning = false
+                    self.blockingTask = nil
+                    self.lastError = error.fullTrace
+                }
+            }
+        }
     }
 
     func resumeInterruptedFolderMoveIfNeeded() {
@@ -912,6 +1047,14 @@ final class LibraryStore: ObservableObject {
             }
             .max { $0.path.count < $1.path.count }?
             .id
+    }
+
+    private func isLibraryPath(_ path: String) -> Bool {
+        let normalizedPath = Self.normalizedDirectoryPath(path)
+        return sourceDirectories.contains { source in
+            let sourcePath = Self.normalizedDirectoryPath(source.path)
+            return normalizedPath == sourcePath || normalizedPath.hasPrefix(sourcePath + "/")
+        }
     }
 
     private static func applicationSupport() throws -> URL {

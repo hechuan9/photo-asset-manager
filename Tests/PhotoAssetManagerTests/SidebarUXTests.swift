@@ -286,6 +286,34 @@ struct SidebarUXTests {
         #expect(createDialogBody.contains("cancel()"))
     }
 
+    @Test func photoImportCopiesExternalFoldersIntoIndexedTargets() throws {
+        let content = try contentViewSource()
+        let store = try libraryStoreSource()
+        let operations = try sourceFile("Sources/PhotoAssetManager/FileOperations.swift")
+        let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
+        let importBody = functionBody(named: "importPhotoFolder", in: store)
+        let copyBody = functionBody(named: "copyImportedFolder", in: operations)
+
+        #expect(models.contains("struct PhotoImportTarget"))
+        #expect(models.contains("struct PhotoImportPlanItem"))
+        #expect(content.contains("@State private var pendingImportSource: URL?"))
+        #expect(content.contains("Button(\"导入照片\""))
+        #expect(content.contains("PhotoImportTargetDialog("))
+        #expect(content.contains("library.importPhotoFolder(source, to: target)"))
+        #expect(store.contains("func choosePhotoImportSource() -> URL?"))
+        #expect(store.contains("func availablePhotoImportTargets() -> [PhotoImportTarget]"))
+        #expect(importBody.contains("FileOperations().buildPhotoImportPlan"))
+        #expect(importBody.contains("FileOperations().copyImportedFolder"))
+        #expect(importBody.contains("scanner.scanDirectory"))
+        #expect(importBody.contains("database.markSourceDirectoryScanned(path: target.path)"))
+        #expect(operations.contains("func buildPhotoImportPlan"))
+        #expect(operations.contains("func copyImportedFolder"))
+        #expect(copyBody.contains("copyItem(at: source, to: destination)"))
+        #expect(copyBody.contains("FileHasher.sha256(url: destination)"))
+        #expect(!copyBody.contains("removeItem(at: source)"))
+        #expect(!copyBody.contains("emptySourceDirectoryTree"))
+    }
+
     private func contentViewSource() throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile
