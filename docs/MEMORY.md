@@ -57,3 +57,10 @@
 - 根因：后台校验需要遍历大量 `file_instances`，如果查询缺少针对 `file_role,path` 的索引，或每条结果单独 UPDATE，主 actor 写库窗口会被拉长。
 - 预防动作：可用性目标查询必须有 `idx_file_instances_role_path` 支撑；批量写回按 availability 分组，用 `WHERE id IN (...)` 更新，避免每条文件单独 prepare/step。
 - 合并前验证：运行覆盖 `idx_file_instances_role_path`、`Dictionary(grouping: updates, by: \.availability)`、`WHERE id IN` 的测试，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。
+
+## 启动 NAS 挂载
+- 适用范围：应用启动、NAS 来源目录、文件状态校验、索引整理。
+- 问题模式：NAS 还未挂到 `/Volumes/<share>` 时就开始扫描或可用性校验，导致原片被误判为 `Missing Original`。
+- 根因：把 SMB/Finder 挂载状态当成文件缺失证据，且挂载尝试晚于启动整理和文件状态校验。
+- 预防动作：启动时必须先用 blocking task 挂载已登记的 NAS 卷根目录；挂载失败时停止扫描和 availability check，并保留明确的 `NAS 挂载未完成` 状态。
+- 合并前验证：运行覆盖 `mountNASRootsAtStartup`、`startupNASMountSucceeded` gate、`NASMountManager` 和 `smb://` 挂载入口的测试，并执行 `swift test`、`scripts/pre_merge_gate.sh`、`./scripts/package_app.sh`。
