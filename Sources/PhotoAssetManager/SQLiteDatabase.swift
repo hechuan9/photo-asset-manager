@@ -1249,19 +1249,22 @@ final class SQLiteDatabase: @unchecked Sendable {
         )
     }
 
-    func backfillMissingCaptureTimesFromCreatedAt() throws -> Int {
+    func applyScannedCaptureTimeIfEmpty(path: String, captureTime: Date?) throws {
+        guard let captureTime else { return }
         try execute(
             """
             UPDATE assets
-            SET capture_time = created_at,
+            SET capture_time = ?,
                 updated_at = ?
             WHERE capture_time IS NULL
-              AND created_at IS NOT NULL
+              AND id IN (SELECT asset_id FROM file_instances WHERE path = ?)
             """,
-            [.text(DateCoding.encode(Date()))]
+            [
+                .text(DateCoding.encode(captureTime)),
+                .text(DateCoding.encode(Date())),
+                .text(path)
+            ]
         )
-        guard let db else { return 0 }
-        return Int(sqlite3_changes(db))
     }
 
     func thumbnailFileInstances() throws -> [FileInstance] {

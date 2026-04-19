@@ -241,18 +241,21 @@ struct StartupPerformanceTests {
         #expect(functionBody(named: "deduplicateAssetThumbnails", in: database).contains("file_role = 'thumbnail'"))
     }
 
-    @Test func captureTimeBackfillUsesCreatedAtOnlyForMissingValuesFromMacMenuBarToolsMenu() throws {
+    @Test func captureTimeBackfillRunsFullLibraryScanFromMacMenuBarToolsMenu() throws {
         let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
         let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
         let content = try sourceFile("Sources/PhotoAssetManager/ContentView.swift")
         let app = try sourceFile("Sources/PhotoAssetManager/PhotoAssetManagerApp.swift")
+        let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")
 
-        #expect(database.contains("func backfillMissingCaptureTimesFromCreatedAt() throws -> Int"))
-        #expect(functionBody(named: "backfillMissingCaptureTimesFromCreatedAt", in: database).contains("capture_time = created_at"))
-        #expect(functionBody(named: "backfillMissingCaptureTimesFromCreatedAt", in: database).contains("WHERE capture_time IS NULL"))
-        #expect(functionBody(named: "backfillMissingCaptureTimesFromCreatedAt", in: database).contains("sqlite3_changes"))
+        #expect(!database.contains("func backfillMissingCaptureTimesFromCreatedAt()"))
+        #expect(database.contains("func applyScannedCaptureTimeIfEmpty(path: String, captureTime: Date?) throws"))
+        #expect(functionBody(named: "applyScannedCaptureTimeIfEmpty", in: database).contains("WHERE capture_time IS NULL"))
+        #expect(scanner.contains("func bestCaptureTime(metadata: ImageMetadata, url: URL) throws -> Date?"))
+        #expect(functionBody(named: "scanDirectory", in: scanner).contains("database.applyScannedCaptureTimeIfEmpty(path: url.path, captureTime: captureTime)"))
         #expect(store.contains("func fillMissingCaptureTimes()"))
-        #expect(functionBody(named: "fillMissingCaptureTimes", in: store).contains("database.backfillMissingCaptureTimesFromCreatedAt()"))
+        #expect(functionBody(named: "fillMissingCaptureTimes", in: store).contains("sourceDirectories.filter(\\.isTracked)"))
+        #expect(functionBody(named: "fillMissingCaptureTimes", in: store).contains("scanner.scanDirectory"))
         #expect(functionBody(named: "fillMissingCaptureTimes", in: store).contains("blockingTask = BlockingTaskReport"))
         #expect(!content.contains("Menu(\"工具\")"))
         #expect(app.contains("ToolCommands(library: library)"))

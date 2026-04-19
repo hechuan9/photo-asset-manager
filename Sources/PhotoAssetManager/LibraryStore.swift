@@ -535,35 +535,83 @@ final class LibraryStore: ObservableObject {
 
     func fillMissingCaptureTimes() {
         guard !isBusy else { return }
+        let sources = sourceDirectories.filter(\.isTracked)
+        guard !sources.isEmpty else {
+            backgroundTask = BackgroundTaskReport(
+                title: "工具",
+                phase: "没有可扫描的文件夹",
+                message: "请先添加照片文件夹。",
+                isFinished: true
+            )
+            return
+        }
+
+        isScanning = true
+        scanReport = ScanReport()
         blockingTask = BlockingTaskReport(
             title: "工具",
             phase: "补齐拍摄时间",
-            message: "正在用创建时间补齐缺失的拍摄时间。"
+            totalItems: sources.count,
+            message: "正在全库扫描照片元数据，缺失时使用文件创建时间。"
         )
         lastError = nil
 
         let database = database
-        Task.detached(priority: .userInitiated) {
-            do {
-                let updatedCount = try database.backfillMissingCaptureTimesFromCreatedAt()
-                await MainActor.run {
-                    self.refresh()
-                    self.refreshCounts()
-                    self.backgroundTask = BackgroundTaskReport(
+        let scanner = scanner
+        let derivativeStorageURL = derivativeStorageURL
+        Task {
+            var completedSources = 0
+            var errors: [String] = []
+            for source in sources {
+                guard !Task.isCancelled else { break }
+                let completedBeforeSource = completedSources
+                let sourceURL = URL(fileURLWithPath: source.path, isDirectory: true)
+                blockingTask = BlockingTaskReport(
+                    title: "工具",
+                    phase: "补齐拍摄时间",
+                    currentPath: source.path,
+                    totalItems: sources.count,
+                    completedItems: completedBeforeSource,
+                    message: "正在全库扫描照片元数据，缺失时使用文件创建时间。"
+                )
+                let report = await scanner.scanDirectory(
+                    sourceURL,
+                    storageKind: source.storageKind,
+                    derivativeRoot: derivativeStorageURL,
+                    database: database
+                ) { [weak self] report in
+                    self?.scanReport = report
+                    self?.blockingTask = BlockingTaskReport(
                         title: "工具",
-                        phase: "拍摄时间整理完成",
-                        totalItems: updatedCount,
-                        completedItems: updatedCount,
-                        message: "已补齐 \(updatedCount) 个资产",
-                        isFinished: true
+                        phase: report.phase.isEmpty ? "补齐拍摄时间" : report.phase,
+                        currentPath: report.currentPath.isEmpty ? source.path : report.currentPath,
+                        totalItems: report.totalFiles > 0 ? report.totalFiles : sources.count,
+                        completedItems: report.totalFiles > 0 ? report.scannedFiles : completedBeforeSource,
+                        skippedItems: report.skippedExistingFiles,
+                        message: "正在扫描 \(source.path)"
                     )
-                    self.blockingTask = nil
                 }
-            } catch {
-                await MainActor.run {
-                    self.lastError = error.fullTrace
-                    self.blockingTask = nil
-                }
+                errors.append(contentsOf: report.errors)
+                completedSources += 1
+                try? database.markSourceDirectoryScanned(path: source.path)
+            }
+
+            isScanning = false
+            sourceDirectories = (try? database.sourceDirectories()) ?? sourceDirectories
+            indexedBrowseFolders = (try? database.browseFolders()) ?? indexedBrowseFolders
+            refresh()
+            refreshCounts()
+            blockingTask = nil
+            backgroundTask = BackgroundTaskReport(
+                title: "工具",
+                phase: errors.isEmpty ? "拍摄时间整理完成" : "拍摄时间整理完成，部分文件失败",
+                totalItems: sources.count,
+                completedItems: completedSources,
+                message: errors.isEmpty ? "已完成全库扫描" : "有 \(errors.count) 个错误，请查看错误详情。",
+                isFinished: true
+            )
+            if !errors.isEmpty {
+                lastError = errors.joined(separator: "\n\n")
             }
         }
     }

@@ -81,10 +81,13 @@ struct PhotoScanner: @unchecked Sendable {
                         try database.unchangedFileInstanceID(path: url.path, sizeBytes: size)
                     }
                     if let unchangedFileInstanceID {
-                        let rating = ImageMetadata.read(url: url).rating
+                        let metadata = ImageMetadata.read(url: url)
+                        let rating = metadata.rating
+                        let captureTime = try bestCaptureTime(metadata: metadata, url: url)
                         let sidecars = try scanSidecars(for: url, storageKind: storageKind)
                         try await MainActor.run {
                             try database.applyScannedRatingIfEmpty(path: url.path, rating: rating)
+                            try database.applyScannedCaptureTimeIfEmpty(path: url.path, captureTime: captureTime)
                             try database.upsertBrowseFolderMembership(filePath: url.path, fileInstanceID: unchangedFileInstanceID, storageKind: storageKind)
                             try database.upsertSidecarsForFileInstance(sidecars, fileInstanceID: unchangedFileInstanceID)
                         }
@@ -200,7 +203,7 @@ struct PhotoScanner: @unchecked Sendable {
             sizeBytes: size,
             contentHash: hash,
             metadataFingerprint: fingerprint,
-            captureTime: metadata.captureTime,
+            captureTime: try bestCaptureTime(metadata: metadata, url: url),
             cameraMake: metadata.cameraMake,
             cameraModel: metadata.cameraModel,
             lensModel: metadata.lensModel,
@@ -210,6 +213,14 @@ struct PhotoScanner: @unchecked Sendable {
             thumbnailSize: thumbnail.flatMap { (try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) } ?? 0,
             sidecars: try scanSidecars(for: url, storageKind: storageKind)
         )
+    }
+
+    func bestCaptureTime(metadata: ImageMetadata, url: URL) throws -> Date? {
+        if let captureTime = metadata.captureTime {
+            return captureTime
+        }
+        let values = try url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+        return values.creationDate ?? values.contentModificationDate
     }
 
     func scanSidecars(for url: URL, storageKind: StorageKind) throws -> [ScannedSidecar] {
