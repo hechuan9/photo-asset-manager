@@ -696,6 +696,37 @@ struct AssetFileMoveConfirmationDialog: View {
     }
 }
 
+struct AssetDeletionConfirmationDialog: View {
+    @EnvironmentObject private var library: LibraryStore
+    var request: AssetDeletionRequest
+    var close: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("删除选中照片？")
+                .font(.headline)
+            Text("将删除 \(request.assetIDs.count) 个选中资产的所有在线文件，包括原片、sidecar、导出和缓存。确认后会优先移入废纸篓；废纸篓不可用时才使用文件系统删除。")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) {
+                    close()
+                }
+                Button("确认删除", role: .destructive) {
+                    library.deleteAssets(request.assetIDs)
+                    close()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(library.isBusy)
+            }
+        }
+        .frame(width: 460, alignment: .leading)
+        .padding(18)
+    }
+}
+
 struct FolderRemovalConfirmationDialog: View {
     @EnvironmentObject private var library: LibraryStore
     var source: FolderMoveSource
@@ -1151,6 +1182,7 @@ struct JustifiedAssetGrid: View {
     var availableWidth: CGFloat
     var select: (Asset, EventModifiers) -> Void
     var openLoupe: (Asset) -> Void
+    var openAssetDeletionConfirmation: (AssetDeletionRequest) -> Void
     var loadMore: (UUID) -> Void
     var updateAspectRatio: (UUID, CGFloat) -> Void
 
@@ -1183,11 +1215,19 @@ struct JustifiedAssetGrid: View {
                                 doubleClick: {
                                     openLoupe(asset)
                                 },
+                                deletionAction: {
+                                    openAssetDeletionConfirmation(AssetDeletionRequest(assetIDs: deletionAssetIDs(for: asset)))
+                                },
                                 dragPayload: assetDragPayload(for: asset)
                             )
                         }
                         .onAppear {
                             loadMore(asset.id)
+                        }
+                        .contextMenu {
+                            Button("删除照片", role: .destructive) {
+                                openAssetDeletionConfirmation(AssetDeletionRequest(assetIDs: deletionAssetIDs(for: asset)))
+                            }
                         }
                     }
                 }
@@ -1201,17 +1241,24 @@ struct JustifiedAssetGrid: View {
         let draggedIDs = selectedAssetIDs.contains(asset.id) ? Array(selectedAssetIDs) : [asset.id]
         return AssetDragPayload.string(assetIDs: draggedIDs.sorted { $0.uuidString < $1.uuidString })
     }
+
+    private func deletionAssetIDs(for asset: Asset) -> [UUID] {
+        let ids = selectedAssetIDs.contains(asset.id) ? Array(selectedAssetIDs) : [asset.id]
+        return ids.sorted { $0.uuidString < $1.uuidString }
+    }
 }
 
 struct AssetMouseEventCatcher: NSViewRepresentable {
     var singleClick: () -> Void
     var doubleClick: () -> Void
+    var deletionAction: () -> Void
     var dragPayload: String
 
     func makeNSView(context: Context) -> AssetMouseEventView {
         let view = AssetMouseEventView()
         view.singleClick = singleClick
         view.doubleClick = doubleClick
+        view.deletionAction = deletionAction
         view.dragPayload = dragPayload
         return view
     }
@@ -1219,6 +1266,7 @@ struct AssetMouseEventCatcher: NSViewRepresentable {
     func updateNSView(_ nsView: AssetMouseEventView, context: Context) {
         nsView.singleClick = singleClick
         nsView.doubleClick = doubleClick
+        nsView.deletionAction = deletionAction
         nsView.dragPayload = dragPayload
     }
 }
@@ -1226,6 +1274,7 @@ struct AssetMouseEventCatcher: NSViewRepresentable {
 final class AssetMouseEventView: NSView, NSDraggingSource {
     var singleClick: () -> Void = {}
     var doubleClick: () -> Void = {}
+    var deletionAction: () -> Void = {}
     var dragPayload = ""
     private var mouseDownEvent: NSEvent?
     private var didStartDrag = false
@@ -1254,6 +1303,18 @@ final class AssetMouseEventView: NSView, NSDraggingSource {
         let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
         draggingItem.setDraggingFrame(bounds, contents: dragImage())
         beginDraggingSession(with: [draggingItem], event: mouseDownEvent, source: self)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        let menu = NSMenu()
+        let deleteItem = NSMenuItem(title: "删除照片", action: #selector(deleteFromContextMenu), keyEquivalent: "")
+        deleteItem.target = self
+        menu.addItem(deleteItem)
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+
+    @objc private func deleteFromContextMenu() {
+        deletionAction()
     }
 
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
@@ -1294,6 +1355,7 @@ struct AssetBrowserView: View {
     @EnvironmentObject private var library: LibraryStore
     @State private var aspectRatios: [UUID: CGFloat] = [:]
     @State private var loupeAssetID: UUID?
+    @State private var pendingAssetDeletionRequest: AssetDeletionRequest?
 
     var body: some View {
         Group {
@@ -1331,6 +1393,9 @@ struct AssetBrowserView: View {
                                         library.selectAsset(asset, modifiers: [])
                                         loupeAssetID = asset.id
                                     },
+                                    openAssetDeletionConfirmation: { request in
+                                        pendingAssetDeletionRequest = request
+                                    },
                                     loadMore: { assetID in
                                         library.loadMoreAssetsIfNeeded(currentAssetID: assetID)
                                     },
@@ -1344,6 +1409,14 @@ struct AssetBrowserView: View {
                     }
                 }
             }
+        }
+        .sheet(item: $pendingAssetDeletionRequest) { request in
+            AssetDeletionConfirmationDialog(
+                request: request,
+                close: {
+                    pendingAssetDeletionRequest = nil
+                }
+            )
         }
     }
 }

@@ -940,6 +940,63 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    func deleteAssets(_ assetIDs: [UUID]) {
+        guard !isBusy else { return }
+        let assetIDs = Array(Set(assetIDs)).sorted { $0.uuidString < $1.uuidString }
+        guard !assetIDs.isEmpty else { return }
+        availabilityTask?.cancel()
+        availabilityTask = nil
+        backgroundTask = nil
+        blockingTask = BlockingTaskReport(
+            title: "删除照片",
+            phase: "准备删除",
+            totalItems: assetIDs.count,
+            message: "准备删除 \(assetIDs.count) 个资产的在线文件"
+        )
+        lastError = nil
+
+        let database = database
+        Task.detached(priority: .userInitiated) {
+            do {
+                let files = try database.deletableFileInstances(assetIDs: assetIDs)
+                await MainActor.run {
+                    self.blockingTask = BlockingTaskReport(
+                        title: "删除照片",
+                        phase: "移入废纸篓或文件系统删除",
+                        totalItems: files.count,
+                        message: "删除 \(files.count) 个在线文件"
+                    )
+                }
+                try await FileOperations().deleteAssetFiles(files: files, database: database) { file, index in
+                    await MainActor.run {
+                        self.blockingTask = BlockingTaskReport(
+                            title: "删除照片",
+                            phase: "移入废纸篓或文件系统删除",
+                            currentPath: file.path,
+                            totalItems: files.count,
+                            completedItems: index,
+                            message: file.fileRole.label
+                        )
+                    }
+                }
+                let sourceDirectories = try database.sourceDirectories()
+                let indexedBrowseFolders = try database.browseFolders()
+                await MainActor.run {
+                    self.sourceDirectories = sourceDirectories
+                    self.indexedBrowseFolders = indexedBrowseFolders
+                    self.blockingTask = nil
+                    self.refresh()
+                    self.startAvailabilityRefreshInBackground()
+                }
+            } catch {
+                await MainActor.run {
+                    self.blockingTask = nil
+                    self.lastError = error.fullTrace
+                }
+            }
+        }
+    }
+
     private func archive(asset: Asset, nasRoot: URL) {
         do {
             try fileOperations.archive(asset: asset, files: selectedFiles, nasRoot: nasRoot, database: database)

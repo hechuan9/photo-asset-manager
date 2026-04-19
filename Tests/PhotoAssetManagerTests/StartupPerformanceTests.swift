@@ -352,6 +352,15 @@ struct StartupPerformanceTests {
         #expect(!functionBody(named: "trashEmptyFolderTree", in: operations).contains("removeItem"))
     }
 
+    @Test func photoDeletionPrincipleRequiresTwoStepFilesystemDeletionWithoutRm() throws {
+        let readme = try sourceFile("README.md")
+        let feature = try sourceFile("feature.md")
+
+        #expect(readme.contains("删除照片必须先从右键菜单发起，再在确认弹窗中确认"))
+        #expect(feature.contains("照片和文件夹物理删除必须经过两步操作"))
+        #expect(feature.contains("不能调用 rm"))
+    }
+
     private func sourceFile(_ path: String) throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile

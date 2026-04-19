@@ -327,6 +327,14 @@ struct AssetFileMovePlanItem: Hashable, Sendable {
     var contentHash: String
 }
 
+struct AssetDeletionRequest: Identifiable, Hashable, Sendable {
+    var id: String {
+        assetIDs.map(\.uuidString).sorted().joined(separator: "|")
+    }
+
+    var assetIDs: [UUID]
+}
+
 struct IndexedFolderTree: Sendable {
     private let childrenByParentPath: [String: [BrowseNode]]
 

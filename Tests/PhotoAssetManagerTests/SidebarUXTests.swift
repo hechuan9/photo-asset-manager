@@ -441,6 +441,44 @@ struct SidebarUXTests {
         #expect(confirmationBody.contains("request.assetIDs.count"))
     }
 
+    @Test func selectedAssetsCanBeDeletedFromContextMenuAfterConfirmation() throws {
+        let content = try contentViewSource()
+        let store = try libraryStoreSource()
+        let operations = try sourceFile("Sources/PhotoAssetManager/FileOperations.swift")
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+
+        #expect(content.contains("@State private var pendingAssetDeletionRequest: AssetDeletionRequest?"))
+        #expect(content.contains("AssetDeletionConfirmationDialog("))
+        #expect(content.contains("openAssetDeletionConfirmation"))
+        #expect(content.contains("Button(\"删除照片\", role: .destructive)"))
+        #expect(content.contains("override func rightMouseDown"))
+        #expect(content.contains("NSMenuItem(title: \"删除照片\""))
+        #expect(content.contains("library.deleteAssets(request.assetIDs)"))
+
+        let confirmationBody = structBody(named: "AssetDeletionConfirmationDialog", in: content)
+        #expect(confirmationBody.contains("Text(\"删除选中照片？\")"))
+        #expect(confirmationBody.contains("request.assetIDs.count"))
+        #expect(confirmationBody.contains("Button(\"确认删除\", role: .destructive)"))
+        #expect(confirmationBody.contains("优先移入废纸篓"))
+
+        #expect(store.contains("func deleteAssets(_ assetIDs: [UUID])"))
+        #expect(store.contains("FileOperations().deleteAssetFiles"))
+        #expect(store.contains("try database.deletableFileInstances(assetIDs: assetIDs)"))
+
+        #expect(database.contains("func deletableFileInstances(assetIDs: [UUID]) throws -> [FileInstance]"))
+        #expect(database.contains("func removeDeletedFileInstance(_ file: FileInstance, deletionMethod: AssetFileDeletionMethod) throws"))
+        #expect(functionBody(named: "removeDeletedFileInstance", in: database).contains("DELETE FROM file_instances WHERE id = ?"))
+        #expect(functionBody(named: "removeDeletedFileInstance", in: database).contains("DELETE FROM assets"))
+        #expect(functionBody(named: "removeDeletedFileInstance", in: database).contains("operation_logs"))
+
+        #expect(operations.contains("enum AssetFileDeletionMethod"))
+        #expect(operations.contains("func deleteAssetFiles"))
+        #expect(operations.contains("try database.removeDeletedFileInstance"))
+        #expect(functionBody(named: "deleteAssetFile", in: operations).contains("fileManager.trashItem"))
+        #expect(functionBody(named: "deleteAssetFile", in: operations).contains("fileManager.removeItem"))
+        #expect(!functionBody(named: "deleteAssetFile", in: operations).contains("Process("))
+    }
+
     @Test func shiftSelectionUsesCurrentAnchorAndSelectsContiguousRange() throws {
         let store = try libraryStoreSource()
         let selectBody = functionBody(named: "selectAsset", in: store)

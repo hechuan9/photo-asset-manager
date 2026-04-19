@@ -521,6 +521,37 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
+    func deletableFileInstances(assetIDs: [UUID]) throws -> [FileInstance] {
+        let ids = Array(Set(assetIDs)).sorted { $0.uuidString < $1.uuidString }
+        guard !ids.isEmpty else { return [] }
+        let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ", ")
+        let sql = """
+        SELECT id, asset_id, path, device_id, storage_kind, file_role, authority_role,
+               sync_status, size_bytes, content_hash, last_seen_at, availability
+        FROM file_instances
+        WHERE asset_id IN (\(placeholders))
+          AND availability = ?
+        ORDER BY asset_id, authority_role, file_role, path
+        """
+        let values = ids.map { SQLiteValue.text($0.uuidString) } + [.text(Availability.online.rawValue)]
+        return try prepare(sql, values) { statement in
+            FileInstance(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                assetID: UUID(uuidString: statement.text(1)) ?? UUID(),
+                path: statement.text(2),
+                deviceID: statement.text(3),
+                storageKind: StorageKind(rawValue: statement.text(4)) ?? .local,
+                fileRole: FileRole(rawValue: statement.text(5)) ?? .jpegOriginal,
+                authorityRole: AuthorityRole(rawValue: statement.text(6)) ?? .sourceCopy,
+                syncStatus: SyncStatus(rawValue: statement.text(7)) ?? .needsArchive,
+                sizeBytes: statement.int64(8),
+                contentHash: statement.text(9),
+                lastSeenAt: DateCoding.decode(statement.text(10)) ?? Date(),
+                availability: Availability(rawValue: statement.text(11)) ?? .missing
+            )
+        }
+    }
+
     func upsertScannedFile(_ scanned: ScannedFile, batchID: UUID) throws -> Bool {
         let existingAssetID = try assetID(contentHash: scanned.contentHash, metadataFingerprint: scanned.metadataFingerprint)
         let assetID = existingAssetID ?? UUID()
@@ -970,6 +1001,47 @@ final class SQLiteDatabase: @unchecked Sendable {
                     .text(item.sourcePath),
                     .text(item.destinationPath),
                     .text("file_instance_id=\(item.fileInstanceID.uuidString)"),
+                    .text(now)
+                ]
+            )
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    func removeDeletedFileInstance(_ file: FileInstance, deletionMethod: AssetFileDeletionMethod) throws {
+        let now = DateCoding.encode(Date())
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try execute(
+                "DELETE FROM file_instances WHERE id = ?",
+                [.text(file.id.uuidString)]
+            )
+            let remainingFiles = try prepare(
+                "SELECT COUNT(*) FROM file_instances WHERE asset_id = ?",
+                [.text(file.assetID.uuidString)]
+            ) { statement in
+                Int(statement.int(0))
+            }.first ?? 0
+            if remainingFiles == 0 {
+                try execute("DELETE FROM assets WHERE id = ?", [.text(file.assetID.uuidString)])
+            } else {
+                try execute(
+                    "UPDATE assets SET updated_at = ? WHERE id = ?",
+                    [.text(now), .text(file.assetID.uuidString)]
+                )
+            }
+            try execute(
+                """
+                INSERT INTO operation_logs (id, action, source_path, destination_path, status, detail, created_at)
+                VALUES (?, 'delete_asset_file', ?, NULL, 'success', ?, ?)
+                """,
+                [
+                    .text(UUID().uuidString),
+                    .text(file.path),
+                    .text("asset_id=\(file.assetID.uuidString); file_instance_id=\(file.id.uuidString); method=\(deletionMethod.rawValue)"),
                     .text(now)
                 ]
             )

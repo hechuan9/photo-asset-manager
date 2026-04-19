@@ -12,8 +12,10 @@ enum FileOperationError: LocalizedError {
     case sourceFileMissing(URL)
     case noImportableFiles(URL)
     case noMovableFiles
+    case noDeletableFiles
     case folderContainsFiles(URL)
     case unsupportedFolderDeletion(URL)
+    case assetFileDeletionFailed(URL, trashError: String, deleteError: String)
 
     var errorDescription: String? {
         switch self {
@@ -27,10 +29,18 @@ enum FileOperationError: LocalizedError {
         case .sourceFileMissing(let url): "源文件不存在：\(url.path)"
         case .noImportableFiles(let url): "没有找到可导入的照片或 sidecar 文件：\(url.path)"
         case .noMovableFiles: "没有可移动的在线照片文件。"
+        case .noDeletableFiles: "没有可删除的在线照片文件。"
         case .folderContainsFiles(let url): "文件夹内仍有文件，已阻止彻底删除：\(url.path)"
         case .unsupportedFolderDeletion(let url): "这个文件夹类型不支持物理删除：\(url.path)"
+        case .assetFileDeletionFailed(let url, let trashError, let deleteError):
+            "删除文件失败：\(url.path)\n废纸篓失败：\(trashError)\n文件系统删除失败：\(deleteError)"
         }
     }
+}
+
+enum AssetFileDeletionMethod: String, Sendable {
+    case trash
+    case filesystemDelete = "filesystem_delete"
 }
 
 struct FileOperations: Sendable {
@@ -247,6 +257,49 @@ struct FileOperations: Sendable {
             let source = URL(fileURLWithPath: item.sourcePath)
             let destination = URL(fileURLWithPath: item.destinationPath)
             try moveAssetFileItem(item, source: source, destination: destination, database: database)
+        }
+    }
+
+    private func deleteAssetFile(_ file: FileInstance) throws -> AssetFileDeletionMethod {
+        let url = URL(fileURLWithPath: file.path)
+        guard fileManager.fileExists(atPath: url.path) else {
+            throw FileOperationError.sourceFileMissing(url)
+        }
+
+        var trashedURL: NSURL?
+        do {
+            try fileManager.trashItem(at: url, resultingItemURL: &trashedURL)
+            return .trash
+        } catch {
+            let trashTrace = error.fullTrace
+            do {
+                try fileManager.removeItem(at: url)
+                return .filesystemDelete
+            } catch {
+                throw FileOperationError.assetFileDeletionFailed(url, trashError: trashTrace, deleteError: error.fullTrace)
+            }
+        }
+    }
+
+    func deleteAssetFiles(files: [FileInstance], database: SQLiteDatabase, progress: (FileInstance, Int) async throws -> Void) async throws {
+        guard !files.isEmpty else {
+            throw FileOperationError.noDeletableFiles
+        }
+        for (index, file) in files.enumerated() {
+            try await progress(file, index)
+            do {
+                let method = try deleteAssetFile(file)
+                try database.removeDeletedFileInstance(file, deletionMethod: method)
+            } catch {
+                try? database.writeOperation(
+                    action: "delete_asset_file",
+                    source: file.path,
+                    destination: nil,
+                    status: "failed",
+                    detail: error.fullTrace
+                )
+                throw error
+            }
         }
     }
 
