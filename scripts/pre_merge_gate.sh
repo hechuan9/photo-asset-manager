@@ -9,8 +9,15 @@ swift build
 FILES_LIST="$(mktemp)"
 trap 'rm -f "$FILES_LIST"' EXIT
 git ls-files -z --cached --others --exclude-standard \
-  | perl -0ne 'print unless $_ eq ".gitignore\0" || $_ eq "scripts/pre_merge_gate.sh\0"' \
-  > "$FILES_LIST"
+  | while IFS= read -r -d '' file; do
+      case "$file" in
+        .gitignore|scripts/pre_merge_gate.sh)
+          continue
+          ;;
+      esac
+      [[ -f "$file" ]] || continue
+      printf '%s\0' "$file"
+    done > "$FILES_LIST"
 
 if [[ -s "$FILES_LIST" ]]; then
   if xargs -0 rg -n -i \
