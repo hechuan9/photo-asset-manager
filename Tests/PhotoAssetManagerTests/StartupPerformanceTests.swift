@@ -39,7 +39,11 @@ struct StartupPerformanceTests {
         #expect(!functionBody(named: "refresh", in: store).contains("countsByStatus"))
         #expect(store.contains("func refreshCounts()"))
         #expect(store.contains("func loadMoreAssets()"))
-        #expect(content.contains("Button(\"加载更多\")"))
+        #expect(store.contains("private let assetPageSize = 96"))
+        #expect(store.contains("func loadMoreAssetsIfNeeded(currentAssetID: UUID)"))
+        #expect(content.contains(".onAppear"))
+        #expect(content.contains("library.loadMoreAssetsIfNeeded(currentAssetID: asset.id)"))
+        #expect(!content.contains("Button(\"加载更多\")"))
     }
 
     @Test func browseGraphPersistsFolderMembershipAndFiltersAssetQueries() throws {
@@ -130,6 +134,23 @@ struct StartupPerformanceTests {
         #expect(content.contains("asset.primaryPath"))
     }
 
+    @Test func assetPreviewLoadsImagesAsynchronouslyWithCache() throws {
+        let content = try sourceFile("Sources/PhotoAssetManager/ContentView.swift")
+        let previewBody = structBody(named: "AssetPreviewImage", in: content)
+        let loaderBody = classBody(named: "ImagePreviewLoader", in: content)
+
+        #expect(content.contains("final class ImagePreviewCache"))
+        #expect(content.contains("NSCache<NSString, NSImage>"))
+        #expect(content.contains("final class ImagePreviewLoader: ObservableObject"))
+        #expect(loaderBody.contains("Task.detached"))
+        #expect(loaderBody.contains("ImagePreviewCache.shared"))
+        #expect(previewBody.contains("@StateObject private var loader = ImagePreviewLoader()"))
+        #expect(previewBody.contains(".task(id: cacheKey)"))
+        #expect(previewBody.contains("await loader.load"))
+        #expect(!previewBody.contains("NSImage(contentsOfFile:"))
+        #expect(!previewBody.contains("ImageRenderer.renderableImage"))
+    }
+
     @Test func availabilityRefreshUsesIndexedQueryAndGroupedWrites() throws {
         let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
 
@@ -178,6 +199,35 @@ struct StartupPerformanceTests {
 
     private func functionBody(named name: String, in source: String) -> String {
         guard let range = source.range(of: "func \(name)") else { return "" }
+        let suffix = source[range.lowerBound...]
+        guard let openBrace = suffix.firstIndex(of: "{") else { return "" }
+
+        var depth = 0
+        var body = ""
+        for character in suffix[openBrace...] {
+            if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+            }
+            body.append(character)
+            if depth == 0 {
+                return body
+            }
+        }
+        return body
+    }
+
+    private func structBody(named name: String, in source: String) -> String {
+        body(after: "struct \(name)", in: source)
+    }
+
+    private func classBody(named name: String, in source: String) -> String {
+        body(after: "class \(name)", in: source)
+    }
+
+    private func body(after marker: String, in source: String) -> String {
+        guard let range = source.range(of: marker) else { return "" }
         let suffix = source[range.lowerBound...]
         guard let openBrace = suffix.firstIndex(of: "{") else { return "" }
 

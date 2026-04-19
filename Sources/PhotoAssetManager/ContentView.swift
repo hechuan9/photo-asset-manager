@@ -545,15 +545,12 @@ struct AssetBrowserView: View {
                                     library.selectedAssetID = asset.id
                                     library.loadSelectedFiles()
                                 }
+                                .onAppear {
+                                    library.loadMoreAssetsIfNeeded(currentAssetID: asset.id)
+                                }
                         }
                     }
                     .padding(16)
-                    if library.hasMoreAssets {
-                        Button("加载更多") {
-                            library.loadMoreAssets()
-                        }
-                        .padding(.bottom, 16)
-                    }
                 }
             }
         }
@@ -654,28 +651,79 @@ struct AssetPreviewImage: View {
     var asset: Asset
     var contentMode: ContentMode
     var placeholderSize: CGFloat
+    @StateObject private var loader = ImagePreviewLoader()
 
     var body: some View {
-        if let image = previewImage {
-            Image(nsImage: image)
-                .resizable()
-                .aspectRatio(contentMode: contentMode)
-        } else {
-            Image(systemName: "photo")
-                .font(.system(size: placeholderSize))
-                .foregroundStyle(.secondary)
+        Group {
+            if let image = loader.image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: contentMode)
+            } else {
+                Image(systemName: "photo")
+                    .font(.system(size: placeholderSize))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .task(id: cacheKey) {
+            await loader.load(thumbnailPath: asset.thumbnailPath, primaryPath: asset.primaryPath, cacheKey: cacheKey)
         }
     }
 
-    private var previewImage: NSImage? {
-        if let thumbnailPath = asset.thumbnailPath,
-           let image = NSImage(contentsOfFile: thumbnailPath) {
-            return image
+    private var cacheKey: String {
+        asset.thumbnailPath ?? asset.primaryPath ?? asset.id.uuidString
+    }
+}
+
+@MainActor
+final class ImagePreviewCache {
+    static let shared = ImagePreviewCache()
+
+    private let cache = NSCache<NSString, NSImage>()
+
+    private init() {
+        cache.countLimit = 600
+    }
+
+    func image(forKey key: String) -> NSImage? {
+        cache.object(forKey: key as NSString)
+    }
+
+    func insert(_ image: NSImage, forKey key: String) {
+        cache.setObject(image, forKey: key as NSString)
+    }
+}
+
+@MainActor
+final class ImagePreviewLoader: ObservableObject {
+    @Published var image: NSImage?
+    private var loadedCacheKey: String?
+
+    func load(thumbnailPath: String?, primaryPath: String?, cacheKey: String) async {
+        guard loadedCacheKey != cacheKey else { return }
+        loadedCacheKey = cacheKey
+
+        if let cached = ImagePreviewCache.shared.image(forKey: cacheKey) {
+            image = cached
+            return
         }
-        if let primaryPath = asset.primaryPath {
-            return ImageRenderer.renderableImage(url: URL(fileURLWithPath: primaryPath))
+
+        image = nil
+        let loaded = await Task.detached(priority: .userInitiated) { () -> NSImage? in
+            if let thumbnailPath, let image = NSImage(contentsOfFile: thumbnailPath) {
+                return image
+            }
+            if let primaryPath {
+                return ImageRenderer.renderableImage(url: URL(fileURLWithPath: primaryPath))
+            }
+            return nil
+        }.value
+
+        guard loadedCacheKey == cacheKey else { return }
+        if let loaded {
+            ImagePreviewCache.shared.insert(loaded, forKey: cacheKey)
         }
-        return nil
+        image = loaded
     }
 }
 

@@ -28,7 +28,8 @@ final class LibraryStore: ObservableObject {
     private var availabilityTask: Task<Void, Never>?
     private var startupOrganizationTask: Task<Void, Never>?
     private var startupNASMountSucceeded = false
-    private let assetPageSize = 600
+    private let assetPageSize = 96
+    private let assetLoadAheadThreshold = 24
 
     init() {
         do {
@@ -216,6 +217,13 @@ final class LibraryStore: ObservableObject {
         } catch {
             lastError = error.fullTrace
         }
+    }
+
+    func loadMoreAssetsIfNeeded(currentAssetID: UUID) {
+        guard hasMoreAssets else { return }
+        guard let currentIndex = assets.firstIndex(where: { $0.id == currentAssetID }) else { return }
+        guard assets.distance(from: currentIndex, to: assets.endIndex) <= assetLoadAheadThreshold else { return }
+        loadMoreAssets()
     }
 
     func startAvailabilityRefreshInBackground() {

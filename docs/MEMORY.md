@@ -58,6 +58,13 @@
 - 预防动作：可用性目标查询必须有 `idx_file_instances_role_path` 支撑；批量写回按 availability 分组，用 `WHERE id IN (...)` 更新，避免每条文件单独 prepare/step。
 - 合并前验证：运行覆盖 `idx_file_instances_role_path`、`Dictionary(grouping: updates, by: \.availability)`、`WHERE id IN` 的测试，并执行 `swift test` 与 `scripts/pre_merge_gate.sh`。
 
+## 文件夹浏览性能
+- 适用范围：文件夹切换、资产网格分页、缩略图/预览渲染。
+- 问题模式：打开大目录或子文件夹时，首屏一次加载过多资产，或 SwiftUI `body` 同步读取 NAS 缩略图/原片，导致 UI 卡顿。
+- 根因：查询分页粒度过大，滚动续页依赖手动操作；预览加载和图片解码落在主线程 render 路径上。
+- 预防动作：文件夹切换只加载小页资产，滚动接近末尾自动续页；缩略图和原片 fallback 必须异步加载并通过内存缓存复用，`AssetPreviewImage.body` 不得直接调用 `NSImage(contentsOfFile:)` 或 `ImageRenderer.renderableImage`。
+- 合并前验证：运行覆盖 `assetPageSize = 96`、`loadMoreAssetsIfNeeded`、自动 `.onAppear` 续页、`ImagePreviewCache`、`Task.detached`、以及预览 body 禁止同步图片读取的测试，并执行 `swift test`、`scripts/pre_merge_gate.sh`、`./scripts/package_app.sh`。
+
 ## 启动 NAS 挂载
 - 适用范围：应用启动、NAS 来源目录、文件状态校验、索引整理。
 - 问题模式：NAS 还未挂到 `/Volumes/<share>` 时就开始扫描或可用性校验，导致原片被误判为 `Missing Original`。
