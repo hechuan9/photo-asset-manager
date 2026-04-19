@@ -1219,22 +1219,18 @@ struct JustifiedAssetGrid: View {
                             updateAspectRatio(asset.id, ratio)
                         }
                         .frame(width: row.width(for: asset), height: row.height)
-                        .draggable(assetDragPayload(for: asset))
-                        .highPriorityGesture(
-                            ExclusiveGesture(
-                                TapGesture(count: 2),
-                                TapGesture(count: 1)
-                            )
-                            .onEnded { value in
-                                switch value {
-                                case .first:
-                                    openLoupe(asset)
-                                case .second:
+                        .overlay {
+                            AssetMouseEventCatcher(
+                                singleClick: {
                                     let modifiers = ModifierAwareClickView.currentModifiers()
                                     select(asset, modifiers)
-                                }
-                            }
-                        )
+                                },
+                                doubleClick: {
+                                    openLoupe(asset)
+                                },
+                                dragPayload: assetDragPayload(for: asset)
+                            )
+                        }
                         .onAppear {
                             loadMore(asset.id)
                         }
@@ -1249,6 +1245,78 @@ struct JustifiedAssetGrid: View {
     private func assetDragPayload(for asset: Asset) -> String {
         let draggedIDs = selectedAssetIDs.contains(asset.id) ? Array(selectedAssetIDs) : [asset.id]
         return AssetDragPayload.string(assetIDs: draggedIDs.sorted { $0.uuidString < $1.uuidString })
+    }
+}
+
+struct AssetMouseEventCatcher: NSViewRepresentable {
+    var singleClick: () -> Void
+    var doubleClick: () -> Void
+    var dragPayload: String
+
+    func makeNSView(context: Context) -> AssetMouseEventView {
+        let view = AssetMouseEventView()
+        view.singleClick = singleClick
+        view.doubleClick = doubleClick
+        view.dragPayload = dragPayload
+        return view
+    }
+
+    func updateNSView(_ nsView: AssetMouseEventView, context: Context) {
+        nsView.singleClick = singleClick
+        nsView.doubleClick = doubleClick
+        nsView.dragPayload = dragPayload
+    }
+}
+
+final class AssetMouseEventView: NSView, NSDraggingSource {
+    var singleClick: () -> Void = {}
+    var doubleClick: () -> Void = {}
+    var dragPayload = ""
+    private var mouseDownEvent: NSEvent?
+    private var didStartDrag = false
+
+    override func mouseDown(with event: NSEvent) {
+        mouseDownEvent = event
+        didStartDrag = false
+        if event.clickCount >= 2 {
+            doubleClick()
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if event.clickCount == 1, !didStartDrag {
+            singleClick()
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !didStartDrag, let mouseDownEvent else { return }
+        didStartDrag = true
+
+        let pasteboardItem = NSPasteboardItem()
+        pasteboardItem.setString(dragPayload, forType: .string)
+
+        let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
+        draggingItem.setDraggingFrame(bounds, contents: dragImage())
+        beginDraggingSession(with: [draggingItem], event: mouseDownEvent, source: self)
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        .move
+    }
+
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
+        true
+    }
+
+    private func dragImage() -> NSImage {
+        let imageSize = NSSize(width: max(bounds.width, 1), height: max(bounds.height, 1))
+        let image = NSImage(size: imageSize)
+        image.lockFocus()
+        NSColor.black.withAlphaComponent(0.3).setFill()
+        NSBezierPath(rect: NSRect(origin: .zero, size: image.size)).fill()
+        image.unlockFocus()
+        return image
     }
 }
 
