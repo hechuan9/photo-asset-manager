@@ -304,7 +304,7 @@ struct SidebarView: View {
         .sheet(item: $sourcePendingMove) { source in
             MoveSourceDirectorySheet(
                 source: source,
-                targets: library.topLevelMoveTargets(excluding: source),
+                targets: library.availableFolderMoveTargets(for: source),
                 move: { target in
                     library.moveSourceDirectory(source, to: target)
                     sourcePendingMove = nil
@@ -488,10 +488,8 @@ struct SourceDirectoryNodeRow: View {
                     Button("刷新") {
                         library.scanSource(source)
                     }
-                    if node.depth > 0 {
-                        Button("移动到...") {
-                            move()
-                        }
+                    Button("移动到...") {
+                        move()
                     }
                     Button("移除", role: .destructive) {
                         library.removeSourceDirectory(source)
@@ -509,10 +507,8 @@ struct SourceDirectoryNodeRow: View {
                 Button("刷新") {
                     library.scanSource(source)
                 }
-                if node.depth > 0 {
-                    Button("移动到...") {
-                        move()
-                    }
+                Button("移动到...") {
+                    move()
                 }
                 Button("移除", role: .destructive) {
                     library.removeSourceDirectory(source)
@@ -564,8 +560,8 @@ struct FolderRowButtonStyle: ButtonStyle {
 
 struct MoveSourceDirectorySheet: View {
     var source: SourceDirectory
-    var targets: [SourceDirectory]
-    var move: (SourceDirectory?) -> Void
+    var targets: [FolderMoveTarget]
+    var move: (FolderMoveTarget) -> Void
     var cancel: () -> Void
 
     var body: some View {
@@ -577,15 +573,20 @@ struct MoveSourceDirectorySheet: View {
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
             Divider()
-            Button("移到顶层") {
-                move(nil)
-            }
-            ForEach(targets) { target in
-                Button(target.path) {
-                    move(target)
+            Text("目标文件夹")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            if targets.isEmpty {
+                Text("没有可用目标。目标必须是已存在文件夹，且不能在源文件夹内部。")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(targets) { target in
+                    Button(target.path) {
+                        move(target)
+                    }
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 }
-                .lineLimit(1)
-                .truncationMode(.middle)
             }
             HStack {
                 Spacer()

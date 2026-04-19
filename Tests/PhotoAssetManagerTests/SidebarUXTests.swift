@@ -57,7 +57,8 @@ struct SidebarUXTests {
         #expect(store.contains("func moveSourceDirectory"))
         #expect(database.contains("parent_source_directory_id"))
         #expect(database.contains("func moveSourceDirectory"))
-        #expect(!database.contains("UPDATE file_instances SET path"))
+        #expect(database.contains("UPDATE file_instances SET path = replace(path, ?, ?)"))
+        #expect(store.contains("startFolderMove"))
     }
 
     @Test func folderTreeUsesLightroomStyleClickableDisclosureRows() throws {
@@ -202,6 +203,29 @@ struct SidebarUXTests {
         #expect(!tileBody.contains("Text(asset.originalFilename)"))
         #expect(!tileBody.contains("asset.status.label"))
         #expect(!tileBody.contains("asset.rating"))
+    }
+
+    @Test func folderMoveUsesRecoverableBlockingFileMoveJobs() throws {
+        let content = try contentViewSource()
+        let store = try libraryStoreSource()
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+        let operations = try sourceFile("Sources/PhotoAssetManager/FileOperations.swift")
+
+        #expect(database.contains("CREATE TABLE IF NOT EXISTS folder_move_jobs"))
+        #expect(database.contains("CREATE TABLE IF NOT EXISTS folder_move_items"))
+        #expect(database.contains("func createFolderMoveJob"))
+        #expect(database.contains("func unfinishedFolderMoveJob"))
+        #expect(database.contains("func completeFolderMoveItem"))
+        #expect(database.contains("func rewriteFolderMovePaths"))
+        #expect(database.contains("func markInterruptedFolderMoveJobs"))
+        #expect(operations.contains("func moveFolder"))
+        #expect(operations.contains("copyItem(at: source, to: destination)"))
+        #expect(operations.contains("FileHasher.sha256(url: destination)"))
+        #expect(operations.contains("removeItem(at: source)"))
+        #expect(store.contains("resumeInterruptedFolderMoveIfNeeded()"))
+        #expect(store.contains("title: \"移动文件夹\""))
+        #expect(content.contains("Button(\"移动到...\")"))
+        #expect(content.contains("Text(\"目标文件夹\")"))
     }
 
     private func contentViewSource() throws -> String {

@@ -244,6 +244,41 @@ struct SourceDirectoryNode: Identifiable, Hashable, Sendable {
     var hasChildren: Bool
 }
 
+struct FolderMoveTarget: Identifiable, Hashable, Sendable {
+    var id: String { path }
+    var path: String
+    var displayName: String
+}
+
+struct FolderMoveJob: Identifiable, Hashable, Sendable {
+    let id: UUID
+    var sourceDirectoryID: UUID
+    var sourcePath: String
+    var destinationParentPath: String
+    var destinationPath: String
+    var storageKind: StorageKind
+    var status: String
+    var totalFiles: Int
+    var completedFiles: Int
+}
+
+struct FolderMoveItem: Identifiable, Hashable, Sendable {
+    let id: UUID
+    var jobID: UUID
+    var fileInstanceID: UUID?
+    var sourcePath: String
+    var destinationPath: String
+    var contentHash: String
+    var status: String
+}
+
+struct FolderMovePlanItem: Hashable, Sendable {
+    var sourcePath: String
+    var destinationPath: String
+    var fileInstanceID: UUID?
+    var contentHash: String
+}
+
 struct IndexedFolderTree: Sendable {
     private let childrenByParentPath: [String: [BrowseNode]]
 
@@ -307,6 +342,36 @@ enum SourceDirectoryTreeBuilder {
     static func topLevelSources(in sources: [SourceDirectory]) -> [SourceDirectory] {
         let children = childMap(for: sources)
         return rootSources(in: sources, children: children)
+    }
+
+    static func moveTargets(
+        for source: SourceDirectory,
+        sources: [SourceDirectory],
+        indexedBrowseFolders: [BrowseNode]
+    ) -> [FolderMoveTarget] {
+        let sourcePath = normalizedDirectoryPath(source.path)
+        let blockedPrefix = sourcePath == "/" ? "/" : sourcePath + "/"
+        var targetsByPath: [String: FolderMoveTarget] = [:]
+
+        func insert(path rawPath: String) {
+            let path = normalizedDirectoryPath(rawPath)
+            guard path != sourcePath, !path.hasPrefix(blockedPrefix) else { return }
+            targetsByPath[path] = FolderMoveTarget(
+                path: path,
+                displayName: path
+            )
+        }
+
+        for candidate in sources where candidate.id != source.id {
+            insert(path: candidate.path)
+        }
+        for folder in indexedBrowseFolders {
+            insert(path: folder.displayPath)
+        }
+
+        return targetsByPath.values.sorted {
+            $0.path.localizedStandardCompare($1.path) == .orderedAscending
+        }
     }
 
     private static func flatten(

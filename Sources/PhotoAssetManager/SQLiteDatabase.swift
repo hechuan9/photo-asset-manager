@@ -656,6 +656,260 @@ final class SQLiteDatabase: @unchecked Sendable {
         )
     }
 
+    func fileInstancesForFolderMove(sourcePath: String) throws -> [String: (UUID, String)] {
+        let normalizedPath = Self.normalizedDirectoryPath(sourcePath)
+        let rows = try prepare(
+            """
+            SELECT id, path, content_hash
+            FROM file_instances
+            WHERE path = ? OR path LIKE ? || '/%'
+            """,
+            [.text(normalizedPath), .text(normalizedPath)]
+        ) { statement in
+            (
+                path: statement.text(1),
+                id: UUID(uuidString: statement.text(0)),
+                hash: statement.text(2)
+            )
+        }
+        return rows.reduce(into: [:]) { result, row in
+            guard let id = row.id else { return }
+            result[row.path] = (id, row.hash)
+        }
+    }
+
+    func createFolderMoveJob(
+        source: SourceDirectory,
+        destinationParentPath: String,
+        destinationPath: String,
+        items: [FolderMovePlanItem]
+    ) throws -> FolderMoveJob {
+        let jobID = UUID()
+        let now = DateCoding.encode(Date())
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try execute(
+                """
+                INSERT INTO folder_move_jobs (
+                    id, source_directory_id, source_path, destination_parent_path, destination_path,
+                    storage_kind, status, total_files, completed_files, created_at, updated_at, error_detail
+                ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, 0, ?, ?, '')
+                """,
+                [
+                    .text(jobID.uuidString),
+                    .text(source.id.uuidString),
+                    .text(source.path),
+                    .text(destinationParentPath),
+                    .text(destinationPath),
+                    .text(source.storageKind.rawValue),
+                    .int(Int64(items.count)),
+                    .text(now),
+                    .text(now)
+                ]
+            )
+            for item in items {
+                try execute(
+                    """
+                    INSERT INTO folder_move_items (
+                        id, job_id, file_instance_id, source_path, destination_path,
+                        content_hash, status, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+                    """,
+                    [
+                        .text(UUID().uuidString),
+                        .text(jobID.uuidString),
+                        .nullableText(item.fileInstanceID?.uuidString),
+                        .text(item.sourcePath),
+                        .text(item.destinationPath),
+                        .text(item.contentHash),
+                        .text(now)
+                    ]
+                )
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+        return try folderMoveJob(id: jobID)
+    }
+
+    func unfinishedFolderMoveJob() throws -> FolderMoveJob? {
+        try prepare(
+            """
+            SELECT id, source_directory_id, source_path, destination_parent_path, destination_path,
+                   storage_kind, status, total_files, completed_files
+            FROM folder_move_jobs
+            WHERE status IN ('running', 'interrupted')
+            ORDER BY created_at ASC
+            LIMIT 1
+            """,
+            []
+        ) { statement in
+            FolderMoveJob(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                sourceDirectoryID: UUID(uuidString: statement.text(1)) ?? UUID(),
+                sourcePath: statement.text(2),
+                destinationParentPath: statement.text(3),
+                destinationPath: statement.text(4),
+                storageKind: StorageKind(rawValue: statement.text(5)) ?? .local,
+                status: statement.text(6),
+                totalFiles: Int(statement.int(7)),
+                completedFiles: Int(statement.int(8))
+            )
+        }.first
+    }
+
+    func pendingFolderMoveItems(jobID: UUID) throws -> [FolderMoveItem] {
+        try prepare(
+            """
+            SELECT id, job_id, file_instance_id, source_path, destination_path, content_hash, status
+            FROM folder_move_items
+            WHERE job_id = ? AND status <> 'completed'
+            ORDER BY source_path
+            """,
+            [.text(jobID.uuidString)]
+        ) { statement in
+            FolderMoveItem(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                jobID: UUID(uuidString: statement.text(1)) ?? jobID,
+                fileInstanceID: statement.optionalText(2).flatMap(UUID.init(uuidString:)),
+                sourcePath: statement.text(3),
+                destinationPath: statement.text(4),
+                contentHash: statement.text(5),
+                status: statement.text(6)
+            )
+        }
+    }
+
+    func markFolderMoveJobRunning(id: UUID) throws {
+        try execute(
+            "UPDATE folder_move_jobs SET status = 'running', updated_at = ? WHERE id = ?",
+            [.text(DateCoding.encode(Date())), .text(id.uuidString)]
+        )
+    }
+
+    func markInterruptedFolderMoveJobs() throws {
+        try execute("UPDATE folder_move_jobs SET status = 'interrupted', updated_at = ? WHERE status = 'running'", [.text(DateCoding.encode(Date()))])
+    }
+
+    func completeFolderMoveItem(_ item: FolderMoveItem, hash: String, sizeBytes: Int64) throws {
+        let now = DateCoding.encode(Date())
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            if let fileInstanceID = item.fileInstanceID {
+                try execute(
+                    """
+                    UPDATE file_instances
+                    SET path = ?, content_hash = ?, size_bytes = ?, last_seen_at = ?, availability = ?
+                    WHERE id = ?
+                    """,
+                    [
+                        .text(item.destinationPath),
+                        .text(hash),
+                        .int(sizeBytes),
+                        .text(now),
+                        .text(Availability.online.rawValue),
+                        .text(fileInstanceID.uuidString)
+                    ]
+                )
+                try upsertBrowseFolderMembership(filePath: item.destinationPath, fileInstanceID: fileInstanceID, storageKind: storageKindForPath(item.destinationPath))
+            }
+            try execute(
+                "UPDATE folder_move_items SET status = 'completed', updated_at = ? WHERE id = ?",
+                [.text(now), .text(item.id.uuidString)]
+            )
+            try execute(
+                "UPDATE folder_move_jobs SET completed_files = completed_files + 1, updated_at = ? WHERE id = ?",
+                [.text(now), .text(item.jobID.uuidString)]
+            )
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    func rewriteFolderMovePaths(job: FolderMoveJob, parentID: UUID?) throws {
+        let now = DateCoding.encode(Date())
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try execute(
+                """
+                UPDATE source_directories
+                SET path = replace(path, ?, ?),
+                    parent_source_directory_id = CASE WHEN id = ? THEN ? ELSE parent_source_directory_id END,
+                    last_scanned_at = NULL
+                WHERE path = ? OR path LIKE ? || '/%'
+                """,
+                [
+                    .text(job.sourcePath),
+                    .text(job.destinationPath),
+                    .text(job.sourceDirectoryID.uuidString),
+                    .nullableText(parentID?.uuidString),
+                    .text(job.sourcePath),
+                    .text(job.sourcePath)
+                ]
+            )
+            try execute(
+                """
+                UPDATE file_instances SET path = replace(path, ?, ?)
+                WHERE (path = ? OR path LIKE ? || '/%')
+                  AND path NOT IN (SELECT destination_path FROM folder_move_items WHERE job_id = ? AND status = 'completed')
+                """,
+                [
+                    .text(job.sourcePath),
+                    .text(job.destinationPath),
+                    .text(job.sourcePath),
+                    .text(job.sourcePath),
+                    .text(job.id.uuidString)
+                ]
+            )
+            try execute(
+                "UPDATE folder_move_jobs SET status = 'completed', completed_files = total_files, updated_at = ? WHERE id = ?",
+                [.text(now), .text(job.id.uuidString)]
+            )
+            try execute(
+                """
+                UPDATE assets
+                SET updated_at = ?
+                WHERE id IN (
+                    SELECT fi.asset_id
+                    FROM file_instances fi
+                    JOIN folder_move_items fmi ON fmi.file_instance_id = fi.id
+                    WHERE fmi.job_id = ?
+                )
+                """,
+                [.text(now), .text(job.id.uuidString)]
+            )
+            try execute(
+                """
+                INSERT INTO operation_logs (id, action, source_path, destination_path, status, detail, created_at)
+                VALUES (?, 'move_folder', ?, ?, 'success', ?, ?)
+                """,
+                [
+                    .text(UUID().uuidString),
+                    .text(job.sourcePath),
+                    .text(job.destinationPath),
+                    .text("files=\(job.totalFiles)"),
+                    .text(now)
+                ]
+            )
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+        try rebuildBrowseGraph()
+    }
+
+    func failFolderMoveJob(id: UUID, error: Error) throws {
+        try execute(
+            "UPDATE folder_move_jobs SET status = 'failed', error_detail = ?, updated_at = ? WHERE id = ?",
+            [.text(error.fullTrace), .text(DateCoding.encode(Date())), .text(id.uuidString)]
+        )
+    }
+
     func markSourceDirectoryScanned(path: String) throws {
         try execute(
             "UPDATE source_directories SET last_scanned_at = ? WHERE path = ?",
@@ -1038,10 +1292,38 @@ final class SQLiteDatabase: @unchecked Sendable {
                 PRIMARY KEY(node_id, file_instance_id, membership_kind)
             );
 
+            CREATE TABLE IF NOT EXISTS folder_move_jobs (
+                id TEXT PRIMARY KEY,
+                source_directory_id TEXT NOT NULL REFERENCES source_directories(id),
+                source_path TEXT NOT NULL,
+                destination_parent_path TEXT NOT NULL,
+                destination_path TEXT NOT NULL,
+                storage_kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                total_files INTEGER NOT NULL,
+                completed_files INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                error_detail TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS folder_move_items (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES folder_move_jobs(id) ON DELETE CASCADE,
+                file_instance_id TEXT,
+                source_path TEXT NOT NULL,
+                destination_path TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_browse_edges_parent ON browse_edges(parent_node_id, kind);
             CREATE INDEX IF NOT EXISTS idx_browse_edges_child ON browse_edges(child_node_id, kind);
             CREATE INDEX IF NOT EXISTS idx_browse_file_instances_node ON browse_file_instances(node_id, membership_kind);
             CREATE INDEX IF NOT EXISTS idx_browse_file_instances_file ON browse_file_instances(file_instance_id);
+            CREATE INDEX IF NOT EXISTS idx_folder_move_jobs_status ON folder_move_jobs(status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_folder_move_items_job_status ON folder_move_items(job_id, status);
             """
         )
 
@@ -1152,11 +1434,58 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
+    func rebuildBrowseGraph() throws {
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try execute("DELETE FROM browse_file_instances")
+            try execute("DELETE FROM browse_edges")
+            try execute("DELETE FROM browse_nodes")
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+        try backfillBrowseGraphFromFileInstances()
+    }
+
     private func assetID(contentHash: String, metadataFingerprint: String) throws -> UUID? {
         let sql = "SELECT id FROM assets WHERE content_fingerprint = ? OR metadata_fingerprint = ? LIMIT 1"
         return try prepare(sql, [.text(contentHash), .text(metadataFingerprint)]) { statement in
             UUID(uuidString: statement.text(0))
         }.first ?? nil
+    }
+
+    private func folderMoveJob(id: UUID) throws -> FolderMoveJob {
+        let rows = try prepare(
+            """
+            SELECT id, source_directory_id, source_path, destination_parent_path, destination_path,
+                   storage_kind, status, total_files, completed_files
+            FROM folder_move_jobs
+            WHERE id = ?
+            LIMIT 1
+            """,
+            [.text(id.uuidString)]
+        ) { statement in
+            FolderMoveJob(
+                id: UUID(uuidString: statement.text(0)) ?? id,
+                sourceDirectoryID: UUID(uuidString: statement.text(1)) ?? UUID(),
+                sourcePath: statement.text(2),
+                destinationParentPath: statement.text(3),
+                destinationPath: statement.text(4),
+                storageKind: StorageKind(rawValue: statement.text(5)) ?? .local,
+                status: statement.text(6),
+                totalFiles: Int(statement.int(7)),
+                completedFiles: Int(statement.int(8))
+            )
+        }
+        guard let job = rows.first else {
+            throw DatabaseError.stepFailed("文件夹移动任务不存在：\(id.uuidString)")
+        }
+        return job
+    }
+
+    private func storageKindForPath(_ path: String) -> StorageKind {
+        path.hasPrefix("/Volumes/") ? .nas : .local
     }
 
     private func browseNode(kind: BrowseNodeKind, canonicalKey: String) throws -> BrowseNode {

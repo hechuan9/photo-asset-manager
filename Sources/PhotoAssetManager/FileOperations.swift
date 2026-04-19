@@ -7,6 +7,9 @@ enum FileOperationError: LocalizedError {
     case cannotWrite(URL)
     case hashMismatch(source: String, destination: String)
     case noOriginal
+    case sourceFolderMissing(URL)
+    case destinationInsideSource(URL)
+    case sourceFileMissing(URL)
 
     var errorDescription: String? {
         switch self {
@@ -15,6 +18,9 @@ enum FileOperationError: LocalizedError {
         case .cannotWrite(let url): "目标目录不可写：\(url.path)"
         case .hashMismatch(let source, let destination): "复制前后 hash 不一致：\(source) -> \(destination)"
         case .noOriginal: "没有可用原片"
+        case .sourceFolderMissing(let url): "源文件夹不存在：\(url.path)"
+        case .destinationInsideSource(let url): "不能移动到源文件夹内部：\(url.path)"
+        case .sourceFileMissing(let url): "源文件不存在：\(url.path)"
         }
     }
 }
@@ -62,6 +68,68 @@ struct FileOperations {
         }
     }
 
+    func buildFolderMovePlan(source: SourceDirectory, destinationParent: URL, database: SQLiteDatabase) throws -> (destination: URL, items: [FolderMovePlanItem]) {
+        let sourceURL = URL(fileURLWithPath: source.path, isDirectory: true)
+        let sourcePath = normalizedDirectoryPath(sourceURL.path)
+        let destination = destinationParent.appendingPathComponent(sourceURL.lastPathComponent, isDirectory: true)
+        let destinationPath = normalizedDirectoryPath(destination.path)
+
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: sourcePath, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw FileOperationError.sourceFolderMissing(sourceURL)
+        }
+        guard directoryWritable(destinationParent) else {
+            throw FileOperationError.cannotWrite(destinationParent)
+        }
+        if destinationPath == sourcePath || destinationPath.hasPrefix(sourcePath + "/") {
+            throw FileOperationError.destinationInsideSource(destination)
+        }
+        if fileManager.fileExists(atPath: destinationPath) {
+            throw FileOperationError.destinationExists(destination)
+        }
+
+        let knownFiles = try database.fileInstancesForFolderMove(sourcePath: sourcePath)
+        guard let enumerator = fileManager.enumerator(
+            at: sourceURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: []
+        ) else {
+            throw FileOperationError.sourceFolderMissing(sourceURL)
+        }
+
+        var items: [FolderMovePlanItem] = []
+        while let url = enumerator.nextObject() as? URL {
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+            guard values.isRegularFile == true else { continue }
+            let sourceFilePath = normalizedDirectoryPath(url.path)
+            let relativePath = relativeFilePath(sourceFilePath, under: sourcePath)
+            let destinationFile = destination.appendingPathComponent(relativePath, isDirectory: false)
+            let known = knownFiles[sourceFilePath]
+            items.append(FolderMovePlanItem(
+                sourcePath: sourceFilePath,
+                destinationPath: destinationFile.path,
+                fileInstanceID: known?.0,
+                contentHash: known?.1 ?? ""
+            ))
+        }
+
+        return (destination, items.sorted { $0.sourcePath.localizedStandardCompare($1.sourcePath) == .orderedAscending })
+    }
+
+    func moveFolder(job: FolderMoveJob, database: SQLiteDatabase, progress: (FolderMoveJob, FolderMoveItem) throws -> Void) throws {
+        let destinationURL = URL(fileURLWithPath: job.destinationPath, isDirectory: true)
+        try fileManager.createDirectory(at: destinationURL, withIntermediateDirectories: true)
+        try database.markFolderMoveJobRunning(id: job.id)
+
+        for item in try database.pendingFolderMoveItems(jobID: job.id) {
+            try progress(job, item)
+            let source = URL(fileURLWithPath: item.sourcePath)
+            let destination = URL(fileURLWithPath: item.destinationPath)
+            try moveFolderItem(item, source: source, destination: destination, database: database)
+        }
+        try emptySourceDirectoryTree(root: URL(fileURLWithPath: job.sourcePath, isDirectory: true))
+    }
+
     func reveal(_ file: FileInstance) {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file.path)])
     }
@@ -87,6 +155,74 @@ struct FileOperations {
             try? fileManager.removeItem(at: destination)
             throw FileOperationError.hashMismatch(source: sourceHash, destination: destinationHash)
         }
+    }
+
+    private func moveFolderItem(_ item: FolderMoveItem, source: URL, destination: URL, database: SQLiteDatabase) throws {
+        let parent = destination.deletingLastPathComponent()
+        try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+
+        if fileManager.fileExists(atPath: destination.path) {
+            let destinationHash = try FileHasher.sha256(url: destination)
+            if !item.contentHash.isEmpty, destinationHash != item.contentHash {
+                throw FileOperationError.destinationExists(destination)
+            }
+            if fileManager.fileExists(atPath: source.path) {
+                try fileManager.removeItem(at: source)
+            }
+            let size = try Int64(destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+            try database.completeFolderMoveItem(item, hash: destinationHash, sizeBytes: size)
+            return
+        }
+
+        guard fileManager.fileExists(atPath: source.path) else {
+            throw FileOperationError.sourceFileMissing(source)
+        }
+        let sourceHash = try FileHasher.sha256(url: source)
+        if !item.contentHash.isEmpty, sourceHash != item.contentHash {
+            throw FileOperationError.hashMismatch(source: item.contentHash, destination: sourceHash)
+        }
+        try fileManager.copyItem(at: source, to: destination)
+        let destinationHash = try FileHasher.sha256(url: destination)
+        guard sourceHash == destinationHash else {
+            try? fileManager.removeItem(at: destination)
+            throw FileOperationError.hashMismatch(source: sourceHash, destination: destinationHash)
+        }
+        try fileManager.removeItem(at: source)
+        let size = try Int64(destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+        try database.completeFolderMoveItem(item, hash: destinationHash, sizeBytes: size)
+    }
+
+    private func emptySourceDirectoryTree(root: URL) throws {
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: []
+        ) else {
+            return
+        }
+        let directories = enumerator.compactMap { item -> URL? in
+            guard let url = item as? URL,
+                  (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                return nil
+            }
+            return url
+        }
+        for directory in directories.sorted(by: { $0.path.count > $1.path.count }) {
+            if (try? fileManager.contentsOfDirectory(atPath: directory.path).isEmpty) == true {
+                try fileManager.removeItem(at: directory)
+            }
+        }
+    }
+
+    private func relativeFilePath(_ path: String, under root: String) -> String {
+        let prefix = root == "/" ? "/" : root + "/"
+        guard path.hasPrefix(prefix) else { return URL(fileURLWithPath: path).lastPathComponent }
+        return String(path.dropFirst(prefix.count))
+    }
+
+    private func normalizedDirectoryPath(_ path: String) -> String {
+        guard path.count > 1 else { return path }
+        return path.hasSuffix("/") ? String(path.dropLast()) : path
     }
 
     private func archiveDestination(asset: Asset, source: URL, nasRoot: URL) -> URL {

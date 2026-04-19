@@ -44,11 +44,13 @@ final class LibraryStore: ObservableObject {
             database = try SQLiteDatabase(path: libraryDatabasePath)
             scanner = PhotoScanner()
             try database.markInterruptedImportBatches()
+            try database.markInterruptedFolderMoveJobs()
             interruptedScanPath = try database.latestInterruptedScanPath()
             derivativeStorageURL = try database.derivativeStoragePath().map { URL(fileURLWithPath: $0, isDirectory: true) }
             sourceDirectories = try database.sourceDirectories()
             indexedBrowseFolders = try database.browseFolders()
             refresh()
+            resumeInterruptedFolderMoveIfNeeded()
             startStartupLibraryOrganizationIfNeeded()
         } catch {
             fatalError(error.fullTrace)
@@ -149,10 +151,28 @@ final class LibraryStore: ObservableObject {
 
     func moveSourceDirectory(_ source: SourceDirectory, to parent: SourceDirectory?) {
         guard !isBusy else { return }
+        guard let parent else { return }
+        startFolderMove(source, destinationParentPath: parent.path, parentID: parent.id)
+    }
+
+    func moveSourceDirectory(_ source: SourceDirectory, to target: FolderMoveTarget) {
+        guard !isBusy else { return }
+        startFolderMove(source, destinationParentPath: target.path, parentID: parentSourceID(for: target.path, excluding: source.id))
+    }
+
+    func availableFolderMoveTargets(for source: SourceDirectory) -> [FolderMoveTarget] {
+        SourceDirectoryTreeBuilder.moveTargets(
+            for: source,
+            sources: sourceDirectories,
+            indexedBrowseFolders: indexedBrowseFolders
+        )
+    }
+
+    func resumeInterruptedFolderMoveIfNeeded() {
+        guard blockingTask == nil else { return }
         do {
-            try database.moveSourceDirectory(id: source.id, parentID: parent?.id)
-            sourceDirectories = try database.sourceDirectories()
-            indexedBrowseFolders = try database.browseFolders()
+            guard let job = try database.unfinishedFolderMoveJob() else { return }
+            continueFolderMove(job, parentID: parentSourceID(for: job.destinationParentPath, excluding: job.sourceDirectoryID))
         } catch {
             lastError = error.fullTrace
         }
@@ -328,6 +348,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func startStartupLibraryOrganizationIfNeeded() {
+        guard blockingTask == nil else { return }
         guard startupOrganizationTask == nil else { return }
         let sources: [SourceDirectory]
         do {
@@ -671,6 +692,65 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    private func startFolderMove(_ source: SourceDirectory, destinationParentPath: String, parentID: UUID?) {
+        let destinationParent = URL(fileURLWithPath: destinationParentPath, isDirectory: true)
+        do {
+            let plan = try fileOperations.buildFolderMovePlan(source: source, destinationParent: destinationParent, database: database)
+            let job = try database.createFolderMoveJob(
+                source: source,
+                destinationParentPath: destinationParentPath,
+                destinationPath: plan.destination.path,
+                items: plan.items
+            )
+            continueFolderMove(job, parentID: parentID)
+        } catch {
+            lastError = error.fullTrace
+        }
+    }
+
+    private func continueFolderMove(_ job: FolderMoveJob, parentID: UUID?) {
+        availabilityTask?.cancel()
+        availabilityTask = nil
+        backgroundTask = nil
+        blockingTask = BlockingTaskReport(
+            title: "移动文件夹",
+            phase: "准备移动",
+            currentPath: job.sourcePath,
+            totalItems: job.totalFiles,
+            completedItems: job.completedFiles,
+            message: "\(job.sourcePath) -> \(job.destinationPath)"
+        )
+        lastError = nil
+
+        Task {
+            do {
+                try fileOperations.moveFolder(job: job, database: database) { [weak self] job, item in
+                    let pending = (try? self?.database.pendingFolderMoveItems(jobID: job.id).count) ?? job.totalFiles
+                    let completed = max(0, job.totalFiles - pending)
+                    self?.blockingTask = BlockingTaskReport(
+                        title: "移动文件夹",
+                        phase: "复制、校验并删除源文件",
+                        currentPath: item.sourcePath,
+                        totalItems: job.totalFiles,
+                        completedItems: min(completed, job.totalFiles),
+                        message: "\(item.sourcePath) -> \(item.destinationPath)"
+                    )
+                }
+                try database.rewriteFolderMovePaths(job: job, parentID: parentID)
+                sourceDirectories = try database.sourceDirectories()
+                indexedBrowseFolders = try database.browseFolders()
+                interruptedScanPath = try database.latestInterruptedScanPath()
+                blockingTask = nil
+                refresh()
+                startStartupLibraryOrganizationIfNeeded()
+            } catch {
+                try? database.failFolderMoveJob(id: job.id, error: error)
+                blockingTask = nil
+                lastError = error.fullTrace
+            }
+        }
+    }
+
     private func scanSources(_ sources: [SourceDirectory]) {
         guard !isBusy else { return }
         guard !sources.isEmpty else { return }
@@ -775,6 +855,18 @@ final class LibraryStore: ObservableObject {
             return url
         }
         return URL(fileURLWithPath: "/" + components[1] + "/" + components[2], isDirectory: true)
+    }
+
+    private func parentSourceID(for path: String, excluding sourceID: UUID) -> UUID? {
+        let normalizedPath = Self.normalizedDirectoryPath(path)
+        return sourceDirectories
+            .filter { $0.id != sourceID }
+            .filter { source in
+                let sourcePath = Self.normalizedDirectoryPath(source.path)
+                return normalizedPath == sourcePath || normalizedPath.hasPrefix(sourcePath + "/")
+            }
+            .max { $0.path.count < $1.path.count }?
+            .id
     }
 
     private static func applicationSupport() throws -> URL {
