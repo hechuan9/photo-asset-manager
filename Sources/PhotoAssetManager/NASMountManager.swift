@@ -21,8 +21,8 @@ struct NASMountManager: Sendable {
         self.timeoutSeconds = timeoutSeconds
     }
 
-    func mountNASRootsIfNeeded(for sources: [SourceDirectory]) async -> NASMountReport {
-        let roots = uniqueVolumeRoots(from: sources)
+    func mountNASRootsIfNeeded(for sources: [SourceDirectory], derivativeStorageURL: URL?) async -> NASMountReport {
+        let roots = uniqueVolumeRoots(from: sources, derivativeStorageURL: derivativeStorageURL)
         guard !roots.isEmpty else { return NASMountReport() }
 
         let timeoutSeconds = timeoutSeconds
@@ -45,12 +45,16 @@ struct NASMountManager: Sendable {
         }.value
     }
 
-    private func uniqueVolumeRoots(from sources: [SourceDirectory]) -> [NASVolumeRoot] {
+    private func uniqueVolumeRoots(from sources: [SourceDirectory], derivativeStorageURL: URL?) -> [NASVolumeRoot] {
+        let host = nasHost()
         var seen: Set<String> = []
         var roots: [NASVolumeRoot] = []
         for source in sources where source.storageKind == .nas {
-            guard let root = NASVolumeRoot(path: source.path, host: nasHost()) else { continue }
+            guard let root = NASVolumeRoot(path: source.path, host: host) else { continue }
             guard seen.insert(root.path).inserted else { continue }
+            roots.append(root)
+        }
+        if let derivativeStorageURL, let root = NASVolumeRoot(path: derivativeStorageURL.path, host: host), seen.insert(root.path).inserted {
             roots.append(root)
         }
         return roots.sorted { $0.path < $1.path }

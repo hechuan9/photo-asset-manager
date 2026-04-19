@@ -90,9 +90,7 @@ struct PhotoScanner: @unchecked Sendable {
                         }
                         report.skippedExistingFiles += 1
                         report.scannedFiles += 1
-                        if report.scannedFiles % 25 == 0 {
-                            await MainActor.run { progress(report) }
-                        }
+                        await publishScanProgress(report, progress: progress)
                         continue
                     }
                     report.currentPath = url.path
@@ -110,9 +108,7 @@ struct PhotoScanner: @unchecked Sendable {
                     } else {
                         report.newLocations += 1
                     }
-                    if report.scannedFiles % 3 == 0 {
-                        await MainActor.run { progress(report) }
-                    }
+                    await publishScanProgress(report, progress: progress)
                 } catch {
                     report.errors.append("\(url.path)\n\(error.fullTrace)")
                 }
@@ -128,6 +124,10 @@ struct PhotoScanner: @unchecked Sendable {
         }
         await MainActor.run { progress(report) }
         return report
+    }
+
+    private func publishScanProgress(_ report: ScanReport, progress: @escaping @MainActor (ScanReport) -> Void) async {
+        await MainActor.run { progress(report) }
     }
 
     private func countCandidateFiles(root: URL, report initialReport: ScanReport, progress: @escaping @MainActor (ScanReport) -> Void) async throws -> Int {
@@ -188,7 +188,7 @@ struct PhotoScanner: @unchecked Sendable {
         let role = SupportedFiles.isRaw(url) ? FileRole.rawOriginal : FileRole.jpegOriginal
         let authority = storageKind == .nas ? AuthorityRole.canonical : AuthorityRole.workingCopy
         let syncStatus = storageKind == .nas ? SyncStatus.synced : SyncStatus.needsArchive
-        let thumbnail = try generateThumbnail(source: url, contentHash: hash, derivativeRoot: derivativeRoot)
+        let thumbnail = try? generateThumbnail(source: url, contentHash: hash, derivativeRoot: derivativeRoot)
 
         return ScannedFile(
             url: url,

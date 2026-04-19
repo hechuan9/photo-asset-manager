@@ -609,10 +609,10 @@ final class LibraryStore: ObservableObject {
         blockingTask = BlockingTaskReport(
             title: "系统整理中",
             phase: "挂载 NAS 来源",
-            totalItems: sourceDirectories.filter { $0.storageKind == .nas }.count,
+            totalItems: sourceDirectories.filter { $0.storageKind == .nas }.count + (derivativeStorageURL == nil ? 0 : 1),
             message: "正在挂载已登记的 NAS 照片来源。"
         )
-        let report = await nasMountManager.mountNASRootsIfNeeded(for: sourceDirectories)
+        let report = await nasMountManager.mountNASRootsIfNeeded(for: sourceDirectories, derivativeStorageURL: derivativeStorageURL)
         blockingTask = BlockingTaskReport(
             title: "系统整理中",
             phase: report.hasFailures ? "NAS 挂载未完成" : "NAS 挂载完成",

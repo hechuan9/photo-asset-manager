@@ -178,6 +178,25 @@ struct StartupPerformanceTests {
         #expect(functionBody(named: "upsertScannedSidecar", in: database).contains("try upsertBrowseFolderMembership(filePath: sidecar.url.path"))
     }
 
+    @Test func scannerPublishesProgressAfterEveryScannedPhoto() throws {
+        let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")
+        let scanDirectoryBody = functionBody(named: "scanDirectory", in: scanner)
+
+        #expect(scanner.contains("func publishScanProgress"))
+        #expect(scanDirectoryBody.contains("report.scannedFiles += 1\n                        await publishScanProgress(report, progress: progress)"))
+        #expect(scanDirectoryBody.components(separatedBy: "await publishScanProgress(report, progress: progress)").count - 1 == 2)
+        #expect(!scanDirectoryBody.contains("report.scannedFiles % 3"))
+        #expect(!scanDirectoryBody.contains("report.scannedFiles % 25"))
+    }
+
+    @Test func thumbnailWriteFailuresDoNotFailPhotoScan() throws {
+        let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")
+        let scanFileBody = functionBody(named: "scanFile", in: scanner)
+
+        #expect(scanFileBody.contains("try? generateThumbnail"))
+        #expect(!scanFileBody.contains("let thumbnail = try generateThumbnail"))
+    }
+
     @Test func rawAssetsCanRenderFromPrimaryPathWhenThumbnailIsMissing() throws {
         let content = try sourceFile("Sources/PhotoAssetManager/ContentView.swift")
         let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")
@@ -265,12 +284,22 @@ struct StartupPerformanceTests {
         #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("挂载 NAS 来源"))
         #expect(functionBody(named: "startAvailabilityRefreshInBackground", in: store).contains("guard startupNASMountSucceeded else"))
         #expect(mountManager.contains("struct NASMountManager"))
-        #expect(mountManager.contains("func mountNASRootsIfNeeded(for sources: [SourceDirectory]) async -> NASMountReport"))
+        #expect(mountManager.contains("func mountNASRootsIfNeeded(for sources: [SourceDirectory], derivativeStorageURL: URL?) async -> NASMountReport"))
         #expect(mountManager.contains("UserDefaults.standard.string(forKey: \"nasSMBHost\")"))
         #expect(mountManager.contains("smb://"))
         #expect(mountManager.contains("/usr/bin/osascript"))
         #expect(mountManager.contains("mount volume"))
         #expect(mountManager.contains("uniqueVolumeRoots"))
+    }
+
+    @Test func startupMountIncludesDerivativeStorageRoot() throws {
+        let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
+        let mountManager = try sourceFile("Sources/PhotoAssetManager/NASMountManager.swift")
+
+        #expect(functionBody(named: "mountNASRootsAtStartup", in: store).contains("derivativeStorageURL: derivativeStorageURL"))
+        #expect(mountManager.contains("func uniqueVolumeRoots(from sources: [SourceDirectory], derivativeStorageURL: URL?) -> [NASVolumeRoot]"))
+        #expect(functionBody(named: "uniqueVolumeRoots", in: mountManager).contains("if let derivativeStorageURL"))
+        #expect(functionBody(named: "uniqueVolumeRoots", in: mountManager).contains("NASVolumeRoot(path: derivativeStorageURL.path, host: host)"))
     }
 
     @Test func startupMountCleanupRunsWhenNoIndexOrganizationIsNeeded() throws {
