@@ -660,22 +660,6 @@ struct SourceDirectoryNodeRow: View {
             .onHover { hovering in
                 isHovering = hovering
             }
-
-            Menu {
-                FolderActionMenuItems(
-                    source: node.source,
-                    moveSource: moveSource,
-                    interruptedScanPath: interruptedScanPath,
-                    nodePath: node.path,
-                    openMoveDialog: openMoveDialog,
-                    openRemovalDialog: openRemovalDialog
-                )
-            } label: {
-                Image(systemName: "ellipsis")
-                    .frame(width: 22, height: 24)
-            }
-            .menuStyle(.borderlessButton)
-            .disabled(library.isBusy)
         }
         .contextMenu {
             FolderActionMenuItems(

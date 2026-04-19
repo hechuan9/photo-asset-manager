@@ -9,12 +9,12 @@ struct SidebarUXTests {
         #expect(!source.contains("追踪中"))
     }
 
-    @Test func foldersInSidebarAreAlwaysTrackedAndUseRowMenu() throws {
+    @Test func foldersInSidebarAreAlwaysTrackedAndUseContextMenu() throws {
         let source = try contentViewSource()
         let store = try libraryStoreSource()
         let app = try appSource()
 
-        #expect(source.contains("Menu"))
+        #expect(source.contains(".contextMenu"))
         #expect(source.contains("Button(\"刷新\")"))
         #expect(!source.contains("Button(\"扫描\")"))
         #expect(!source.contains("停止追踪"))
@@ -30,6 +30,16 @@ struct SidebarUXTests {
         #expect(!store.contains("func chooseAndScan"))
         #expect(!app.contains("扫描本地目录"))
         #expect(!app.contains("扫描 NAS 目录"))
+    }
+
+    @Test func folderRowsDoNotShowTrailingEllipsisMenu() throws {
+        let source = try contentViewSource()
+        let rowBody = structBody(named: "SourceDirectoryNodeRow", in: source)
+
+        #expect(rowBody.contains(".contextMenu"))
+        #expect(!rowBody.contains("\n            Menu {"))
+        #expect(!rowBody.contains("Image(systemName: \"ellipsis\")"))
+        #expect(rowBody.contains("FolderActionMenuItems("))
     }
 
     @Test func thumbnailMaintenanceIsCollapsedInsideSidebar() throws {
