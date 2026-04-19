@@ -244,6 +244,25 @@ struct SourceDirectoryNode: Identifiable, Hashable, Sendable {
     var hasChildren: Bool
 }
 
+struct FolderMoveSource: Identifiable, Hashable, Sendable {
+    var id: String { path }
+    var sourceDirectoryID: UUID?
+    var path: String
+    var storageKind: StorageKind
+
+    init(source: SourceDirectory) {
+        sourceDirectoryID = source.id
+        path = source.path
+        storageKind = source.storageKind
+    }
+
+    init(path: String) {
+        sourceDirectoryID = nil
+        self.path = SourceDirectoryTreeBuilder.normalizedDirectoryPath(path)
+        storageKind = path.hasPrefix("/Volumes/") ? .nas : .local
+    }
+}
+
 struct FolderMoveTarget: Identifiable, Hashable, Sendable {
     var id: String { path }
     var path: String
@@ -345,11 +364,11 @@ enum SourceDirectoryTreeBuilder {
     }
 
     static func moveTargets(
-        for source: SourceDirectory,
+        for sourcePath: String,
         sources: [SourceDirectory],
         indexedBrowseFolders: [BrowseNode]
     ) -> [FolderMoveTarget] {
-        let sourcePath = normalizedDirectoryPath(source.path)
+        let sourcePath = normalizedDirectoryPath(sourcePath)
         let blockedPrefix = sourcePath == "/" ? "/" : sourcePath + "/"
         var targetsByPath: [String: FolderMoveTarget] = [:]
 
@@ -362,7 +381,7 @@ enum SourceDirectoryTreeBuilder {
             )
         }
 
-        for candidate in sources where candidate.id != source.id {
+        for candidate in sources where normalizedDirectoryPath(candidate.path) != sourcePath {
             insert(path: candidate.path)
         }
         for folder in indexedBrowseFolders {

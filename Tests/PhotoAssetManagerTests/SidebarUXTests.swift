@@ -52,8 +52,8 @@ struct SidebarUXTests {
         #expect(source.contains("SourceDirectoryNodeRow("))
         #expect(source.contains("Image(systemName: isExpanded ? \"chevron.down\" : \"chevron.right\")"))
         #expect(source.contains(".onTapGesture"))
-        #expect(source.contains("Button(\"移动到...\")"))
-        #expect(source.contains("MoveSourceDirectorySheet("))
+        #expect(source.contains("Menu(\"移动到\")"))
+        #expect(source.contains("FolderActionMenuItems("))
         #expect(store.contains("func moveSourceDirectory"))
         #expect(database.contains("parent_source_directory_id"))
         #expect(database.contains("func moveSourceDirectory"))
@@ -224,8 +224,30 @@ struct SidebarUXTests {
         #expect(operations.contains("removeItem(at: source)"))
         #expect(store.contains("resumeInterruptedFolderMoveIfNeeded()"))
         #expect(store.contains("title: \"移动文件夹\""))
-        #expect(content.contains("Button(\"移动到...\")"))
-        #expect(content.contains("Text(\"目标文件夹\")"))
+        #expect(content.contains("Menu(\"移动到\")"))
+        #expect(content.contains("FolderActionMenuItems("))
+    }
+
+    @Test func folderMoveUsesContextSubmenuForRegisteredAndIndexedFolders() throws {
+        let content = try contentViewSource()
+        let rowBody = structBody(named: "SourceDirectoryNodeRow", in: content)
+        let actionsBody = structBody(named: "FolderActionMenuItems", in: content)
+        let store = try libraryStoreSource()
+        let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
+
+        #expect(content.contains("FolderMoveSource"))
+        #expect(models.contains("struct FolderMoveSource"))
+        #expect(rowBody.contains("moveSource: FolderMoveSource"))
+        #expect(rowBody.contains("FolderActionMenuItems("))
+        #expect(rowBody.contains(".contextMenu"))
+        #expect(actionsBody.contains("Menu(\"移动到\")"))
+        #expect(!rowBody.contains("if let source = node.source"))
+        #expect(actionsBody.contains("let targets = library.availableFolderMoveTargets(for: moveSource)"))
+        #expect(actionsBody.contains("library.moveFolder(moveSource, to: target)"))
+        #expect(actionsBody.contains("Button(\"没有可用目标\")"))
+        #expect(!content.contains("MoveSourceDirectorySheet("))
+        #expect(!content.contains("Button(\"移动到...\")"))
+        #expect(store.contains("func moveFolder(_ source: FolderMoveSource, to target: FolderMoveTarget)"))
     }
 
     private func contentViewSource() throws -> String {

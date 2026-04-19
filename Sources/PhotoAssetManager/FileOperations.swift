@@ -68,7 +68,7 @@ struct FileOperations {
         }
     }
 
-    func buildFolderMovePlan(source: SourceDirectory, destinationParent: URL, database: SQLiteDatabase) throws -> (destination: URL, items: [FolderMovePlanItem]) {
+    func buildFolderMovePlan(source: FolderMoveSource, destinationParent: URL, database: SQLiteDatabase) throws -> (destination: URL, items: [FolderMovePlanItem]) {
         let sourceURL = URL(fileURLWithPath: source.path, isDirectory: true)
         let sourcePath = normalizedDirectoryPath(sourceURL.path)
         let destination = destinationParent.appendingPathComponent(sourceURL.lastPathComponent, isDirectory: true)

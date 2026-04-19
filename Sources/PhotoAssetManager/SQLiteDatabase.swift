@@ -679,11 +679,14 @@ final class SQLiteDatabase: @unchecked Sendable {
     }
 
     func createFolderMoveJob(
-        source: SourceDirectory,
+        source: FolderMoveSource,
         destinationParentPath: String,
         destinationPath: String,
         items: [FolderMovePlanItem]
     ) throws -> FolderMoveJob {
+        guard let sourceDirectoryID = source.sourceDirectoryID else {
+            throw DatabaseError.stepFailed("移动源不属于任何已登记文件夹：\(source.path)")
+        }
         let jobID = UUID()
         let now = DateCoding.encode(Date())
         try execute("BEGIN IMMEDIATE TRANSACTION")
@@ -697,7 +700,7 @@ final class SQLiteDatabase: @unchecked Sendable {
                 """,
                 [
                     .text(jobID.uuidString),
-                    .text(source.id.uuidString),
+                    .text(sourceDirectoryID.uuidString),
                     .text(source.path),
                     .text(destinationParentPath),
                     .text(destinationPath),

@@ -152,17 +152,22 @@ final class LibraryStore: ObservableObject {
     func moveSourceDirectory(_ source: SourceDirectory, to parent: SourceDirectory?) {
         guard !isBusy else { return }
         guard let parent else { return }
-        startFolderMove(source, destinationParentPath: parent.path, parentID: parent.id)
+        startFolderMove(FolderMoveSource(source: source), destinationParentPath: parent.path, parentID: parent.id)
     }
 
     func moveSourceDirectory(_ source: SourceDirectory, to target: FolderMoveTarget) {
         guard !isBusy else { return }
-        startFolderMove(source, destinationParentPath: target.path, parentID: parentSourceID(for: target.path, excluding: source.id))
+        moveFolder(FolderMoveSource(source: source), to: target)
     }
 
-    func availableFolderMoveTargets(for source: SourceDirectory) -> [FolderMoveTarget] {
+    func moveFolder(_ source: FolderMoveSource, to target: FolderMoveTarget) {
+        guard !isBusy else { return }
+        startFolderMove(source, destinationParentPath: target.path, parentID: parentSourceID(for: target.path, excluding: source.sourceDirectoryID))
+    }
+
+    func availableFolderMoveTargets(for source: FolderMoveSource) -> [FolderMoveTarget] {
         SourceDirectoryTreeBuilder.moveTargets(
-            for: source,
+            for: source.path,
             sources: sourceDirectories,
             indexedBrowseFolders: indexedBrowseFolders
         )
@@ -692,7 +697,11 @@ final class LibraryStore: ObservableObject {
         }
     }
 
-    private func startFolderMove(_ source: SourceDirectory, destinationParentPath: String, parentID: UUID?) {
+    private func startFolderMove(_ source: FolderMoveSource, destinationParentPath: String, parentID: UUID?) {
+        var source = source
+        if source.sourceDirectoryID == nil {
+            source.sourceDirectoryID = parentSourceID(for: source.path, excluding: nil)
+        }
         let destinationParent = URL(fileURLWithPath: destinationParentPath, isDirectory: true)
         do {
             let plan = try fileOperations.buildFolderMovePlan(source: source, destinationParent: destinationParent, database: database)
@@ -857,10 +866,10 @@ final class LibraryStore: ObservableObject {
         return URL(fileURLWithPath: "/" + components[1] + "/" + components[2], isDirectory: true)
     }
 
-    private func parentSourceID(for path: String, excluding sourceID: UUID) -> UUID? {
+    private func parentSourceID(for path: String, excluding sourceID: UUID?) -> UUID? {
         let normalizedPath = Self.normalizedDirectoryPath(path)
         return sourceDirectories
-            .filter { $0.id != sourceID }
+            .filter { sourceID == nil || $0.id != sourceID }
             .filter { source in
                 let sourcePath = Self.normalizedDirectoryPath(source.path)
                 return normalizedPath == sourcePath || normalizedPath.hasPrefix(sourcePath + "/")

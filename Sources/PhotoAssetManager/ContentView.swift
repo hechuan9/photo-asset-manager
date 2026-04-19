@@ -187,7 +187,6 @@ struct BlockingTaskProgressView: View {
 struct SidebarView: View {
     @EnvironmentObject private var library: LibraryStore
     @State private var expandedFolderNodeIDs: Set<String> = []
-    @State private var sourcePendingMove: SourceDirectory?
 
     var body: some View {
         List(selection: Binding(
@@ -233,9 +232,6 @@ struct SidebarView: View {
                             },
                             select: {
                                 library.selectFolder(path: node.path)
-                            },
-                            move: {
-                                sourcePendingMove = node.source
                             }
                         )
                     }
@@ -301,19 +297,6 @@ struct SidebarView: View {
         }
         .scrollContentBackground(.hidden)
         .background(AppPalette.sidebarBackground)
-        .sheet(item: $sourcePendingMove) { source in
-            MoveSourceDirectorySheet(
-                source: source,
-                targets: library.availableFolderMoveTargets(for: source),
-                move: { target in
-                    library.moveSourceDirectory(source, to: target)
-                    sourcePendingMove = nil
-                },
-                cancel: {
-                    sourcePendingMove = nil
-                }
-            )
-        }
     }
 }
 
@@ -445,7 +428,10 @@ struct SourceDirectoryNodeRow: View {
     var isSelected: Bool
     var toggleExpansion: () -> Void
     var select: () -> Void
-    var move: () -> Void
+
+    private var moveSource: FolderMoveSource {
+        node.source.map(FolderMoveSource.init(source:)) ?? FolderMoveSource(path: node.path)
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
@@ -483,38 +469,76 @@ struct SourceDirectoryNodeRow: View {
                 isHovering = hovering
             }
 
-            if let source = node.source {
-                Menu {
-                    Button("刷新") {
-                        library.scanSource(source)
-                    }
-                    Button("移动到...") {
-                        move()
-                    }
-                    Button("移除", role: .destructive) {
-                        library.removeSourceDirectory(source)
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .frame(width: 22, height: 24)
-                }
-                .menuStyle(.borderlessButton)
-                .disabled(library.isBusy)
+            Menu {
+                FolderActionMenuItems(
+                    source: node.source,
+                    moveSource: moveSource,
+                    interruptedScanPath: interruptedScanPath,
+                    nodePath: node.path
+                )
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 22, height: 24)
             }
+            .menuStyle(.borderlessButton)
+            .disabled(library.isBusy)
         }
         .contextMenu {
-            if let source = node.source {
-                Button("刷新") {
-                    library.scanSource(source)
+            FolderActionMenuItems(
+                source: node.source,
+                moveSource: moveSource,
+                interruptedScanPath: interruptedScanPath,
+                nodePath: node.path
+            )
+        }
+    }
+}
+
+struct FolderActionMenuItems: View {
+    @EnvironmentObject private var library: LibraryStore
+    var source: SourceDirectory?
+    var moveSource: FolderMoveSource
+    var interruptedScanPath: String?
+    var nodePath: String
+
+    var body: some View {
+        if let source {
+            Button("刷新") {
+                library.scanSource(source)
+            }
+            if isInterruptedScanSource {
+                Button("继续扫描") {
+                    library.resumeInterruptedScan()
                 }
-                Button("移动到...") {
-                    move()
-                }
-                Button("移除", role: .destructive) {
-                    library.removeSourceDirectory(source)
+            }
+            Divider()
+        }
+
+        Menu("移动到") {
+            let targets = library.availableFolderMoveTargets(for: moveSource)
+            if targets.isEmpty {
+                Button("没有可用目标") {}
+                    .disabled(true)
+            } else {
+                ForEach(targets) { target in
+                    Button(target.path) {
+                        library.moveFolder(moveSource, to: target)
+                    }
                 }
             }
         }
+
+        if let source {
+            Divider()
+            Button("移除", role: .destructive) {
+                library.removeSourceDirectory(source)
+            }
+        }
+    }
+
+    private var isInterruptedScanSource: Bool {
+        guard let interruptedScanPath else { return false }
+        return interruptedScanPath == nodePath || interruptedScanPath.hasPrefix(nodePath + "/")
     }
 }
 
@@ -555,48 +579,6 @@ struct FolderRowButtonStyle: ButtonStyle {
             return Color.accentColor.opacity(0.55)
         }
         return Color.clear
-    }
-}
-
-struct MoveSourceDirectorySheet: View {
-    var source: SourceDirectory
-    var targets: [FolderMoveTarget]
-    var move: (FolderMoveTarget) -> Void
-    var cancel: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("移动文件夹")
-                .font(.headline)
-            Text(source.path)
-                .lineLimit(2)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-            Divider()
-            Text("目标文件夹")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            if targets.isEmpty {
-                Text("没有可用目标。目标必须是已存在文件夹，且不能在源文件夹内部。")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(targets) { target in
-                    Button(target.path) {
-                        move(target)
-                    }
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                }
-            }
-            HStack {
-                Spacer()
-                Button("取消", role: .cancel) {
-                    cancel()
-                }
-            }
-        }
-        .frame(width: 420, alignment: .leading)
-        .padding(18)
     }
 }
 
