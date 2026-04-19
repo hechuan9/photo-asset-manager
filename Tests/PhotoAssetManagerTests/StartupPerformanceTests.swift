@@ -143,8 +143,9 @@ struct StartupPerformanceTests {
         let mountManager = try sourceFile("Sources/PhotoAssetManager/NASMountManager.swift")
 
         #expect(store.contains("private let nasMountManager = NASMountManager()"))
-        #expect(functionBody(named: "startAvailabilityRefreshInBackground", in: store).contains("mountNASRootsIfNeeded"))
-        #expect(functionBody(named: "startAvailabilityRefreshInBackground", in: store).contains("挂载 NAS 来源"))
+        #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("mountNASRootsAtStartup"))
+        #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("挂载 NAS 来源"))
+        #expect(functionBody(named: "startAvailabilityRefreshInBackground", in: store).contains("guard startupNASMountSucceeded else"))
         #expect(mountManager.contains("struct NASMountManager"))
         #expect(mountManager.contains("func mountNASRootsIfNeeded(for sources: [SourceDirectory]) async -> NASMountReport"))
         #expect(mountManager.contains("UserDefaults.standard.string(forKey: \"nasSMBHost\")"))

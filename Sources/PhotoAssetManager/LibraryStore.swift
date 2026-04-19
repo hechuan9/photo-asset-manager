@@ -27,6 +27,7 @@ final class LibraryStore: ObservableObject {
     private let nasMountManager = NASMountManager()
     private var availabilityTask: Task<Void, Never>?
     private var startupOrganizationTask: Task<Void, Never>?
+    private var startupNASMountSucceeded = false
     private let assetPageSize = 600
 
     init() {
@@ -219,25 +220,20 @@ final class LibraryStore: ObservableObject {
 
     func startAvailabilityRefreshInBackground() {
         guard availabilityTask == nil else { return }
-        backgroundTask = BackgroundTaskReport(title: "后台任务", phase: "挂载 NAS 来源", message: "应用可以继续使用")
+        guard startupNASMountSucceeded else {
+            backgroundTask = BackgroundTaskReport(
+                title: "后台任务",
+                phase: "等待 NAS 挂载",
+                message: "启动挂载完成后再校验文件状态。",
+                isFinished: true
+            )
+            return
+        }
+        backgroundTask = BackgroundTaskReport(title: "后台任务", phase: "准备校验文件状态", message: "应用可以继续使用")
         availabilityTask = Task { [weak self] in
             guard let self else { return }
             do {
                 refreshCounts()
-                let mountReport = await nasMountManager.mountNASRootsIfNeeded(for: sourceDirectories)
-                if mountReport.hasFailures {
-                    backgroundTask = BackgroundTaskReport(
-                        title: "后台任务",
-                        phase: "NAS 挂载未完成",
-                        totalItems: mountReport.checkedRootCount,
-                        completedItems: mountReport.alreadyAvailableRoots.count + mountReport.mountedRoots.count,
-                        message: "跳过文件状态校验，避免把离线 NAS 原片标记为缺失。",
-                        isFinished: true
-                    )
-                    availabilityTask = nil
-                    return
-                }
-
                 let targets = try database.availabilityCheckTargets()
                 backgroundTask = BackgroundTaskReport(
                     title: "后台任务",
@@ -303,27 +299,47 @@ final class LibraryStore: ObservableObject {
             lastError = error.fullTrace
             return
         }
-        guard !sources.isEmpty else {
-            startAvailabilityRefreshInBackground()
-            return
-        }
 
         isScanning = true
         scanReport = ScanReport()
         lastError = nil
         blockingTask = BlockingTaskReport(
             title: "系统整理中",
-            phase: "正在整理照片索引",
-            totalItems: sources.count,
-            message: "正在整理文件夹索引，完成后会自动显示照片。"
+            phase: "挂载 NAS 来源",
+            totalItems: max(sourceDirectories.filter { $0.storageKind == .nas }.count, sources.count),
+            message: "正在挂载已登记的 NAS 照片来源。"
         )
 
         startupOrganizationTask = Task { [weak self] in
             guard let self else { return }
             var completedSources = 0
             var scanErrors: [String] = []
+            var shouldClearBlockingTask = true
 
             do {
+                let mountReport = await mountNASRootsAtStartup()
+                guard !mountReport.hasFailures else {
+                    shouldClearBlockingTask = false
+                    blockingTask = BlockingTaskReport(
+                        title: "系统整理中",
+                        phase: "NAS 挂载未完成",
+                        totalItems: mountReport.checkedRootCount,
+                        completedItems: mountReport.alreadyAvailableRoots.count + mountReport.mountedRoots.count,
+                        message: "请确认 NAS 可访问后重启应用，暂不扫描或校验文件状态。"
+                    )
+                    startupNASMountSucceeded = false
+                    isScanning = false
+                    startupOrganizationTask = nil
+                    return
+                }
+                startupNASMountSucceeded = true
+
+                guard !sources.isEmpty else {
+                    refresh()
+                    startAvailabilityRefreshInBackground()
+                    return
+                }
+
                 try database.backfillBrowseGraphFromFileInstances()
                 sourceDirectories = try database.sourceDirectories()
                 indexedBrowseFolders = try database.browseFolders()
@@ -384,9 +400,29 @@ final class LibraryStore: ObservableObject {
                 lastError = error.fullTrace
             }
             isScanning = false
-            blockingTask = nil
+            if shouldClearBlockingTask {
+                blockingTask = nil
+            }
             startupOrganizationTask = nil
         }
+    }
+
+    private func mountNASRootsAtStartup() async -> NASMountReport {
+        blockingTask = BlockingTaskReport(
+            title: "系统整理中",
+            phase: "挂载 NAS 来源",
+            totalItems: sourceDirectories.filter { $0.storageKind == .nas }.count,
+            message: "正在挂载已登记的 NAS 照片来源。"
+        )
+        let report = await nasMountManager.mountNASRootsIfNeeded(for: sourceDirectories)
+        blockingTask = BlockingTaskReport(
+            title: "系统整理中",
+            phase: report.hasFailures ? "NAS 挂载未完成" : "NAS 挂载完成",
+            totalItems: report.checkedRootCount,
+            completedItems: report.alreadyAvailableRoots.count + report.mountedRoots.count,
+            message: report.hasFailures ? "仍有 NAS 来源不可访问。" : "NAS 来源已可访问，继续启动整理。"
+        )
+        return report
     }
 
     private func startupOrganizationMessage(sourcePath: String, report: ScanReport) -> String {
