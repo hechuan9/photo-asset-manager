@@ -625,7 +625,7 @@ struct AssetBrowserView: View {
                     }
                     .padding(2)
                 }
-                .background(Color(nsColor: .textBackgroundColor))
+                .background(Color.black)
             }
         }
     }

@@ -103,6 +103,7 @@ struct SidebarUXTests {
 
     @Test func folderTreeExpandsIndexedBrowseGraphSubdirectoriesWithoutPureBlackSidebar() throws {
         let content = try contentViewSource()
+        let sidebarBody = structBody(named: "SidebarView", in: content)
         let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
         let store = try libraryStoreSource()
 
@@ -118,8 +119,8 @@ struct SidebarUXTests {
         #expect(!models.contains("hasFileSystemSubdirectories"))
         #expect(content.contains("AppPalette.sidebarBackground"))
         #expect(content.contains("AppPalette.folderText"))
-        #expect(!content.contains("Color.black"))
-        #expect(!content.contains("NSColor.black"))
+        #expect(!sidebarBody.contains("Color.black"))
+        #expect(!sidebarBody.contains("NSColor.black"))
     }
 
     @Test func folderBrowsingUsesReusableBrowseGraphSelection() throws {
@@ -179,7 +180,7 @@ struct SidebarUXTests {
 
         #expect(browserBody.contains("GridItem(.adaptive(minimum: 220, maximum: 360), spacing: 2)"))
         #expect(browserBody.contains("LazyVGrid(columns: columns, spacing: 2)"))
-        #expect(browserBody.contains(".background(Color(nsColor: .textBackgroundColor))"))
+        #expect(browserBody.contains(".background(Color.black)"))
         #expect(tileBody.contains(".frame(height: 168)"))
         #expect(tileBody.contains("AssetPreviewImage(asset: asset, contentMode: .fill, placeholderSize: 34)"))
         #expect(tileBody.contains("RoundedRectangle(cornerRadius: 0)"))
