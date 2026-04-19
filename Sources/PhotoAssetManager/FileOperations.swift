@@ -25,9 +25,8 @@ enum FileOperationError: LocalizedError {
     }
 }
 
-@MainActor
-struct FileOperations {
-    private let fileManager = FileManager.default
+struct FileOperations: Sendable {
+    private var fileManager: FileManager { FileManager.default }
 
     func archive(asset: Asset, files: [FileInstance], nasRoot: URL, database: SQLiteDatabase) throws {
         guard directoryWritable(nasRoot) else {
@@ -116,13 +115,13 @@ struct FileOperations {
         return (destination, items.sorted { $0.sourcePath.localizedStandardCompare($1.sourcePath) == .orderedAscending })
     }
 
-    func moveFolder(job: FolderMoveJob, database: SQLiteDatabase, progress: (FolderMoveJob, FolderMoveItem) throws -> Void) throws {
+    func moveFolder(job: FolderMoveJob, database: SQLiteDatabase, progress: (FolderMoveJob, FolderMoveItem) async throws -> Void) async throws {
         let destinationURL = URL(fileURLWithPath: job.destinationPath, isDirectory: true)
         try fileManager.createDirectory(at: destinationURL, withIntermediateDirectories: true)
         try database.markFolderMoveJobRunning(id: job.id)
 
         for item in try database.pendingFolderMoveItems(jobID: job.id) {
-            try progress(job, item)
+            try await progress(job, item)
             let source = URL(fileURLWithPath: item.sourcePath)
             let destination = URL(fileURLWithPath: item.destinationPath)
             try moveFolderItem(item, source: source, destination: destination, database: database)
@@ -130,10 +129,12 @@ struct FileOperations {
         try emptySourceDirectoryTree(root: URL(fileURLWithPath: job.sourcePath, isDirectory: true))
     }
 
+    @MainActor
     func reveal(_ file: FileInstance) {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file.path)])
     }
 
+    @MainActor
     func open(_ file: FileInstance) {
         NSWorkspace.shared.open(URL(fileURLWithPath: file.path))
     }

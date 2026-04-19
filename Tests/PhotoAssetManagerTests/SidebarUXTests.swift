@@ -232,6 +232,12 @@ struct SidebarUXTests {
         #expect(rewriteBody.contains("refreshBrowseGraphForFolderMove(job: job)"))
         #expect(!rewriteBody.contains("rebuildBrowseGraph()"))
         #expect(continueMoveBody.contains("phase: \"更新索引\""))
+        #expect(continueMoveBody.contains("Task.detached(priority: .userInitiated)"))
+        #expect(continueMoveBody.contains("await MainActor.run"))
+        #expect(continueMoveBody.contains("phase: \"复制、校验并删除源文件\""))
+        #expect(!operations.contains("@MainActor\nstruct FileOperations"))
+        #expect(operations.contains("@MainActor\n    func reveal"))
+        #expect(operations.contains("@MainActor\n    func open"))
     }
 
     @Test func folderMoveOpensTargetDialogForRegisteredAndIndexedFolders() throws {

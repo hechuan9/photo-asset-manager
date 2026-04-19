@@ -702,18 +702,34 @@ final class LibraryStore: ObservableObject {
         if source.sourceDirectoryID == nil {
             source.sourceDirectoryID = parentSourceID(for: source.path, excluding: nil)
         }
-        let destinationParent = URL(fileURLWithPath: destinationParentPath, isDirectory: true)
-        do {
-            let plan = try fileOperations.buildFolderMovePlan(source: source, destinationParent: destinationParent, database: database)
-            let job = try database.createFolderMoveJob(
-                source: source,
-                destinationParentPath: destinationParentPath,
-                destinationPath: plan.destination.path,
-                items: plan.items
-            )
-            continueFolderMove(job, parentID: parentID)
-        } catch {
-            lastError = error.fullTrace
+        blockingTask = BlockingTaskReport(
+            title: "移动文件夹",
+            phase: "准备移动",
+            currentPath: source.path,
+            message: "\(source.path) -> \(destinationParentPath)"
+        )
+        lastError = nil
+
+        let database = database
+        Task.detached(priority: .userInitiated) { [source, destinationParentPath, parentID, database] in
+            do {
+                let destinationParent = URL(fileURLWithPath: destinationParentPath, isDirectory: true)
+                let plan = try FileOperations().buildFolderMovePlan(source: source, destinationParent: destinationParent, database: database)
+                let job = try database.createFolderMoveJob(
+                    source: source,
+                    destinationParentPath: destinationParentPath,
+                    destinationPath: plan.destination.path,
+                    items: plan.items
+                )
+                await MainActor.run {
+                    self.continueFolderMove(job, parentID: parentID)
+                }
+            } catch {
+                await MainActor.run {
+                    self.blockingTask = nil
+                    self.lastError = error.fullTrace
+                }
+            }
         }
     }
 
@@ -731,39 +747,51 @@ final class LibraryStore: ObservableObject {
         )
         lastError = nil
 
-        Task {
+        let database = database
+        Task.detached(priority: .userInitiated) {
             do {
-                try fileOperations.moveFolder(job: job, database: database) { [weak self] job, item in
-                    let pending = (try? self?.database.pendingFolderMoveItems(jobID: job.id).count) ?? job.totalFiles
+                try await FileOperations().moveFolder(job: job, database: database) { job, item in
+                    let pending = (try? database.pendingFolderMoveItems(jobID: job.id).count) ?? job.totalFiles
                     let completed = max(0, job.totalFiles - pending)
-                    self?.blockingTask = BlockingTaskReport(
+                    await MainActor.run {
+                        self.blockingTask = BlockingTaskReport(
+                            title: "移动文件夹",
+                            phase: "复制、校验并删除源文件",
+                            currentPath: item.sourcePath,
+                            totalItems: job.totalFiles,
+                            completedItems: min(completed, job.totalFiles),
+                            message: "\(item.sourcePath) -> \(item.destinationPath)"
+                        )
+                    }
+                }
+                await MainActor.run {
+                    self.blockingTask = BlockingTaskReport(
                         title: "移动文件夹",
-                        phase: "复制、校验并删除源文件",
-                        currentPath: item.sourcePath,
+                        phase: "更新索引",
+                        currentPath: job.destinationPath,
                         totalItems: job.totalFiles,
-                        completedItems: min(completed, job.totalFiles),
-                        message: "\(item.sourcePath) -> \(item.destinationPath)"
+                        completedItems: job.totalFiles,
+                        message: "\(job.sourcePath) -> \(job.destinationPath)"
                     )
                 }
-                blockingTask = BlockingTaskReport(
-                    title: "移动文件夹",
-                    phase: "更新索引",
-                    currentPath: job.destinationPath,
-                    totalItems: job.totalFiles,
-                    completedItems: job.totalFiles,
-                    message: "\(job.sourcePath) -> \(job.destinationPath)"
-                )
                 try database.rewriteFolderMovePaths(job: job, parentID: parentID)
-                sourceDirectories = try database.sourceDirectories()
-                indexedBrowseFolders = try database.browseFolders()
-                interruptedScanPath = try database.latestInterruptedScanPath()
-                blockingTask = nil
-                refresh()
-                startStartupLibraryOrganizationIfNeeded()
+                let sourceDirectories = try database.sourceDirectories()
+                let indexedBrowseFolders = try database.browseFolders()
+                let interruptedScanPath = try database.latestInterruptedScanPath()
+                await MainActor.run {
+                    self.sourceDirectories = sourceDirectories
+                    self.indexedBrowseFolders = indexedBrowseFolders
+                    self.interruptedScanPath = interruptedScanPath
+                    self.blockingTask = nil
+                    self.refresh()
+                    self.startStartupLibraryOrganizationIfNeeded()
+                }
             } catch {
                 try? database.failFolderMoveJob(id: job.id, error: error)
-                blockingTask = nil
-                lastError = error.fullTrace
+                await MainActor.run {
+                    self.blockingTask = nil
+                    self.lastError = error.fullTrace
+                }
             }
         }
     }
