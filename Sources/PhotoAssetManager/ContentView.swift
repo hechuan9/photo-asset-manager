@@ -708,6 +708,7 @@ struct AssetDeletionConfirmationDialog: View {
             Text("将删除 \(request.assetIDs.count) 个选中资产的所有在线文件，包括原片、sidecar、导出和缓存。确认后会优先移入废纸篓；废纸篓不可用时才使用文件系统删除。")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+                .frame(minHeight: 72, alignment: .leading)
 
             HStack {
                 Spacer()
@@ -722,7 +723,7 @@ struct AssetDeletionConfirmationDialog: View {
                 .disabled(library.isBusy)
             }
         }
-        .frame(width: 460, alignment: .leading)
+        .frame(width: 520, height: 190, alignment: .leading)
         .padding(18)
     }
 }

@@ -460,6 +460,8 @@ struct SidebarUXTests {
         #expect(confirmationBody.contains("request.assetIDs.count"))
         #expect(confirmationBody.contains("Button(\"确认删除\", role: .destructive)"))
         #expect(confirmationBody.contains("优先移入废纸篓"))
+        #expect(confirmationBody.contains(".frame(minHeight: 72, alignment: .leading)"))
+        #expect(confirmationBody.contains(".frame(width: 520, height: 190, alignment: .leading)"))
 
         #expect(store.contains("func deleteAssets(_ assetIDs: [UUID])"))
         #expect(store.contains("FileOperations().deleteAssetFiles"))
