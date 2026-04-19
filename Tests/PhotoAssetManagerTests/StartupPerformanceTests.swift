@@ -119,6 +119,17 @@ struct StartupPerformanceTests {
         #expect(!scanner.contains("try database.hasUnchangedFileInstance(path: url.path, sizeBytes: size)"))
     }
 
+    @Test func rawAssetsCanRenderFromPrimaryPathWhenThumbnailIsMissing() throws {
+        let content = try sourceFile("Sources/PhotoAssetManager/ContentView.swift")
+        let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")
+
+        #expect(scanner.contains("\"3fr\""))
+        #expect(scanner.contains("\"arw\""))
+        #expect(content.contains("AssetPreviewImage("))
+        #expect(content.contains("ImageRenderer.renderableImage(url: URL(fileURLWithPath: primaryPath))"))
+        #expect(content.contains("asset.primaryPath"))
+    }
+
     @Test func availabilityRefreshUsesIndexedQueryAndGroupedWrites() throws {
         let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
 

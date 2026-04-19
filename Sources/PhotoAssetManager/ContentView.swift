@@ -624,15 +624,7 @@ struct AssetTile: View {
             ZStack {
                 Rectangle()
                     .fill(Color(nsColor: .controlBackgroundColor))
-                if let path = asset.thumbnailPath, let image = NSImage(contentsOfFile: path) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    Image(systemName: "photo")
-                        .font(.system(size: 34))
-                        .foregroundStyle(.secondary)
-                }
+                AssetPreviewImage(asset: asset, contentMode: .fill, placeholderSize: 34)
             }
             .aspectRatio(1.25, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -655,6 +647,35 @@ struct AssetTile: View {
         .padding(8)
         .background(selected ? Color.accentColor.opacity(0.12) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct AssetPreviewImage: View {
+    var asset: Asset
+    var contentMode: ContentMode
+    var placeholderSize: CGFloat
+
+    var body: some View {
+        if let image = previewImage {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: contentMode)
+        } else {
+            Image(systemName: "photo")
+                .font(.system(size: placeholderSize))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var previewImage: NSImage? {
+        if let thumbnailPath = asset.thumbnailPath,
+           let image = NSImage(contentsOfFile: thumbnailPath) {
+            return image
+        }
+        if let primaryPath = asset.primaryPath {
+            return ImageRenderer.renderableImage(url: URL(fileURLWithPath: primaryPath))
+        }
+        return nil
     }
 }
 
@@ -696,15 +717,7 @@ struct PreviewHeader: View {
             ZStack {
                 Rectangle()
                     .fill(Color(nsColor: .controlBackgroundColor))
-                if let path = asset.thumbnailPath, let image = NSImage(contentsOfFile: path) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFit()
-                } else {
-                    Image(systemName: "photo")
-                        .font(.system(size: 46))
-                        .foregroundStyle(.secondary)
-                }
+                AssetPreviewImage(asset: asset, contentMode: .fit, placeholderSize: 46)
             }
             .frame(height: 240)
             .clipShape(RoundedRectangle(cornerRadius: 8))
