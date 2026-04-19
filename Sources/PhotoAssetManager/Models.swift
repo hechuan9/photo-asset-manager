@@ -1,6 +1,6 @@
 import Foundation
 
-enum StorageKind: String, CaseIterable, Codable, Identifiable {
+enum StorageKind: String, CaseIterable, Codable, Identifiable, Sendable {
     case local
     case nas
     case externalDrive = "external_drive"
@@ -225,7 +225,7 @@ struct ImportBatch: Identifiable, Hashable {
     var status: String
 }
 
-struct SourceDirectory: Identifiable, Hashable {
+struct SourceDirectory: Identifiable, Hashable, Sendable {
     let id: UUID
     var path: String
     var storageKind: StorageKind

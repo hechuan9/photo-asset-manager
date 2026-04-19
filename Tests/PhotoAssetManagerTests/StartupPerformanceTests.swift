@@ -138,6 +138,22 @@ struct StartupPerformanceTests {
         #expect(functionBody(named: "updateFileAvailability", in: database).contains("WHERE id IN"))
     }
 
+    @Test func startupAvailabilityRefreshMountsNASRootsBeforeFileChecks() throws {
+        let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
+        let mountManager = try sourceFile("Sources/PhotoAssetManager/NASMountManager.swift")
+
+        #expect(store.contains("private let nasMountManager = NASMountManager()"))
+        #expect(functionBody(named: "startAvailabilityRefreshInBackground", in: store).contains("mountNASRootsIfNeeded"))
+        #expect(functionBody(named: "startAvailabilityRefreshInBackground", in: store).contains("挂载 NAS 来源"))
+        #expect(mountManager.contains("struct NASMountManager"))
+        #expect(mountManager.contains("func mountNASRootsIfNeeded(for sources: [SourceDirectory]) async -> NASMountReport"))
+        #expect(mountManager.contains("UserDefaults.standard.string(forKey: \"nasSMBHost\")"))
+        #expect(mountManager.contains("smb://"))
+        #expect(mountManager.contains("/usr/bin/osascript"))
+        #expect(mountManager.contains("mount volume"))
+        #expect(mountManager.contains("uniqueVolumeRoots"))
+    }
+
     private func sourceFile(_ path: String) throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile

@@ -24,6 +24,7 @@ final class LibraryStore: ObservableObject {
     private let database: SQLiteDatabase
     private let scanner: PhotoScanner
     private let fileOperations = FileOperations()
+    private let nasMountManager = NASMountManager()
     private var availabilityTask: Task<Void, Never>?
     private var startupOrganizationTask: Task<Void, Never>?
     private let assetPageSize = 600
@@ -218,11 +219,25 @@ final class LibraryStore: ObservableObject {
 
     func startAvailabilityRefreshInBackground() {
         guard availabilityTask == nil else { return }
-        backgroundTask = BackgroundTaskReport(title: "后台任务", phase: "准备校验文件状态", message: "应用可以继续使用")
+        backgroundTask = BackgroundTaskReport(title: "后台任务", phase: "挂载 NAS 来源", message: "应用可以继续使用")
         availabilityTask = Task { [weak self] in
             guard let self else { return }
             do {
                 refreshCounts()
+                let mountReport = await nasMountManager.mountNASRootsIfNeeded(for: sourceDirectories)
+                if mountReport.hasFailures {
+                    backgroundTask = BackgroundTaskReport(
+                        title: "后台任务",
+                        phase: "NAS 挂载未完成",
+                        totalItems: mountReport.checkedRootCount,
+                        completedItems: mountReport.alreadyAvailableRoots.count + mountReport.mountedRoots.count,
+                        message: "跳过文件状态校验，避免把离线 NAS 原片标记为缺失。",
+                        isFinished: true
+                    )
+                    availabilityTask = nil
+                    return
+                }
+
                 let targets = try database.availabilityCheckTargets()
                 backgroundTask = BackgroundTaskReport(
                     title: "后台任务",
