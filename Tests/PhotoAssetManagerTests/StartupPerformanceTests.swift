@@ -35,7 +35,8 @@ struct StartupPerformanceTests {
         let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
         let content = try sourceFile("Sources/PhotoAssetManager/ContentView.swift")
 
-        #expect(database.contains("func queryAssets(filter: LibraryFilter, limit: Int, offset: Int = 0) throws -> [Asset]"))
+        #expect(database.contains("func queryAssets(filter: LibraryFilter, limit: Int, offset: Int = 0, includeTrashed: Bool = false) throws -> [Asset]"))
+        #expect(functionBody(named: "queryAssets", in: database).contains("asset_trash_states"))
         #expect(database.contains("LIMIT ? OFFSET ?"))
         #expect(database.contains("WITH page AS"))
         #expect(database.contains("idx_assets_sort_time"))
@@ -380,13 +381,13 @@ struct StartupPerformanceTests {
         #expect(!functionBody(named: "trashEmptyFolderTree", in: operations).contains("removeItem"))
     }
 
-    @Test func photoDeletionPrincipleRequiresTwoStepFilesystemDeletionWithoutRm() throws {
+    @Test func photoDeletionPrincipleUsesSharedTrashWithoutFilesystemDeletion() throws {
         let readme = try sourceFile("README.md")
         let feature = try sourceFile("feature.md")
 
-        #expect(readme.contains("删除照片必须先从右键菜单发起，再在确认弹窗中确认"))
-        #expect(feature.contains("照片和文件夹物理删除必须经过两步操作"))
-        #expect(feature.contains("不能调用 rm"))
+        #expect(readme.contains("资产进入共享回收站并从默认视图隐藏，磁盘上的照片文件保持原样"))
+        #expect(feature.contains("第一版删除照片只表示资产进入共享回收站，不触碰磁盘上的照片文件"))
+        #expect(feature.contains("第一版不自动执行原片物理删除"))
     }
 
     private func sourceFile(_ path: String) throws -> String {

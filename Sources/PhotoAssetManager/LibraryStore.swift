@@ -29,6 +29,7 @@ final class LibraryStore: ObservableObject {
     private let scanner: PhotoScanner
     private let fileOperations = FileOperations()
     private let nasMountManager = NASMountManager()
+    private let syncCommandLayerFactory: () -> any SyncCommandWriting
     private var availabilityTask: Task<Void, Never>?
     private var startupOrganizationTask: Task<Void, Never>?
     private var folderSelectionTask: Task<Void, Never>?
@@ -38,14 +39,45 @@ final class LibraryStore: ObservableObject {
     private let assetPageSize = 96
     private let assetLoadAheadThreshold = 24
     private let availabilityRefreshInterval: TimeInterval = 24 * 60 * 60
+    private let syncLibraryID = "local-library"
 
-    init() {
+    convenience init() {
         do {
             let support = try Self.applicationSupport()
             let libraryDatabasePath = support.appendingPathComponent("Library.sqlite")
-            databasePath = libraryDatabasePath
-            database = try SQLiteDatabase(path: libraryDatabasePath)
-            scanner = PhotoScanner()
+            let database = try SQLiteDatabase(path: libraryDatabasePath)
+            self.init(
+                databasePath: libraryDatabasePath,
+                database: database,
+                scanner: PhotoScanner(),
+                syncCommandLayerFactory: {
+                    SyncCommandLayer(
+                        libraryID: "local-library",
+                        deviceID: SyncDeviceID(currentDeviceID()),
+                        actorID: NSUserName(),
+                        database: database
+                    )
+                },
+                performStartupWork: true
+            )
+        } catch {
+            fatalError(error.fullTrace)
+        }
+    }
+
+    init(
+        databasePath: URL,
+        database: SQLiteDatabase,
+        scanner: PhotoScanner = PhotoScanner(),
+        syncCommandLayerFactory: @escaping () -> any SyncCommandWriting,
+        performStartupWork: Bool = true
+    ) {
+        self.databasePath = databasePath
+        self.database = database
+        self.scanner = scanner
+        self.syncCommandLayerFactory = syncCommandLayerFactory
+
+        do {
             try database.markInterruptedImportBatches()
             try database.markInterruptedFolderMoveJobs()
             interruptedScanPath = try database.latestInterruptedScanPath()
@@ -53,8 +85,10 @@ final class LibraryStore: ObservableObject {
             sourceDirectories = try database.sourceDirectories()
             indexedBrowseFolders = try database.browseFolders()
             refresh()
-            resumeInterruptedFolderMoveIfNeeded()
-            startStartupLibraryOrganizationIfNeeded()
+            if performStartupWork {
+                resumeInterruptedFolderMoveIfNeeded()
+                startStartupLibraryOrganizationIfNeeded()
+            }
         } catch {
             fatalError(error.fullTrace)
         }
@@ -479,16 +513,113 @@ final class LibraryStore: ObservableObject {
 
     func setSelectedAssetRating(_ rating: Int) {
         guard !isBusy else { return }
-        guard var asset = selectedAsset else { return }
-        asset.rating = max(0, min(5, rating))
-        update(asset: asset)
+        guard let asset = selectedAsset else { return }
+        let updatedRating = max(0, min(5, rating))
+        do {
+            let commandLayer = syncCommandLayerFactory()
+            try database.updateAssetMetadataAndAppendLedger(
+                asset: updatedAsset(asset) { draft in
+                    draft.rating = updatedRating
+                },
+                libraryID: syncLibraryID,
+                deviceID: SyncDeviceID(currentDeviceID()),
+                currentWallTimeMilliseconds: Self.currentWallTimeMilliseconds()
+            ) { sequence, time in
+                commandLayer.makeRatingOperation(
+                    assetID: asset.id,
+                    rating: updatedRating,
+                    deviceSequence: sequence,
+                    time: time
+                )
+            }
+            refresh()
+        } catch {
+            lastError = error.fullTrace
+        }
     }
 
     func setSelectedAssetFlagState(_ flagState: AssetFlagState) {
         guard !isBusy else { return }
-        guard var asset = selectedAsset else { return }
-        asset.flagState = flagState
-        update(asset: asset)
+        guard let asset = selectedAsset else { return }
+        do {
+            let commandLayer = syncCommandLayerFactory()
+            try database.updateAssetMetadataAndAppendLedger(
+                asset: updatedAsset(asset) { draft in
+                    draft.flagState = flagState
+                },
+                libraryID: syncLibraryID,
+                deviceID: SyncDeviceID(currentDeviceID()),
+                currentWallTimeMilliseconds: Self.currentWallTimeMilliseconds()
+            ) { sequence, time in
+                commandLayer.makeFlagOperation(
+                    assetID: asset.id,
+                    flagState: flagState,
+                    deviceSequence: sequence,
+                    time: time
+                )
+            }
+            refresh()
+        } catch {
+            lastError = error.fullTrace
+        }
+    }
+
+    func setSelectedAssetColorLabel(_ colorLabel: AssetColorLabel?) {
+        guard !isBusy else { return }
+        guard let asset = selectedAsset else { return }
+        do {
+            let commandLayer = syncCommandLayerFactory()
+            try database.updateAssetMetadataAndAppendLedger(
+                asset: updatedAsset(asset) { draft in
+                    draft.colorLabel = colorLabel
+                },
+                libraryID: syncLibraryID,
+                deviceID: SyncDeviceID(currentDeviceID()),
+                currentWallTimeMilliseconds: Self.currentWallTimeMilliseconds()
+            ) { sequence, time in
+                commandLayer.makeColorLabelOperation(
+                    assetID: asset.id,
+                    colorLabel: colorLabel,
+                    deviceSequence: sequence,
+                    time: time
+                )
+            }
+            refresh()
+        } catch {
+            lastError = error.fullTrace
+        }
+    }
+
+    func setSelectedAssetTags(_ tags: [String]) {
+        guard !isBusy else { return }
+        guard let asset = selectedAsset else { return }
+        let normalizedTags = Self.normalizeTags(tags)
+        do {
+            let commandLayer = syncCommandLayerFactory()
+            let currentTags = Set(asset.tags)
+            let nextTags = Set(normalizedTags)
+            let add = nextTags.subtracting(currentTags)
+            let remove = currentTags.subtracting(nextTags)
+            try database.updateAssetMetadataAndAppendLedger(
+                asset: updatedAsset(asset) { draft in
+                    draft.tags = normalizedTags
+                },
+                libraryID: syncLibraryID,
+                deviceID: SyncDeviceID(currentDeviceID()),
+                currentWallTimeMilliseconds: Self.currentWallTimeMilliseconds()
+            ) { sequence, time in
+                commandLayer.makeTagsOperation(
+                    assetID: asset.id,
+                    add: add,
+                    remove: remove,
+                    deviceSequence: sequence,
+                    time: time
+                )
+            }
+            refresh()
+        } catch {
+            lastError = error.fullTrace
+        }
     }
 
     func startAvailabilityRefreshInBackground(force: Bool = false) {
@@ -966,11 +1097,42 @@ final class LibraryStore: ObservableObject {
 
     func update(asset: Asset) {
         do {
-            try database.updateAssetMetadata(asset: asset)
-            refresh()
+            try persistAssetMetadata(asset)
         } catch {
             lastError = error.fullTrace
         }
+    }
+
+    private func persistAssetMetadata(_ asset: Asset) throws {
+        try database.updateAssetMetadata(asset: asset)
+        refresh()
+    }
+
+    private func updatedAsset(_ asset: Asset, mutate: (inout Asset) -> Void) -> Asset {
+        var copy = asset
+        mutate(&copy)
+        return copy
+    }
+
+    private func persistSelectedAssetMetadata(_ mutate: (inout Asset) -> Void) throws {
+        guard var asset = selectedAsset else { return }
+        mutate(&asset)
+        try persistAssetMetadata(asset)
+    }
+
+    private static func normalizeTags(_ tags: [String]) -> [String] {
+        var seen: Set<String> = []
+        var normalized: [String] = []
+        for tag in tags {
+            let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
+            normalized.append(trimmed)
+        }
+        return normalized
+    }
+
+    private static func currentWallTimeMilliseconds() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1000)
     }
 
     func archiveSelected() {
@@ -1094,54 +1256,52 @@ final class LibraryStore: ObservableObject {
         backgroundTask = nil
         blockingTask = BlockingTaskReport(
             title: "删除照片",
-            phase: "准备删除",
+            phase: "移入共享回收站",
             totalItems: assetIDs.count,
-            message: "准备删除 \(assetIDs.count) 个资产的在线文件"
+            message: "准备为 \(assetIDs.count) 个资产记录回收站操作"
         )
         lastError = nil
 
-        let database = database
-        Task.detached(priority: .userInitiated) {
-            do {
-                let files = try database.deletableFileInstances(assetIDs: assetIDs)
-                let visibleDeletionFiles = files.filter { $0.fileRole != .thumbnail }
-                let visibleDeletionFileOffsets = Dictionary(uniqueKeysWithValues: visibleDeletionFiles.enumerated().map { ($0.element.id, $0.offset) })
-                await MainActor.run {
-                    self.blockingTask = BlockingTaskReport(
-                        title: "删除照片",
-                        phase: "移入废纸篓或文件系统删除",
-                        totalItems: visibleDeletionFiles.count,
-                        message: visibleDeletionFiles.isEmpty ? "后台清理缩略图" : "删除 \(visibleDeletionFiles.count) 个在线文件，缩略图后台清理"
-                    )
-                }
-                try await FileOperations().deleteAssetFiles(files: files, database: database) { file, index in
-                    guard file.fileRole != .thumbnail else { return }
-                    await MainActor.run {
-                        self.blockingTask = BlockingTaskReport(
-                            title: "删除照片",
-                            phase: "移入废纸篓或文件系统删除",
-                            currentPath: file.path,
-                            totalItems: visibleDeletionFiles.count,
-                            completedItems: visibleDeletionFileOffsets[file.id] ?? index,
-                            message: file.fileRole.label
-                        )
-                    }
-                }
-                let sourceDirectories = try database.sourceDirectories()
-                let indexedBrowseFolders = try database.browseFolders()
-                await MainActor.run {
-                    self.sourceDirectories = sourceDirectories
-                    self.indexedBrowseFolders = indexedBrowseFolders
-                    self.blockingTask = nil
-                    self.refresh()
-                    self.startAvailabilityRefreshInBackground()
-                }
-            } catch {
-                await MainActor.run {
-                    self.blockingTask = nil
-                    self.lastError = error.fullTrace
-                }
-            }
+        do {
+            let commandLayer = syncCommandLayerFactory()
+            try commandLayer.moveAssetsToTrash(assetIDs, reason: "deleted_from_library")
+            sourceDirectories = try database.sourceDirectories()
+            indexedBrowseFolders = try database.browseFolders()
+            blockingTask = nil
+            refresh()
+            startAvailabilityRefreshInBackground()
+        } catch {
+            blockingTask = nil
+            lastError = error.fullTrace
+        }
+    }
+
+    func restoreAssetsFromTrash(_ assetIDs: [UUID]) {
+        guard !isBusy else { return }
+        let assetIDs = Array(Set(assetIDs)).sorted { $0.uuidString < $1.uuidString }
+        guard !assetIDs.isEmpty else { return }
+        availabilityTask?.cancel()
+        availabilityTask = nil
+        backgroundTask = nil
+        blockingTask = BlockingTaskReport(
+            title: "恢复照片",
+            phase: "从共享回收站恢复",
+            totalItems: assetIDs.count,
+            message: "准备恢复 \(assetIDs.count) 个资产"
+        )
+        lastError = nil
+
+        do {
+            let commandLayer = syncCommandLayerFactory()
+            try commandLayer.restoreAssetsFromTrash(assetIDs)
+            sourceDirectories = try database.sourceDirectories()
+            indexedBrowseFolders = try database.browseFolders()
+            blockingTask = nil
+            refresh()
+            startAvailabilityRefreshInBackground()
+        } catch {
+            blockingTask = nil
+            lastError = error.fullTrace
         }
     }
 

@@ -58,12 +58,28 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
-    func queryAssets(filter: LibraryFilter, limit: Int, offset: Int = 0) throws -> [Asset] {
+    func transaction<T>(_ body: () throws -> T) throws -> T {
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            let result = try body()
+            try execute("COMMIT")
+            return result
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    func queryAssets(filter: LibraryFilter, limit: Int, offset: Int = 0, includeTrashed: Bool = false) throws -> [Asset] {
         guard limit > 0 else { return [] }
         guard offset >= 0 else { return [] }
 
         var conditions: [String] = []
         var values: [SQLiteValue] = []
+
+        if !includeTrashed {
+            conditions.append("NOT EXISTS (SELECT 1 FROM asset_trash_states ats WHERE ats.asset_id = a.id AND ats.state = 'trashed')")
+        }
 
         if !filter.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             conditions.append("(a.original_filename LIKE ? OR a.tags LIKE ? OR fi.path LIKE ?)")
@@ -228,6 +244,95 @@ final class SQLiteDatabase: @unchecked Sendable {
                 thumbnailPath: statement.optionalText(16)
             )
             return asset
+        }
+    }
+
+    func trashedAssets() throws -> [TrashedAssetRecord] {
+        try prepare(
+            """
+            SELECT asset_id, reason, changed_at_hlc, changed_by
+            FROM asset_trash_states
+            WHERE state = ?
+            ORDER BY updated_at DESC, changed_at_hlc DESC, asset_id ASC
+            """,
+            [.text(ProjectedTrashState.trashed.rawValue)]
+        ) { statement in
+            guard let assetID = UUID(uuidString: statement.text(0)) else {
+                throw DatabaseError.stepFailed("asset_trash_states.asset_id 不是 UUID：\(statement.text(0))")
+            }
+            return TrashedAssetRecord(
+                assetID: assetID,
+                reason: statement.text(1),
+                movedAt: try LedgerSQLiteCoding.decodeTime(statement.text(2)),
+                movedBy: statement.text(3)
+            )
+        }
+    }
+
+    func archiveReceipts(assetID: UUID) throws -> [ArchiveReceiptRecord] {
+        try prepare(
+            """
+            SELECT op_id, actor_id, hybrid_logical_time, payload_json
+            FROM operation_ledger
+            WHERE op_type = ?
+              AND entity_type = ?
+              AND entity_id = ?
+            ORDER BY hybrid_logical_time ASC, device_id ASC, op_id ASC
+            """,
+            [
+                .text(LedgerOperationType.originalArchiveReceiptRecorded.rawValue),
+                .text(LedgerEntityType.filePlacement.rawValue),
+                .text(assetID.uuidString)
+            ]
+        ) { statement in
+            guard let opID = UUID(uuidString: statement.text(0)) else {
+                throw DatabaseError.stepFailed("operation_ledger.op_id 不是 UUID：\(statement.text(0))")
+            }
+            let payload = try LedgerSQLiteCoding.decodePayload(statement.text(3))
+            guard case let .originalArchiveReceiptRecorded(recordedAssetID, fileObject, serverPlacement) = payload,
+                  recordedAssetID == assetID else {
+                throw DatabaseError.stepFailed("operation_ledger.payload 与 assetID 不匹配：\(assetID.uuidString)")
+            }
+            return ArchiveReceiptRecord(
+                opID: opID,
+                assetID: recordedAssetID,
+                fileObject: fileObject,
+                serverPlacement: serverPlacement,
+                movedAt: try LedgerSQLiteCoding.decodeTime(statement.text(2)),
+                movedBy: statement.text(1)
+            )
+        }
+    }
+
+    func canonicalPlacements(assetID: UUID) throws -> [FilePlacement] {
+        let receipts = try archiveReceipts(assetID: assetID)
+        guard !receipts.isEmpty else { return [] }
+
+        let fileObjectByStableKey = Dictionary(uniqueKeysWithValues: receipts.map { ($0.fileObject.stableKey, $0.fileObject) })
+        let stableKeys = Array(fileObjectByStableKey.keys).sorted()
+        let placeholders = Array(repeating: "?", count: stableKeys.count).joined(separator: ", ")
+        let values = stableKeys.map(SQLiteValue.text) + [.text(AuthorityRole.canonical.rawValue)]
+        return try prepare(
+            """
+            SELECT file_object_id, holder_id, storage_kind, authority_role, availability
+            FROM file_placements
+            WHERE file_object_id IN (\(placeholders))
+              AND authority_role = ?
+            ORDER BY holder_id ASC, storage_kind ASC, file_object_id ASC
+            """,
+            values
+        ) { statement in
+            let stableKey = statement.text(0)
+            guard let fileObject = fileObjectByStableKey[stableKey] else {
+                throw DatabaseError.stepFailed("file_placements.file_object_id 找不到对应的 ledger 记录：\(stableKey)")
+            }
+            return FilePlacement(
+                fileObjectID: fileObject,
+                holderID: statement.text(1),
+                storageKind: StorageKind(rawValue: statement.text(2)) ?? .local,
+                authorityRole: AuthorityRole(rawValue: statement.text(3)) ?? .canonical,
+                availability: Availability(rawValue: statement.text(4)) ?? .online
+            )
         }
     }
 
@@ -1318,6 +1423,545 @@ final class SQLiteDatabase: @unchecked Sendable {
         )
     }
 
+    func tableExists(_ tableName: String) throws -> Bool {
+        let rows = try prepare(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = ?
+            LIMIT 1
+            """,
+            [.text(tableName)]
+        ) { statement in
+            statement.text(0)
+        }
+        return !rows.isEmpty
+    }
+
+    func appendLedgerEntry(_ entry: OperationLedgerEntry, uploadStatus: LedgerUploadStatus) throws {
+        try transaction {
+            if let existing = try ledgerEntry(opID: entry.opID) {
+                guard Self.isSameLedgerPayload(existing, entry) else {
+                    throw DatabaseError.stepFailed("operation_ledger.op_id 冲突：\(entry.opID.uuidString)")
+                }
+                if uploadStatus == .pending {
+                    try execute(
+                        "UPDATE operation_ledger SET upload_status = ? WHERE op_id = ?",
+                        [.text(uploadStatus.rawValue), .text(entry.opID.uuidString)]
+                    )
+                    try execute(
+                        """
+                        INSERT OR IGNORE INTO sync_upload_queue (op_id, status, attempt_count, last_error, updated_at)
+                        VALUES (?, ?, 0, '', ?)
+                        """,
+                        [.text(entry.opID.uuidString), .text(LedgerUploadStatus.pending.rawValue), .text(DateCoding.encode(Date()))]
+                    )
+                } else {
+                    try execute(
+                        "UPDATE operation_ledger SET upload_status = ? WHERE op_id = ?",
+                        [.text(uploadStatus.rawValue), .text(entry.opID.uuidString)]
+                    )
+                    try execute("DELETE FROM sync_upload_queue WHERE op_id = ?", [.text(entry.opID.uuidString)])
+                }
+                return
+            }
+            try appendLedgerEntryBody(entry, uploadStatus: uploadStatus)
+        }
+    }
+
+    func recordLedgerOperation(
+        libraryID: String,
+        deviceID: SyncDeviceID,
+        currentWallTimeMilliseconds: Int64,
+        uploadStatus: LedgerUploadStatus,
+        buildEntry: (Int64, HybridLogicalTime) throws -> OperationLedgerEntry
+    ) throws {
+        try transaction {
+            let clock = try reserveLedgerClock(
+                libraryID: libraryID,
+                deviceID: deviceID,
+                currentWallTimeMilliseconds: currentWallTimeMilliseconds
+            )
+            let entry = try buildEntry(clock.deviceSequence, clock.hybridLogicalTime)
+            try appendLedgerEntryBody(entry, uploadStatus: uploadStatus)
+        }
+    }
+
+    func recordLedgerOperations(
+        libraryID: String,
+        deviceID: SyncDeviceID,
+        currentWallTimeMilliseconds: Int64,
+        uploadStatus: LedgerUploadStatus,
+        buildEntries: (Int64, HybridLogicalTime) throws -> [OperationLedgerEntry]
+    ) throws {
+        try transaction {
+            let clock = try reserveLedgerClock(
+                libraryID: libraryID,
+                deviceID: deviceID,
+                currentWallTimeMilliseconds: currentWallTimeMilliseconds
+            )
+            let entries = try buildEntries(clock.deviceSequence, clock.hybridLogicalTime)
+            for entry in entries {
+                try appendLedgerEntryBody(entry, uploadStatus: uploadStatus)
+            }
+        }
+    }
+
+    func updateAssetMetadataAndAppendLedger(
+        asset: Asset,
+        libraryID: String,
+        deviceID: SyncDeviceID,
+        currentWallTimeMilliseconds: Int64,
+        uploadStatus: LedgerUploadStatus = .pending,
+        buildEntry: (Int64, HybridLogicalTime) throws -> OperationLedgerEntry,
+        appendEntry: ((OperationLedgerEntry, LedgerUploadStatus) throws -> Void)? = nil
+    ) throws {
+        try transaction {
+            try updateAssetMetadata(asset: asset)
+            let clock = try reserveLedgerClock(
+                libraryID: libraryID,
+                deviceID: deviceID,
+                currentWallTimeMilliseconds: currentWallTimeMilliseconds
+            )
+            let entry = try buildEntry(clock.deviceSequence, clock.hybridLogicalTime)
+            if let appendEntry {
+                try appendEntry(entry, uploadStatus)
+            } else {
+                try appendLedgerEntryBody(entry, uploadStatus: uploadStatus)
+            }
+        }
+    }
+
+    func ledgerEntries(libraryID: String) throws -> [OperationLedgerEntry] {
+        try prepare(
+            """
+            SELECT op_id, library_id, device_id, device_seq, hybrid_logical_time,
+                   actor_id, entity_type, entity_id, op_type, payload_json,
+                   base_version, created_at
+            FROM operation_ledger
+            WHERE library_id = ?
+            ORDER BY hybrid_logical_time ASC, device_id ASC, op_id ASC
+            """,
+            [.text(libraryID)]
+        ) { statement in
+            guard let opID = UUID(uuidString: statement.text(0)) else {
+                throw DatabaseError.stepFailed("operation_ledger.op_id 不是 UUID：\(statement.text(0))")
+            }
+            let entityTypeRaw = statement.text(6)
+            guard let entityType = LedgerEntityType(rawValue: entityTypeRaw) else {
+                throw DatabaseError.stepFailed("operation_ledger.entity_type 无效：\(entityTypeRaw)")
+            }
+            let opTypeRaw = statement.text(8)
+            guard let opType = LedgerOperationType(rawValue: opTypeRaw) else {
+                throw DatabaseError.stepFailed("operation_ledger.op_type 无效：\(opTypeRaw)")
+            }
+            let createdAtRaw = statement.text(11)
+            guard let createdAt = DateCoding.decode(createdAtRaw) else {
+                throw DatabaseError.stepFailed("operation_ledger.created_at 无效：\(createdAtRaw)")
+            }
+            return OperationLedgerEntry(
+                opID: opID,
+                libraryID: statement.text(1),
+                deviceID: SyncDeviceID(statement.text(2)),
+                deviceSequence: statement.int64(3),
+                hybridLogicalTime: try LedgerSQLiteCoding.decodeTime(statement.text(4)),
+                actorID: statement.text(5),
+                entityType: entityType,
+                entityID: statement.text(7),
+                opType: opType,
+                payload: try LedgerSQLiteCoding.decodePayload(statement.text(9)),
+                baseVersion: statement.optionalText(10),
+                createdAt: createdAt
+            )
+        }
+    }
+
+    func pendingLedgerUploadEntries(libraryID: String) throws -> [OperationLedgerEntry] {
+        try prepare(
+            """
+            SELECT ol.op_id, ol.library_id, ol.device_id, ol.device_seq, ol.hybrid_logical_time,
+                   ol.actor_id, ol.entity_type, ol.entity_id, ol.op_type, ol.payload_json,
+                   ol.base_version, ol.created_at
+            FROM sync_upload_queue q
+            JOIN operation_ledger ol ON ol.op_id = q.op_id
+            WHERE q.status = ?
+              AND ol.library_id = ?
+            ORDER BY ol.hybrid_logical_time ASC, ol.device_id ASC, ol.op_id ASC
+            """,
+            [.text(LedgerUploadStatus.pending.rawValue), .text(libraryID)]
+        ) { statement in
+            try decodeLedgerEntry(statement)
+        }
+    }
+
+    func claimPendingLedgerUploadEntries(libraryID: String) throws -> [OperationLedgerEntry] {
+        try recoverStaleLedgerUploads(olderThan: Date().addingTimeInterval(-Self.ledgerUploadClaimLeaseDuration))
+        return try transaction {
+            let pendingEntries = try prepare(
+                """
+                SELECT ol.op_id, ol.library_id, ol.device_id, ol.device_seq, ol.hybrid_logical_time,
+                       ol.actor_id, ol.entity_type, ol.entity_id, ol.op_type, ol.payload_json,
+                       ol.base_version, ol.created_at
+                FROM sync_upload_queue q
+                JOIN operation_ledger ol ON ol.op_id = q.op_id
+                WHERE q.status = ?
+                  AND ol.library_id = ?
+                ORDER BY ol.hybrid_logical_time ASC, ol.device_id ASC, ol.op_id ASC
+                """,
+                [.text(LedgerUploadStatus.pending.rawValue), .text(libraryID)]
+            ) { statement in
+                try decodeLedgerEntry(statement)
+            }
+            guard !pendingEntries.isEmpty else { return [] }
+
+            let ids = pendingEntries.map(\.opID)
+            let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ", ")
+            let values = ids.map { SQLiteValue.text($0.uuidString) }
+            let now = DateCoding.encode(Date())
+
+            try execute(
+                "UPDATE sync_upload_queue SET status = ?, updated_at = ? WHERE status = ? AND op_id IN (\(placeholders))",
+                [.text(LedgerUploadStatus.uploading.rawValue), .text(now), .text(LedgerUploadStatus.pending.rawValue)] + values
+            )
+            try execute(
+                "UPDATE operation_ledger SET upload_status = ? WHERE op_id IN (\(placeholders))",
+                [.text(LedgerUploadStatus.uploading.rawValue)] + values
+            )
+            return pendingEntries
+        }
+    }
+
+    func recoverStaleLedgerUploads(olderThan cutoff: Date) throws {
+        let cutoffValue = DateCoding.encode(cutoff)
+        try transaction {
+            let staleIDs = try prepare(
+                """
+                SELECT op_id
+                FROM sync_upload_queue
+                WHERE status = ?
+                  AND updated_at < ?
+                ORDER BY op_id ASC
+                """,
+                [.text(LedgerUploadStatus.uploading.rawValue), .text(cutoffValue)]
+            ) { statement in
+                statement.text(0)
+            }
+            guard !staleIDs.isEmpty else { return }
+
+            let placeholders = Array(repeating: "?", count: staleIDs.count).joined(separator: ", ")
+            let values = staleIDs.map { SQLiteValue.text($0) }
+            let now = DateCoding.encode(Date())
+            try execute(
+                "UPDATE sync_upload_queue SET status = ?, updated_at = ? WHERE op_id IN (\(placeholders))",
+                [.text(LedgerUploadStatus.pending.rawValue), .text(now)] + values
+            )
+            try execute(
+                "UPDATE operation_ledger SET upload_status = ? WHERE op_id IN (\(placeholders))",
+                [.text(LedgerUploadStatus.pending.rawValue)] + values
+            )
+        }
+    }
+
+    func pendingLedgerUploadCount() throws -> Int {
+        let rows = try prepare(
+            "SELECT COUNT(*) FROM sync_upload_queue WHERE status = ?",
+            [.text(LedgerUploadStatus.pending.rawValue)]
+        ) { statement in
+            Int(statement.int(0))
+        }
+        return rows.first ?? 0
+    }
+
+    func ledgerUploadStatus(opID: UUID) throws -> LedgerUploadStatus? {
+        let rows = try prepare(
+            "SELECT upload_status FROM operation_ledger WHERE op_id = ? LIMIT 1",
+            [.text(opID.uuidString)]
+        ) { statement -> LedgerUploadStatus? in
+            guard let rawValue = statement.optionalText(0) else { return nil }
+            guard let status = LedgerUploadStatus(rawValue: rawValue) else {
+                throw DatabaseError.stepFailed("operation_ledger.upload_status 无效：\(rawValue)")
+            }
+            return status
+        }
+        return rows.first ?? nil
+    }
+
+    func ledgerEntry(opID: UUID) throws -> OperationLedgerEntry? {
+        let rows = try prepare(
+            """
+            SELECT op_id, library_id, device_id, device_seq, hybrid_logical_time,
+                   actor_id, entity_type, entity_id, op_type, payload_json,
+                   base_version, created_at
+            FROM operation_ledger
+            WHERE op_id = ?
+            LIMIT 1
+            """,
+            [.text(opID.uuidString)]
+        ) { statement in
+            try decodeLedgerEntry(statement)
+        }
+        return rows.first
+    }
+
+    func markLedgerEntriesAcknowledged(_ opIDs: [UUID]) throws {
+        let ids = Array(Set(opIDs)).sorted { $0.uuidString < $1.uuidString }
+        guard !ids.isEmpty else { return }
+        try transaction {
+            let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ", ")
+            let values = ids.map { SQLiteValue.text($0.uuidString) }
+            try execute(
+                "UPDATE operation_ledger SET upload_status = ? WHERE op_id IN (\(placeholders))",
+                [.text(LedgerUploadStatus.acknowledged.rawValue)] + values
+            )
+            try execute(
+                "DELETE FROM sync_upload_queue WHERE op_id IN (\(placeholders))",
+                values
+            )
+        }
+    }
+
+    func restoreClaimedLedgerUploadEntries(_ opIDs: [UUID], lastError: String) throws {
+        let ids = Array(Set(opIDs)).sorted { $0.uuidString < $1.uuidString }
+        guard !ids.isEmpty else { return }
+        try transaction {
+            let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ", ")
+            let values = ids.map { SQLiteValue.text($0.uuidString) }
+            let now = DateCoding.encode(Date())
+            try execute(
+                """
+                UPDATE sync_upload_queue
+                SET status = ?, attempt_count = attempt_count + 1, last_error = ?, updated_at = ?
+                WHERE status = ? AND op_id IN (\(placeholders))
+                """,
+                [.text(LedgerUploadStatus.pending.rawValue), .text(lastError), .text(now), .text(LedgerUploadStatus.uploading.rawValue)] + values
+            )
+            try execute(
+                "UPDATE operation_ledger SET upload_status = ? WHERE op_id IN (\(placeholders))",
+                [.text(LedgerUploadStatus.pending.rawValue)] + values
+            )
+        }
+    }
+
+    func syncCursor(peerID: String) throws -> String? {
+        let rows = try prepare(
+            "SELECT cursor FROM sync_cursors WHERE peer_id = ? LIMIT 1",
+            [.text(peerID)]
+        ) { statement in
+            statement.optionalText(0)
+        }
+        return rows.first ?? nil
+    }
+
+    func setSyncCursor(peerID: String, cursor: String) throws {
+        try execute(
+            """
+            INSERT INTO sync_cursors (peer_id, cursor, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(peer_id) DO UPDATE SET
+                cursor = excluded.cursor,
+                updated_at = excluded.updated_at
+            """,
+            [
+                .text(peerID),
+                .text(cursor),
+                .text(DateCoding.encode(Date()))
+            ]
+        )
+    }
+
+    func appendAcknowledgedRemoteLedgerPage(_ entries: [OperationLedgerEntry], peerID: String, cursor: String) throws {
+        try transaction {
+            for entry in entries {
+                if let existing = try ledgerEntry(opID: entry.opID) {
+                    guard Self.isSameLedgerPayload(existing, entry) else {
+                        throw DatabaseError.stepFailed("operation_ledger.op_id 冲突：\(entry.opID.uuidString)")
+                    }
+                    try execute(
+                        "UPDATE operation_ledger SET upload_status = ? WHERE op_id = ?",
+                        [.text(LedgerUploadStatus.acknowledged.rawValue), .text(entry.opID.uuidString)]
+                    )
+                    try execute("DELETE FROM sync_upload_queue WHERE op_id = ?", [.text(entry.opID.uuidString)])
+                    continue
+                }
+                try appendLedgerEntryBody(entry, uploadStatus: .acknowledged)
+            }
+            try setSyncCursor(peerID: peerID, cursor: cursor)
+        }
+    }
+
+    private static func isSameLedgerPayload(_ lhs: OperationLedgerEntry, _ rhs: OperationLedgerEntry) -> Bool {
+        lhs.opID == rhs.opID &&
+        lhs.libraryID == rhs.libraryID &&
+        lhs.deviceID == rhs.deviceID &&
+        lhs.deviceSequence == rhs.deviceSequence &&
+        lhs.hybridLogicalTime == rhs.hybridLogicalTime &&
+        lhs.actorID == rhs.actorID &&
+        lhs.entityType == rhs.entityType &&
+        lhs.entityID == rhs.entityID &&
+        lhs.opType == rhs.opType &&
+        lhs.payload == rhs.payload &&
+        lhs.baseVersion == rhs.baseVersion
+    }
+
+    private func decodeLedgerEntry(_ statement: SQLiteStatement) throws -> OperationLedgerEntry {
+        guard let opID = UUID(uuidString: statement.text(0)) else {
+            throw DatabaseError.stepFailed("operation_ledger.op_id 不是 UUID：\(statement.text(0))")
+        }
+        let entityTypeRaw = statement.text(6)
+        guard let entityType = LedgerEntityType(rawValue: entityTypeRaw) else {
+            throw DatabaseError.stepFailed("operation_ledger.entity_type 无效：\(entityTypeRaw)")
+        }
+        let opTypeRaw = statement.text(8)
+        guard let opType = LedgerOperationType(rawValue: opTypeRaw) else {
+            throw DatabaseError.stepFailed("operation_ledger.op_type 无效：\(opTypeRaw)")
+        }
+        let createdAtRaw = statement.text(11)
+        guard let createdAt = DateCoding.decode(createdAtRaw) else {
+            throw DatabaseError.stepFailed("operation_ledger.created_at 无效：\(createdAtRaw)")
+        }
+        return OperationLedgerEntry(
+            opID: opID,
+            libraryID: statement.text(1),
+            deviceID: SyncDeviceID(statement.text(2)),
+            deviceSequence: statement.int64(3),
+            hybridLogicalTime: try LedgerSQLiteCoding.decodeTime(statement.text(4)),
+            actorID: statement.text(5),
+            entityType: entityType,
+            entityID: statement.text(7),
+            opType: opType,
+            payload: try LedgerSQLiteCoding.decodePayload(statement.text(9)),
+            baseVersion: statement.optionalText(10),
+            createdAt: createdAt
+        )
+    }
+
+    func nextLedgerDeviceSequence(libraryID: String, deviceID: SyncDeviceID) throws -> Int64 {
+        let rows = try prepare(
+            """
+            SELECT COALESCE(MAX(device_seq), 0) + 1
+            FROM operation_ledger
+            WHERE library_id = ?
+              AND device_id = ?
+            """,
+            [.text(libraryID), .text(deviceID.rawValue)]
+        ) { statement in
+            statement.int64(0)
+        }
+        return rows.first ?? 1
+    }
+
+    private func appendLedgerEntryBody(_ entry: OperationLedgerEntry, uploadStatus: LedgerUploadStatus) throws {
+        let payloadJSON = try LedgerSQLiteCoding.encodePayload(entry.payload)
+        let now = DateCoding.encode(Date())
+        try execute(
+            """
+            INSERT INTO operation_ledger (
+                op_id, library_id, device_id, device_seq, hybrid_logical_time,
+                actor_id, entity_type, entity_id, op_type, payload_json,
+                base_version, created_at, upload_status, remote_cursor
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            [
+                .text(entry.opID.uuidString),
+                .text(entry.libraryID),
+                .text(entry.deviceID.rawValue),
+                .int(entry.deviceSequence),
+                .text(LedgerSQLiteCoding.encodeTime(entry.hybridLogicalTime)),
+                .text(entry.actorID),
+                .text(entry.entityType.rawValue),
+                .text(entry.entityID),
+                .text(entry.opType.rawValue),
+                .text(payloadJSON),
+                .nullableText(entry.baseVersion),
+                .text(DateCoding.encode(entry.createdAt)),
+                .text(uploadStatus.rawValue)
+            ]
+        )
+        if uploadStatus == .pending {
+            try execute(
+                """
+                INSERT OR IGNORE INTO sync_upload_queue (op_id, status, attempt_count, last_error, updated_at)
+                VALUES (?, ?, 0, '', ?)
+                """,
+                [.text(entry.opID.uuidString), .text(LedgerUploadStatus.pending.rawValue), .text(now)]
+            )
+        } else {
+            try execute(
+                "UPDATE operation_ledger SET upload_status = ? WHERE op_id = ?",
+                [.text(uploadStatus.rawValue), .text(entry.opID.uuidString)]
+            )
+            try execute("DELETE FROM sync_upload_queue WHERE op_id = ?", [.text(entry.opID.uuidString)])
+        }
+        try applyLedgerSideTables(entry)
+        try recordLedgerClockState(libraryID: entry.libraryID, deviceID: entry.deviceID, time: entry.hybridLogicalTime)
+    }
+
+    private func reserveLedgerClock(
+        libraryID: String,
+        deviceID: SyncDeviceID,
+        currentWallTimeMilliseconds: Int64
+    ) throws -> (deviceSequence: Int64, hybridLogicalTime: HybridLogicalTime) {
+        let sequence = try nextLedgerDeviceSequence(libraryID: libraryID, deviceID: deviceID)
+        let last = try fetchLedgerClockState(libraryID: libraryID, deviceID: deviceID)
+        let wallTime = max(currentWallTimeMilliseconds, last.wallTimeMilliseconds)
+        let counter: Int64 = currentWallTimeMilliseconds <= last.wallTimeMilliseconds ? last.counter + 1 : 0
+        let time = HybridLogicalTime(wallTimeMilliseconds: wallTime, counter: counter, nodeID: deviceID.rawValue)
+        try recordLedgerClockState(libraryID: libraryID, deviceID: deviceID, time: time)
+        return (sequence, time)
+    }
+
+    private func fetchLedgerClockState(libraryID: String, deviceID: SyncDeviceID) throws -> HybridLogicalTime {
+        let rows = try prepare(
+            """
+            SELECT last_wall_time_ms, last_counter
+            FROM sync_hlc_state
+            WHERE library_id = ? AND device_id = ?
+            """,
+            [.text(libraryID), .text(deviceID.rawValue)]
+        ) { statement in
+            HybridLogicalTime(
+                wallTimeMilliseconds: statement.int64(0),
+                counter: statement.int64(1),
+                nodeID: deviceID.rawValue
+            )
+        }
+        return rows.first ?? HybridLogicalTime(wallTimeMilliseconds: 0, counter: 0, nodeID: deviceID.rawValue)
+    }
+
+    private func recordLedgerClockState(
+        libraryID: String,
+        deviceID: SyncDeviceID,
+        time: HybridLogicalTime
+    ) throws {
+        let now = DateCoding.encode(Date())
+        try execute(
+            """
+            INSERT INTO sync_hlc_state (
+                library_id, device_id, last_wall_time_ms, last_counter, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(library_id, device_id) DO UPDATE SET
+                last_wall_time_ms = CASE
+                    WHEN excluded.last_wall_time_ms > sync_hlc_state.last_wall_time_ms THEN excluded.last_wall_time_ms
+                    ELSE sync_hlc_state.last_wall_time_ms
+                END,
+                last_counter = CASE
+                    WHEN excluded.last_wall_time_ms > sync_hlc_state.last_wall_time_ms THEN excluded.last_counter
+                    WHEN excluded.last_wall_time_ms = sync_hlc_state.last_wall_time_ms AND excluded.last_counter > sync_hlc_state.last_counter THEN excluded.last_counter
+                    ELSE sync_hlc_state.last_counter
+                END,
+                updated_at = excluded.updated_at
+            """,
+            [
+                .text(libraryID),
+                .text(deviceID.rawValue),
+                .int(time.wallTimeMilliseconds),
+                .int(time.counter),
+                .text(now)
+            ]
+        )
+    }
+
     func updateAssetMetadata(asset: Asset) throws {
         try execute(
             """
@@ -1333,6 +1977,102 @@ final class SQLiteDatabase: @unchecked Sendable {
                 .text(encodeTags(asset.tags)),
                 .text(DateCoding.encode(Date())),
                 .text(asset.id.uuidString)
+            ]
+        )
+    }
+
+    private func applyLedgerSideTables(_ entry: OperationLedgerEntry) throws {
+        let now = DateCoding.encode(Date())
+        switch entry.payload {
+        case let .moveToTrash(assetID, reason):
+            try execute(
+                """
+                INSERT INTO asset_trash_states (
+                    asset_id, state, reason, changed_by, changed_at_hlc, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(asset_id) DO UPDATE SET
+                    state = excluded.state,
+                    reason = excluded.reason,
+                    changed_by = excluded.changed_by,
+                    changed_at_hlc = excluded.changed_at_hlc,
+                    updated_at = excluded.updated_at
+                """,
+                [
+                    .text(assetID.uuidString),
+                    .text(ProjectedTrashState.trashed.rawValue),
+                    .text(reason),
+                    .text(entry.actorID),
+                    .text(LedgerSQLiteCoding.encodeTime(entry.hybridLogicalTime)),
+                    .text(now)
+                ]
+            )
+        case let .restoreFromTrash(assetID):
+            try execute(
+                """
+                INSERT INTO asset_trash_states (
+                    asset_id, state, reason, changed_by, changed_at_hlc, updated_at
+                ) VALUES (?, ?, '', ?, ?, ?)
+                ON CONFLICT(asset_id) DO UPDATE SET
+                    state = excluded.state,
+                    reason = excluded.reason,
+                    changed_by = excluded.changed_by,
+                    changed_at_hlc = excluded.changed_at_hlc,
+                    updated_at = excluded.updated_at
+                """,
+                [
+                    .text(assetID.uuidString),
+                    .text(ProjectedTrashState.active.rawValue),
+                    .text(entry.actorID),
+                    .text(LedgerSQLiteCoding.encodeTime(entry.hybridLogicalTime)),
+                    .text(now)
+                ]
+            )
+        case let .importedOriginalDeclared(_, fileObject, placement):
+            try upsertFileObject(fileObject, now: now)
+            try upsertFilePlacement(placement, now: now)
+        case let .originalArchiveReceiptRecorded(_, fileObject, serverPlacement):
+            try upsertFileObject(fileObject, now: now)
+            try upsertFilePlacement(serverPlacement, now: now)
+        case .metadataSet, .tagsUpdated, .archiveRequested:
+            break
+        }
+    }
+
+    private static let ledgerUploadClaimLeaseDuration: TimeInterval = 5 * 60
+
+    private func upsertFileObject(_ fileObject: FileObjectID, now: String) throws {
+        try execute(
+            """
+            INSERT OR IGNORE INTO file_objects (id, content_hash, size_bytes, file_role, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                .text(fileObject.stableKey),
+                .text(fileObject.contentHash),
+                .int(fileObject.sizeBytes),
+                .text(fileObject.role.rawValue),
+                .text(now)
+            ]
+        )
+    }
+
+    private func upsertFilePlacement(_ placement: FilePlacement, now: String) throws {
+        try execute(
+            """
+            INSERT INTO file_placements (
+                file_object_id, holder_id, storage_kind, authority_role, availability, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(file_object_id, holder_id, storage_kind, authority_role) DO UPDATE SET
+                availability = excluded.availability,
+                updated_at = excluded.updated_at
+            """,
+            [
+                .text(placement.fileObjectID.stableKey),
+                .text(placement.holderID),
+                .text(placement.storageKind.rawValue),
+                .text(placement.authorityRole.rawValue),
+                .text(placement.availability.rawValue),
+                .text(now)
             ]
         )
     }
@@ -1570,6 +2310,73 @@ final class SQLiteDatabase: @unchecked Sendable {
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS operation_ledger (
+                op_id TEXT PRIMARY KEY,
+                library_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                device_seq INTEGER NOT NULL,
+                hybrid_logical_time TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                op_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                base_version TEXT,
+                created_at TEXT NOT NULL,
+                upload_status TEXT NOT NULL DEFAULT 'pending',
+                remote_cursor TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS sync_cursors (
+                peer_id TEXT PRIMARY KEY,
+                cursor TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sync_hlc_state (
+                library_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                last_wall_time_ms INTEGER NOT NULL,
+                last_counter INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(library_id, device_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS sync_upload_queue (
+                op_id TEXT PRIMARY KEY REFERENCES operation_ledger(op_id) ON DELETE CASCADE,
+                status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS file_objects (
+                id TEXT PRIMARY KEY,
+                content_hash TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                file_role TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS file_placements (
+                file_object_id TEXT NOT NULL REFERENCES file_objects(id) ON DELETE CASCADE,
+                holder_id TEXT NOT NULL,
+                storage_kind TEXT NOT NULL,
+                authority_role TEXT NOT NULL,
+                availability TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(file_object_id, holder_id, storage_kind, authority_role)
+            );
+
+            CREATE TABLE IF NOT EXISTS asset_trash_states (
+                asset_id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                changed_by TEXT NOT NULL,
+                changed_at_hlc TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -1631,6 +2438,10 @@ final class SQLiteDatabase: @unchecked Sendable {
             CREATE INDEX IF NOT EXISTS idx_browse_file_instances_file ON browse_file_instances(file_instance_id);
             CREATE INDEX IF NOT EXISTS idx_folder_move_jobs_status ON folder_move_jobs(status, created_at);
             CREATE INDEX IF NOT EXISTS idx_folder_move_items_job_status ON folder_move_items(job_id, status);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_ledger_device_seq ON operation_ledger(library_id, device_id, device_seq);
+            CREATE INDEX IF NOT EXISTS idx_operation_ledger_entity ON operation_ledger(entity_type, entity_id, hybrid_logical_time);
+            CREATE INDEX IF NOT EXISTS idx_operation_ledger_upload ON operation_ledger(upload_status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_file_placements_holder ON file_placements(holder_id, availability);
             """
         )
 
@@ -2012,6 +2823,52 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
         guard !columns.contains(column) else { return }
         try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)", [])
+    }
+}
+
+private enum LedgerSQLiteCoding {
+    private static func makeEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }
+
+    private static func makeDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+
+    static func encodePayload(_ payload: OperationPayload) throws -> String {
+        let data = try makeEncoder().encode(payload)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw DatabaseError.bindFailed("ledger payload 不能编码为 UTF-8")
+        }
+        return json
+    }
+
+    static func decodePayload(_ json: String) throws -> OperationPayload {
+        guard let data = json.data(using: .utf8) else {
+            throw DatabaseError.stepFailed("ledger payload 不是 UTF-8")
+        }
+        return try makeDecoder().decode(OperationPayload.self, from: data)
+    }
+
+    static func encodeTime(_ time: HybridLogicalTime) -> String {
+        let wall = String(format: "%020lld", time.wallTimeMilliseconds)
+        let counter = String(format: "%020lld", time.counter)
+        return "\(wall):\(counter):\(time.nodeID)"
+    }
+
+    static func decodeTime(_ value: String) throws -> HybridLogicalTime {
+        let parts = value.split(separator: ":", maxSplits: 2).map(String.init)
+        guard parts.count == 3,
+              let wallTime = Int64(parts[0]),
+              let counter = Int64(parts[1]) else {
+            throw DatabaseError.stepFailed("operation_ledger.hybrid_logical_time 无效：\(value)")
+        }
+        return HybridLogicalTime(wallTimeMilliseconds: wallTime, counter: counter, nodeID: parts[2])
     }
 }
 

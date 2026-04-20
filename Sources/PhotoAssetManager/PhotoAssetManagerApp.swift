@@ -92,6 +92,13 @@ struct AssetSelectionCommands: Commands {
             }
             .keyboardShortcut("u", modifiers: [])
             .disabled(library.selectedAsset == nil || library.isBusy)
+
+            Divider()
+
+            Button("从回收站恢复") {
+                library.restoreAssetsFromTrash(Array(library.selectedAssetIDs))
+            }
+            .disabled(library.selectedAssetIDs.isEmpty || library.isBusy)
         }
     }
 }

@@ -15,7 +15,7 @@ enum FileOperationError: LocalizedError {
     case noDeletableFiles
     case folderContainsFiles(URL)
     case unsupportedFolderDeletion(URL)
-    case assetFileDeletionFailed(URL, trashError: String, deleteError: String)
+    case assetFileDeletionFailed(URL, trashError: String)
 
     var errorDescription: String? {
         switch self {
@@ -32,15 +32,14 @@ enum FileOperationError: LocalizedError {
         case .noDeletableFiles: "没有可删除的在线照片文件。"
         case .folderContainsFiles(let url): "文件夹内仍有文件，已阻止彻底删除：\(url.path)"
         case .unsupportedFolderDeletion(let url): "这个文件夹类型不支持物理删除：\(url.path)"
-        case .assetFileDeletionFailed(let url, let trashError, let deleteError):
-            "删除文件失败：\(url.path)\n废纸篓失败：\(trashError)\n文件系统删除失败：\(deleteError)"
+        case .assetFileDeletionFailed(let url, let trashError):
+            "删除文件失败：\(url.path)\n废纸篓失败：\(trashError)"
         }
     }
 }
 
 enum AssetFileDeletionMethod: String, Sendable {
     case trash
-    case filesystemDelete = "filesystem_delete"
 }
 
 struct FileOperations: Sendable {
@@ -272,12 +271,7 @@ struct FileOperations: Sendable {
             return .trash
         } catch {
             let trashTrace = error.fullTrace
-            do {
-                try fileManager.removeItem(at: url)
-                return .filesystemDelete
-            } catch {
-                throw FileOperationError.assetFileDeletionFailed(url, trashError: trashTrace, deleteError: error.fullTrace)
-            }
+            throw FileOperationError.assetFileDeletionFailed(url, trashError: trashTrace)
         }
     }
 

@@ -468,8 +468,8 @@ struct SidebarUXTests {
     @Test func selectedAssetsCanBeDraggedToFolderAfterConfirmation() throws {
         let content = try contentViewSource()
         let store = try libraryStoreSource()
-        let operations = try sourceFile("Sources/PhotoAssetManager/FileOperations.swift")
         let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+        let operations = try sourceFile("Sources/PhotoAssetManager/FileOperations.swift")
         let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
 
         #expect(models.contains("struct AssetFileMoveRequest"))
@@ -506,8 +506,10 @@ struct SidebarUXTests {
     @Test func selectedAssetsCanBeDeletedFromContextMenuAfterConfirmation() throws {
         let content = try contentViewSource()
         let store = try libraryStoreSource()
+        let app = try appSource()
         let operations = try sourceFile("Sources/PhotoAssetManager/FileOperations.swift")
         let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+        let ledger = try sourceFile("Sources/PhotoAssetManager/SyncLedger.swift")
 
         #expect(content.contains("@State private var pendingAssetDeletionRequest: AssetDeletionRequest?"))
         #expect(content.contains("AssetDeletionConfirmationDialog("))
@@ -516,35 +518,54 @@ struct SidebarUXTests {
         #expect(content.contains("override func rightMouseDown"))
         #expect(content.contains("NSMenuItem(title: \"删除照片\""))
         #expect(content.contains("library.deleteAssets(request.assetIDs)"))
+        #expect(app.contains("Button(\"从回收站恢复\")"))
+        #expect(app.contains("library.restoreAssetsFromTrash(Array(library.selectedAssetIDs))"))
 
         let confirmationBody = structBody(named: "AssetDeletionConfirmationDialog", in: content)
         #expect(confirmationBody.contains("Text(\"删除选中照片？\")"))
         #expect(confirmationBody.contains("request.assetIDs.count"))
         #expect(confirmationBody.contains("Button(\"确认删除\", role: .destructive)"))
-        #expect(confirmationBody.contains("优先移入废纸篓"))
+        #expect(confirmationBody.contains("移入共享回收站"))
+        #expect(confirmationBody.contains("不会被删除、移动或覆盖"))
         #expect(confirmationBody.contains(".frame(minHeight: 72, alignment: .leading)"))
         #expect(confirmationBody.contains(".frame(width: 520, height: 190, alignment: .leading)"))
 
         #expect(store.contains("func deleteAssets(_ assetIDs: [UUID])"))
-        #expect(store.contains("FileOperations().deleteAssetFiles"))
-        #expect(store.contains("try database.deletableFileInstances(assetIDs: assetIDs)"))
+        #expect(store.contains("func restoreAssetsFromTrash(_ assetIDs: [UUID])"))
+        #expect(store.contains("moveAssetsToTrash(assetIDs, reason: \"deleted_from_library\")"))
+        #expect(store.contains("restoreAssetsFromTrash(assetIDs)"))
+        #expect(!store.contains("FileOperations().deleteAssetFiles"))
+        #expect(!store.contains("try database.deletableFileInstances(assetIDs: assetIDs)"))
         let deleteAssetsBody = functionBody(named: "deleteAssets", in: store)
-        #expect(deleteAssetsBody.contains("let visibleDeletionFiles = files.filter { $0.fileRole != .thumbnail }"))
-        #expect(deleteAssetsBody.contains("guard file.fileRole != .thumbnail else { return }"))
-        #expect(deleteAssetsBody.contains("totalItems: visibleDeletionFiles.count"))
+        #expect(deleteAssetsBody.contains("移入共享回收站"))
+        #expect(deleteAssetsBody.contains("try commandLayer.moveAssetsToTrash(assetIDs, reason: \"deleted_from_library\")"))
+        #expect(!deleteAssetsBody.contains("for assetID in assetIDs"))
+        #expect(!deleteAssetsBody.contains("let visibleDeletionFiles = files.filter { $0.fileRole != .thumbnail }"))
+        #expect(!deleteAssetsBody.contains("guard file.fileRole != .thumbnail else { return }"))
+        #expect(!deleteAssetsBody.contains("totalItems: visibleDeletionFiles.count"))
         #expect(!deleteAssetsBody.contains("totalItems: files.count"))
 
-        #expect(database.contains("func deletableFileInstances(assetIDs: [UUID]) throws -> [FileInstance]"))
+        let restoreAssetsBody = functionBody(named: "restoreAssetsFromTrash", in: store)
+        #expect(restoreAssetsBody.contains("从共享回收站恢复"))
+        #expect(restoreAssetsBody.contains("try commandLayer.restoreAssetsFromTrash(assetIDs)"))
+        #expect(!restoreAssetsBody.contains("for assetID in assetIDs"))
+
         #expect(database.contains("func removeDeletedFileInstance(_ file: FileInstance, deletionMethod: AssetFileDeletionMethod) throws"))
         #expect(functionBody(named: "removeDeletedFileInstance", in: database).contains("DELETE FROM file_instances WHERE id = ?"))
         #expect(functionBody(named: "removeDeletedFileInstance", in: database).contains("DELETE FROM assets"))
         #expect(functionBody(named: "removeDeletedFileInstance", in: database).contains("operation_logs"))
+        #expect(database.contains("func archiveReceipts(assetID: UUID) throws -> [ArchiveReceiptRecord]"))
+        #expect(database.contains("AND entity_id = ?"))
+        #expect(functionBody(named: "archiveReceipts", in: database).contains("originalArchiveReceiptRecorded"))
+        #expect(database.contains("func trashedAssets() throws -> [TrashedAssetRecord]"))
+        #expect(database.contains("func canonicalPlacements(assetID: UUID) throws -> [FilePlacement]"))
+        #expect(functionBody(named: "originalArchiveReceiptRecorded", in: ledger).contains("entityID: assetID.uuidString"))
 
         #expect(operations.contains("enum AssetFileDeletionMethod"))
         #expect(operations.contains("func deleteAssetFiles"))
         #expect(operations.contains("try database.removeDeletedFileInstance"))
         #expect(functionBody(named: "deleteAssetFile", in: operations).contains("fileManager.trashItem"))
-        #expect(functionBody(named: "deleteAssetFile", in: operations).contains("fileManager.removeItem"))
+        #expect(!functionBody(named: "deleteAssetFile", in: operations).contains("fileManager.removeItem"))
         #expect(!functionBody(named: "deleteAssetFile", in: operations).contains("Process("))
     }
 
@@ -603,6 +624,10 @@ struct SidebarUXTests {
         return try String(contentsOf: contentView, encoding: .utf8)
     }
 
+    private func appSource() throws -> String {
+        try sourceFile("Sources/PhotoAssetManager/PhotoAssetManagerApp.swift")
+    }
+
     private func libraryStoreSource() throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile
@@ -612,10 +637,6 @@ struct SidebarUXTests {
         let libraryStore = repositoryRoot
             .appendingPathComponent("Sources/PhotoAssetManager/LibraryStore.swift")
         return try String(contentsOf: libraryStore, encoding: .utf8)
-    }
-
-    private func appSource() throws -> String {
-        try sourceFile("Sources/PhotoAssetManager/PhotoAssetManagerApp.swift")
     }
 
     private func sourceFile(_ path: String) throws -> String {
@@ -629,7 +650,10 @@ struct SidebarUXTests {
     }
 
     private func functionBody(named name: String, in source: String) -> String {
-        guard let range = source.range(of: "func \(name)") else { return "" }
+        let signature = "func \(name)("
+        let fallbackSignature = "func \(name)"
+        let range = source.range(of: signature) ?? source.range(of: fallbackSignature)
+        guard let range else { return "" }
         let suffix = source[range.lowerBound...]
         guard let openBrace = suffix.firstIndex(of: "{") else { return "" }
 

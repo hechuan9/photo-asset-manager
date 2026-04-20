@@ -712,7 +712,7 @@ struct AssetDeletionConfirmationDialog: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("删除选中照片？")
                 .font(.headline)
-            Text("将删除 \(request.assetIDs.count) 个选中资产的所有在线文件，包括原片、sidecar、导出和缓存。确认后会优先移入废纸篓；废纸篓不可用时才使用文件系统删除。")
+            Text("将把 \(request.assetIDs.count) 个选中资产移入共享回收站，并从默认视图隐藏。磁盘上的照片文件会保持原样，不会被删除、移动或覆盖。")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(minHeight: 72, alignment: .leading)
@@ -1980,11 +1980,7 @@ struct AssetMetadataEditor: View {
                 Text("评分")
                 Picker("", selection: Binding(
                     get: { asset.rating },
-                    set: { value in
-                        var copy = asset
-                        copy.rating = value
-                        library.update(asset: copy)
-                    }
+                    set: { value in library.setSelectedAssetRating(value) }
                 )) {
                     ForEach(0...5, id: \.self) { value in
                         Text(value == 0 ? "未评分" : "\(value) 星").tag(value)
@@ -1997,11 +1993,7 @@ struct AssetMetadataEditor: View {
                 Text("标记")
                 Picker("", selection: Binding(
                     get: { asset.flagState },
-                    set: { value in
-                        var copy = asset
-                        copy.flagState = value
-                        library.update(asset: copy)
-                    }
+                    set: { value in library.setSelectedAssetFlagState(value) }
                 )) {
                     ForEach(AssetFlagState.allCases) { flagState in
                         Text(flagState.label).tag(flagState)
@@ -2015,11 +2007,7 @@ struct AssetMetadataEditor: View {
                 Text("颜色")
                 Picker("", selection: Binding(
                     get: { asset.colorLabel },
-                    set: { value in
-                        var copy = asset
-                        copy.colorLabel = value
-                        library.update(asset: copy)
-                    }
+                    set: { value in library.setSelectedAssetColorLabel(value) }
                 )) {
                     Text("无").tag(Optional<AssetColorLabel>.none)
                     ForEach(AssetColorLabel.allCases) { label in
@@ -2034,12 +2022,11 @@ struct AssetMetadataEditor: View {
                 TextField("标签，用逗号分隔", text: $draftTags)
                     .textFieldStyle(.roundedBorder)
                 Button("保存标签") {
-                    var copy = asset
-                    copy.tags = draftTags
-                        .split(separator: ",")
-                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .filter { !$0.isEmpty }
-                    library.update(asset: copy)
+                    library.setSelectedAssetTags(
+                        draftTags
+                            .split(separator: ",")
+                            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    )
                 }
             }
         }
