@@ -383,7 +383,7 @@ struct StartupPerformanceTests {
 
     @Test func photoDeletionPrincipleUsesSharedTrashWithoutFilesystemDeletion() throws {
         let readme = try sourceFile("README.md")
-        let feature = try sourceFile("feature.md")
+        let feature = try sourceFile("../feature.md")
 
         #expect(readme.contains("资产进入共享回收站并从默认视图隐藏，磁盘上的照片文件保持原样"))
         #expect(feature.contains("第一版删除照片只表示资产进入共享回收站，不触碰磁盘上的照片文件"))

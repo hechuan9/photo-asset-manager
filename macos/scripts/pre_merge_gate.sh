@@ -2,17 +2,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
 
-"$ROOT_DIR/macos/scripts/pre_merge_gate.sh"
+swift build
 
 FILES_LIST="$(mktemp)"
 trap 'rm -f "$FILES_LIST"' EXIT
-
-cd "$ROOT_DIR"
 git ls-files -z --cached --others --exclude-standard \
   | while IFS= read -r -d '' file; do
       case "$file" in
-        .gitignore|scripts/pre_merge_gate.sh|macos/scripts/pre_merge_gate.sh)
+        .gitignore|scripts/pre_merge_gate.sh)
           continue
           ;;
       esac
@@ -27,8 +26,4 @@ if [[ -s "$FILES_LIST" ]]; then
     echo "疑似敏感信息匹配，停止发布。" >&2
     exit 1
   fi
-fi
-
-if command -v terraform >/dev/null 2>&1; then
-  terraform -chdir="$ROOT_DIR/infra/terraform" fmt -check
 fi
