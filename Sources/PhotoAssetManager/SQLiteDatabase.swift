@@ -86,7 +86,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             values.append(.int(Int64(filter.minimumRating)))
         }
         if filter.flaggedOnly {
-            conditions.append("a.flag = 1")
+            conditions.append("COALESCE(a.flag_state, CASE WHEN flag = 1 THEN 'picked' ELSE 'unflagged' END) = 'picked'")
         }
         if !filter.colorLabels.isEmpty {
             let labels = filter.colorLabels.sorted { $0.rawValue < $1.rawValue }
@@ -141,7 +141,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             SELECT
                 a.id, a.capture_time, a.camera_make, a.camera_model, a.lens_model,
                 a.original_filename, a.content_fingerprint, a.metadata_fingerprint,
-                a.rating, a.flag, a.color_label, a.tags, a.created_at, a.updated_at,
+                a.rating, COALESCE(a.flag_state, CASE WHEN flag = 1 THEN 'picked' ELSE 'unflagged' END) AS flag_state, a.color_label, a.tags, a.created_at, a.updated_at,
                 COUNT(fi.id) AS file_count,
                 MIN(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') THEN fi.path ELSE NULL END) AS primary_path,
                 COALESCE(
@@ -178,7 +178,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             SELECT
                 a.id, a.capture_time, a.camera_make, a.camera_model, a.lens_model,
                 a.original_filename, a.content_fingerprint, a.metadata_fingerprint,
-                a.rating, a.flag, a.color_label, a.tags, a.created_at, a.updated_at,
+                a.rating, COALESCE(a.flag_state, CASE WHEN flag = 1 THEN 'picked' ELSE 'unflagged' END) AS flag_state, a.color_label, a.tags, a.created_at, a.updated_at,
                 COUNT(fi.id) AS file_count,
                 MIN(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') THEN fi.path ELSE NULL END) AS primary_path,
                 COALESCE(
@@ -211,7 +211,7 @@ final class SQLiteDatabase: @unchecked Sendable {
                 contentFingerprint: statement.text(6),
                 metadataFingerprint: statement.text(7),
                 rating: Int(statement.int(8)),
-                flag: statement.int(9) == 1,
+                flagState: AssetFlagState(rawValue: statement.text(9)) ?? .unflagged,
                 colorLabel: statement.optionalText(10).flatMap(AssetColorLabel.init(rawValue:)),
                 tags: decodeTags(statement.text(11)),
                 createdAt: DateCoding.decode(statement.text(12)) ?? Date(),
@@ -574,8 +574,8 @@ final class SQLiteDatabase: @unchecked Sendable {
                 """
                 INSERT INTO assets (
                     id, capture_time, camera_make, camera_model, lens_model, original_filename,
-                    content_fingerprint, metadata_fingerprint, rating, flag, color_label, tags, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, '[]', ?, ?)
+                    content_fingerprint, metadata_fingerprint, rating, flag, flag_state, color_label, tags, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'unflagged', NULL, '[]', ?, ?)
                 """,
                 [
                     .text(assetID.uuidString),
@@ -1322,12 +1322,13 @@ final class SQLiteDatabase: @unchecked Sendable {
         try execute(
             """
             UPDATE assets
-            SET rating = ?, flag = ?, color_label = ?, tags = ?, updated_at = ?
+            SET rating = ?, flag_state = ?, flag = ?, color_label = ?, tags = ?, updated_at = ?
             WHERE id = ?
             """,
             [
                 .int(Int64(asset.rating)),
-                .int(asset.flag ? 1 : 0),
+                .text(asset.flagState.rawValue),
+                .int(asset.flagState == .picked ? 1 : 0),
                 .nullableText(asset.colorLabel?.rawValue),
                 .text(encodeTags(asset.tags)),
                 .text(DateCoding.encode(Date())),
@@ -1486,6 +1487,7 @@ final class SQLiteDatabase: @unchecked Sendable {
                 metadata_fingerprint TEXT NOT NULL,
                 rating INTEGER NOT NULL DEFAULT 0,
                 flag INTEGER NOT NULL DEFAULT 0,
+                flag_state TEXT NOT NULL DEFAULT 'unflagged',
                 color_label TEXT,
                 tags TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
@@ -1646,6 +1648,14 @@ final class SQLiteDatabase: @unchecked Sendable {
             definition: "TEXT"
         )
         try addColumnIfNeeded(table: "assets", column: "color_label", definition: "TEXT")
+        try addColumnIfNeeded(table: "assets", column: "flag_state", definition: "TEXT")
+        try execute(
+            """
+            UPDATE assets
+            SET flag_state = CASE WHEN flag = 1 THEN 'picked' ELSE 'unflagged' END
+            WHERE flag_state IS NULL OR flag_state = ''
+            """
+        )
 
         try execute(
             """

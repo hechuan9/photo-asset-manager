@@ -106,6 +106,27 @@ enum AssetStatus: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum AssetFlagState: String, CaseIterable, Codable, Identifiable, Sendable {
+    case unflagged
+    case picked
+    case rejected
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .unflagged: "未标记"
+        case .picked: "留用"
+        case .rejected: "排除"
+        }
+    }
+}
+
+enum AssetSelectionDirection: Sendable {
+    case previous
+    case next
+}
+
 enum AssetColorLabel: String, CaseIterable, Codable, Identifiable, Sendable {
     case red
     case yellow
@@ -214,7 +235,7 @@ struct Asset: Identifiable, Hashable, Sendable {
     var contentFingerprint: String
     var metadataFingerprint: String
     var rating: Int
-    var flag: Bool
+    var flagState: AssetFlagState
     var colorLabel: AssetColorLabel?
     var tags: [String]
     var createdAt: Date

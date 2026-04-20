@@ -453,6 +453,44 @@ final class LibraryStore: ObservableObject {
         loadSelectedFiles()
     }
 
+    func selectAdjacentAsset(_ direction: AssetSelectionDirection) {
+        guard !isBusy else { return }
+        guard !assets.isEmpty else { return }
+
+        if direction == .next,
+           let selectedAssetID,
+           assets.last?.id == selectedAssetID,
+           hasMoreAssets {
+            loadMoreAssets()
+        }
+
+        let currentIndex = selectedAssetID.flatMap { id in
+            assets.firstIndex { $0.id == id }
+        }
+        let targetIndex: Int
+        switch direction {
+        case .previous:
+            targetIndex = max((currentIndex ?? 0) - 1, assets.startIndex)
+        case .next:
+            targetIndex = min((currentIndex ?? -1) + 1, assets.index(before: assets.endIndex))
+        }
+        selectAsset(assets[targetIndex], modifiers: [])
+    }
+
+    func setSelectedAssetRating(_ rating: Int) {
+        guard !isBusy else { return }
+        guard var asset = selectedAsset else { return }
+        asset.rating = max(0, min(5, rating))
+        update(asset: asset)
+    }
+
+    func setSelectedAssetFlagState(_ flagState: AssetFlagState) {
+        guard !isBusy else { return }
+        guard var asset = selectedAsset else { return }
+        asset.flagState = flagState
+        update(asset: asset)
+    }
+
     func startAvailabilityRefreshInBackground(force: Bool = false) {
         guard availabilityTask == nil else { return }
         guard startupNASMountSucceeded else {

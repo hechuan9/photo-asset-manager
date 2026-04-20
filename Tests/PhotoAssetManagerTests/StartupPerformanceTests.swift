@@ -21,9 +21,13 @@ struct StartupPerformanceTests {
 
     @Test func contentViewHasBottomBackgroundTaskBar() throws {
         let source = try sourceFile("Sources/PhotoAssetManager/ContentView.swift")
+        let contentBody = structBody(named: "ContentView", in: source)
 
         #expect(source.contains("BackgroundTaskBar()"))
-        #expect(source.contains(".safeAreaInset(edge: .bottom)"))
+        #expect(source.contains("BackgroundTaskBarMetrics.height"))
+        #expect(contentBody.contains("VStack(spacing: 0)"))
+        #expect(contentBody.contains(".frame(height: BackgroundTaskBarMetrics.height)"))
+        #expect(!source.contains(".safeAreaInset(edge: .bottom)"))
     }
 
     @Test func startupRefreshUsesPagedAssetLoading() throws {

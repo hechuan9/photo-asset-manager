@@ -16,23 +16,30 @@ private enum AppPalette {
     })
 }
 
+private enum BackgroundTaskBarMetrics {
+    static let height: CGFloat = 34
+}
+
 struct ContentView: View {
     @EnvironmentObject private var library: LibraryStore
     @State private var pendingImportSource: URL?
 
     var body: some View {
-        NavigationSplitView {
-            SidebarView()
-                .navigationSplitViewColumnWidth(min: 220, ideal: 250)
-        } content: {
-            AssetBrowserView()
-                .navigationSplitViewColumnWidth(min: 520, ideal: 760)
-        } detail: {
-            DetailView()
-                .navigationSplitViewColumnWidth(min: 320, ideal: 420)
-        }
-        .safeAreaInset(edge: .bottom) {
+        VStack(spacing: 0) {
+            NavigationSplitView {
+                SidebarView()
+                    .navigationSplitViewColumnWidth(min: 220, ideal: 250)
+            } content: {
+                AssetBrowserView()
+                    .navigationSplitViewColumnWidth(min: 520, ideal: 760)
+            } detail: {
+                DetailView()
+                    .navigationSplitViewColumnWidth(min: 320, ideal: 420)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
             BackgroundTaskBar()
+                .frame(height: BackgroundTaskBarMetrics.height)
         }
         .toolbar {
             ToolbarItemGroup {
@@ -1914,14 +1921,23 @@ struct AssetMetadataEditor: View {
                 .labelsHidden()
             }
 
-            Toggle("精选", isOn: Binding(
-                get: { asset.flag },
-                set: { value in
-                    var copy = asset
-                    copy.flag = value
-                    library.update(asset: copy)
+            HStack {
+                Text("标记")
+                Picker("", selection: Binding(
+                    get: { asset.flagState },
+                    set: { value in
+                        var copy = asset
+                        copy.flagState = value
+                        library.update(asset: copy)
+                    }
+                )) {
+                    ForEach(AssetFlagState.allCases) { flagState in
+                        Text(flagState.label).tag(flagState)
+                    }
                 }
-            ))
+                .labelsHidden()
+                .frame(width: 120)
+            }
 
             HStack {
                 Text("颜色")

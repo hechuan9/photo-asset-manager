@@ -532,6 +532,37 @@ struct SidebarUXTests {
         #expect(!selectBody.contains("selectedAssetIDs.formUnion(assets[bounds].map(\\.id))"))
     }
 
+    @Test func lightroomKeyboardShortcutsNavigateRateAndFlagSelectedAsset() throws {
+        let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
+        let store = try libraryStoreSource()
+        let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
+        let app = try appSource()
+
+        #expect(models.contains("enum AssetFlagState"))
+        #expect(models.contains("case picked"))
+        #expect(models.contains("case rejected"))
+        #expect(models.contains("case unflagged"))
+        #expect(models.contains("var flagState: AssetFlagState"))
+
+        #expect(database.contains("flag_state TEXT"))
+        #expect(database.contains("CASE WHEN flag = 1 THEN 'picked' ELSE 'unflagged' END"))
+        #expect(functionBody(named: "updateAssetMetadata", in: database).contains("flag_state = ?"))
+        #expect(functionBody(named: "updateAssetMetadata", in: database).contains("asset.flagState.rawValue"))
+
+        #expect(store.contains("func selectAdjacentAsset(_ direction: AssetSelectionDirection)"))
+        #expect(store.contains("func setSelectedAssetRating(_ rating: Int)"))
+        #expect(store.contains("func setSelectedAssetFlagState(_ flagState: AssetFlagState)"))
+
+        #expect(app.contains("AssetSelectionCommands(library: library)"))
+        #expect(app.contains(".keyboardShortcut(.leftArrow, modifiers: [])"))
+        #expect(app.contains(".keyboardShortcut(.rightArrow, modifiers: [])"))
+        #expect(app.contains(".keyboardShortcut(\"1\", modifiers: [])"))
+        #expect(app.contains(".keyboardShortcut(\"5\", modifiers: [])"))
+        #expect(app.contains(".keyboardShortcut(\"p\", modifiers: [])"))
+        #expect(app.contains(".keyboardShortcut(\"x\", modifiers: [])"))
+        #expect(app.contains(".keyboardShortcut(\"u\", modifiers: [])"))
+    }
+
     private func contentViewSource() throws -> String {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile
