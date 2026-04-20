@@ -336,6 +336,183 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
+    func derivatives(assetID: UUID) throws -> [DerivativeObject] {
+        try prepare(
+            """
+            SELECT d.role, d.file_object_id, fo.content_hash, fo.size_bytes, fo.file_role,
+                   d.s3_bucket, d.s3_key, d.s3_etag, d.pixel_width, d.pixel_height
+            FROM derivative_objects d
+            JOIN file_objects fo ON fo.id = d.file_object_id
+            WHERE d.asset_id = ?
+            ORDER BY d.role ASC
+            """,
+            [.text(assetID.uuidString)]
+        ) { statement in
+            guard let role = DerivativeRole(rawValue: statement.text(0)) else {
+                throw DatabaseError.stepFailed("derivative_objects.role 无效：\(statement.text(0))")
+            }
+            guard let fileRole = FileRole(rawValue: statement.text(4)) else {
+                throw DatabaseError.stepFailed("file_objects.file_role 无效：\(statement.text(4))")
+            }
+            let fileObject = FileObjectID(
+                contentHash: statement.text(2),
+                sizeBytes: statement.int64(3),
+                role: fileRole
+            )
+            guard fileObject.stableKey == statement.text(1) else {
+                throw DatabaseError.stepFailed("derivative_objects.file_object_id 与 file_objects 不匹配：\(statement.text(1))")
+            }
+            return DerivativeObject(
+                assetID: assetID,
+                role: role,
+                fileObject: fileObject,
+                s3Object: S3ObjectRef(
+                    bucket: statement.text(5),
+                    key: statement.text(6),
+                    eTag: statement.optionalText(7)
+                ),
+                pixelSize: PixelSize(width: Int(statement.int(8)), height: Int(statement.int(9)))
+            )
+        }
+    }
+
+    func bootstrapAssetSnapshots() throws -> [AssetSnapshot] {
+        try prepare(
+            """
+            SELECT id, capture_time, camera_make, camera_model, lens_model, original_filename,
+                   content_fingerprint, metadata_fingerprint, rating,
+                   COALESCE(flag_state, CASE WHEN flag = 1 THEN 'picked' ELSE 'unflagged' END),
+                   color_label, tags, created_at, updated_at
+            FROM assets
+            ORDER BY id ASC
+            """,
+            []
+        ) { statement in
+            guard let assetID = UUID(uuidString: statement.text(0)) else {
+                throw DatabaseError.stepFailed("assets.id 不是 UUID：\(statement.text(0))")
+            }
+            guard let createdAt = DateCoding.decode(statement.text(12)) else {
+                throw DatabaseError.stepFailed("assets.created_at 无效：\(statement.text(12))")
+            }
+            guard let updatedAt = DateCoding.decode(statement.text(13)) else {
+                throw DatabaseError.stepFailed("assets.updated_at 无效：\(statement.text(13))")
+            }
+            return AssetSnapshot(
+                assetID: assetID,
+                captureTime: statement.optionalText(1).flatMap(DateCoding.decode),
+                cameraMake: statement.text(2),
+                cameraModel: statement.text(3),
+                lensModel: statement.text(4),
+                originalFilename: statement.text(5),
+                contentFingerprint: statement.text(6),
+                metadataFingerprint: statement.text(7),
+                rating: Int(statement.int(8)),
+                flagState: AssetFlagState(rawValue: statement.text(9)) ?? .unflagged,
+                colorLabel: statement.optionalText(10).flatMap(AssetColorLabel.init(rawValue:)),
+                tags: decodeTags(statement.text(11)),
+                createdAt: createdAt,
+                updatedAt: updatedAt
+            )
+        }
+    }
+
+    func bootstrapFileInstances() throws -> [FileInstance] {
+        try prepare(
+            """
+            SELECT id, asset_id, path, device_id, storage_kind, file_role, authority_role,
+                   sync_status, size_bytes, content_hash, last_seen_at, availability
+            FROM file_instances
+            ORDER BY asset_id ASC, file_role ASC, path ASC
+            """,
+            []
+        ) { statement in
+            FileInstance(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                assetID: UUID(uuidString: statement.text(1)) ?? UUID(),
+                path: statement.text(2),
+                deviceID: statement.text(3),
+                storageKind: StorageKind(rawValue: statement.text(4)) ?? .local,
+                fileRole: FileRole(rawValue: statement.text(5)) ?? .rawOriginal,
+                authorityRole: AuthorityRole(rawValue: statement.text(6)) ?? .sourceCopy,
+                syncStatus: SyncStatus(rawValue: statement.text(7)) ?? .synced,
+                sizeBytes: statement.int64(8),
+                contentHash: statement.text(9),
+                lastSeenAt: DateCoding.decode(statement.text(10)) ?? Date(),
+                availability: Availability(rawValue: statement.text(11)) ?? .missing
+            )
+        }
+    }
+
+    func syncMigrationState(libraryID: String) throws -> SyncMigrationState? {
+        let rows = try prepare(
+            """
+            SELECT library_id, status, source_database_fingerprint, started_at, completed_at,
+                   ledger_high_watermark, projection_verified
+            FROM sync_migration_state
+            WHERE library_id = ?
+            LIMIT 1
+            """,
+            [.text(libraryID)]
+        ) { statement in
+            guard let status = SyncMigrationStatus(rawValue: statement.text(1)) else {
+                throw DatabaseError.stepFailed("sync_migration_state.status 无效：\(statement.text(1))")
+            }
+            guard let startedAt = DateCoding.decode(statement.text(3)) else {
+                throw DatabaseError.stepFailed("sync_migration_state.started_at 无效：\(statement.text(3))")
+            }
+            return SyncMigrationState(
+                libraryID: statement.text(0),
+                status: status,
+                sourceDatabaseFingerprint: statement.text(2),
+                startedAt: startedAt,
+                completedAt: statement.optionalText(4).flatMap(DateCoding.decode),
+                ledgerHighWatermark: Int(statement.int(5)),
+                projectionVerified: statement.int(6) == 1
+            )
+        }
+        return rows.first ?? nil
+    }
+
+    func recordSyncMigrationStarted(libraryID: String, sourceDatabaseFingerprint: String, startedAt: Date) throws {
+        try execute(
+            """
+            INSERT INTO sync_migration_state (
+                library_id, status, source_database_fingerprint, started_at,
+                completed_at, ledger_high_watermark, projection_verified
+            ) VALUES (?, ?, ?, ?, NULL, 0, 0)
+            ON CONFLICT(library_id) DO UPDATE SET
+                status = excluded.status,
+                source_database_fingerprint = excluded.source_database_fingerprint,
+                started_at = excluded.started_at,
+                completed_at = NULL,
+                projection_verified = 0
+            """,
+            [
+                .text(libraryID),
+                .text(SyncMigrationStatus.started.rawValue),
+                .text(sourceDatabaseFingerprint),
+                .text(DateCoding.encode(startedAt))
+            ]
+        )
+    }
+
+    func recordSyncMigrationCompleted(libraryID: String, completedAt: Date, ledgerHighWatermark: Int, projectionVerified: Bool) throws {
+        try execute(
+            """
+            UPDATE sync_migration_state
+            SET status = ?, completed_at = ?, ledger_high_watermark = ?, projection_verified = ?
+            WHERE library_id = ?
+            """,
+            [
+                .text(SyncMigrationStatus.completed.rawValue),
+                .text(DateCoding.encode(completedAt)),
+                .int(Int64(ledgerHighWatermark)),
+                .int(projectionVerified ? 1 : 0),
+                .text(libraryID)
+            ]
+        )
+    }
+
     func countsByStatus() throws -> [AssetStatus: Int] {
         let sql = """
         SELECT status, COUNT(*)
@@ -755,6 +932,9 @@ final class SQLiteDatabase: @unchecked Sendable {
 
         if let thumbnailURL = scanned.thumbnailURL {
             try upsertAssetThumbnail(assetID: assetID, url: thumbnailURL, hash: scanned.thumbnailHash ?? "", sizeBytes: scanned.thumbnailSize)
+        }
+        if let previewURL = scanned.previewURL {
+            try upsertAssetDerivative(assetID: assetID, role: .preview, url: previewURL, hash: scanned.previewHash ?? "", sizeBytes: scanned.previewSize)
         }
 
         for sidecar in scanned.sidecars {
@@ -1984,6 +2164,11 @@ final class SQLiteDatabase: @unchecked Sendable {
     private func applyLedgerSideTables(_ entry: OperationLedgerEntry) throws {
         let now = DateCoding.encode(Date())
         switch entry.payload {
+        case .assetSnapshotDeclared:
+            break
+        case let .filePlacementSnapshotDeclared(_, fileObject, placement):
+            try upsertFileObject(fileObject, now: now)
+            try upsertFilePlacement(placement, now: now)
         case let .moveToTrash(assetID, reason):
             try execute(
                 """
@@ -2033,6 +2218,19 @@ final class SQLiteDatabase: @unchecked Sendable {
         case let .originalArchiveReceiptRecorded(_, fileObject, serverPlacement):
             try upsertFileObject(fileObject, now: now)
             try upsertFilePlacement(serverPlacement, now: now)
+        case let .derivativeDeclared(_, derivative):
+            try upsertFileObject(derivative.fileObject, now: now)
+            try upsertDerivative(derivative, now: now)
+            try upsertFilePlacement(
+                FilePlacement(
+                    fileObjectID: derivative.fileObject,
+                    holderID: derivative.s3Object.bucket,
+                    storageKind: .cloudPreview,
+                    authorityRole: .canonical,
+                    availability: .online
+                ),
+                now: now
+            )
         case .metadataSet, .tagsUpdated, .archiveRequested:
             break
         }
@@ -2072,6 +2270,36 @@ final class SQLiteDatabase: @unchecked Sendable {
                 .text(placement.storageKind.rawValue),
                 .text(placement.authorityRole.rawValue),
                 .text(placement.availability.rawValue),
+                .text(now)
+            ]
+        )
+    }
+
+    private func upsertDerivative(_ derivative: DerivativeObject, now: String) throws {
+        try execute(
+            """
+            INSERT INTO derivative_objects (
+                asset_id, role, file_object_id, s3_bucket, s3_key, s3_etag,
+                pixel_width, pixel_height, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(asset_id, role) DO UPDATE SET
+                file_object_id = excluded.file_object_id,
+                s3_bucket = excluded.s3_bucket,
+                s3_key = excluded.s3_key,
+                s3_etag = excluded.s3_etag,
+                pixel_width = excluded.pixel_width,
+                pixel_height = excluded.pixel_height,
+                updated_at = excluded.updated_at
+            """,
+            [
+                .text(derivative.assetID.uuidString),
+                .text(derivative.role.rawValue),
+                .text(derivative.fileObject.stableKey),
+                .text(derivative.s3Object.bucket),
+                .text(derivative.s3Object.key),
+                .nullableText(derivative.s3Object.eTag),
+                .int(Int64(derivative.pixelSize.width)),
+                .int(Int64(derivative.pixelSize.height)),
                 .text(now)
             ]
         )
@@ -2368,6 +2596,19 @@ final class SQLiteDatabase: @unchecked Sendable {
                 PRIMARY KEY(file_object_id, holder_id, storage_kind, authority_role)
             );
 
+            CREATE TABLE IF NOT EXISTS derivative_objects (
+                asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                file_object_id TEXT NOT NULL REFERENCES file_objects(id) ON DELETE CASCADE,
+                s3_bucket TEXT NOT NULL,
+                s3_key TEXT NOT NULL,
+                s3_etag TEXT,
+                pixel_width INTEGER NOT NULL,
+                pixel_height INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(asset_id, role)
+            );
+
             CREATE TABLE IF NOT EXISTS asset_trash_states (
                 asset_id TEXT PRIMARY KEY,
                 state TEXT NOT NULL,
@@ -2375,6 +2616,16 @@ final class SQLiteDatabase: @unchecked Sendable {
                 changed_by TEXT NOT NULL,
                 changed_at_hlc TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sync_migration_state (
+                library_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                source_database_fingerprint TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                ledger_high_watermark INTEGER NOT NULL DEFAULT 0,
+                projection_verified INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS app_settings (
@@ -2442,6 +2693,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             CREATE INDEX IF NOT EXISTS idx_operation_ledger_entity ON operation_ledger(entity_type, entity_id, hybrid_logical_time);
             CREATE INDEX IF NOT EXISTS idx_operation_ledger_upload ON operation_ledger(upload_status, created_at);
             CREATE INDEX IF NOT EXISTS idx_file_placements_holder ON file_placements(holder_id, availability);
+            CREATE INDEX IF NOT EXISTS idx_derivative_objects_file_object ON derivative_objects(file_object_id);
             """
         )
 
@@ -2686,14 +2938,19 @@ final class SQLiteDatabase: @unchecked Sendable {
     }
 
     private func upsertAssetThumbnail(assetID: UUID, url: URL, hash: String, sizeBytes: Int64) throws {
+        try upsertAssetDerivative(assetID: assetID, role: .thumbnail, url: url, hash: hash, sizeBytes: sizeBytes)
+    }
+
+    private func upsertAssetDerivative(assetID: UUID, role: FileRole, url: URL, hash: String, sizeBytes: Int64) throws {
+        precondition(role == .thumbnail || role == .preview)
         try execute(
             """
             DELETE FROM file_instances
             WHERE asset_id = ?
-              AND file_role = 'thumbnail'
+              AND file_role = ?
               AND path <> ?
             """,
-            [.text(assetID.uuidString), .text(url.path)]
+            [.text(assetID.uuidString), .text(role.rawValue), .text(url.path)]
         )
         try execute(
             """
@@ -2714,7 +2971,7 @@ final class SQLiteDatabase: @unchecked Sendable {
                 .text(url.path),
                 .text(currentDeviceID()),
                 .text(StorageKind.local.rawValue),
-                .text(FileRole.thumbnail.rawValue),
+                .text(role.rawValue),
                 .text(AuthorityRole.cache.rawValue),
                 .text(SyncStatus.cacheOnly.rawValue),
                 .int(sizeBytes),

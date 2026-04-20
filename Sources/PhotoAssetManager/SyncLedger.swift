@@ -32,9 +32,12 @@ enum LedgerEntityType: String, Codable, Sendable {
     case asset
     case fileObject = "file_object"
     case filePlacement = "file_placement"
+    case derivativeObject = "derivative_object"
 }
 
 enum LedgerOperationType: String, Codable, Sendable {
+    case assetSnapshotDeclared = "asset_snapshot_declared"
+    case filePlacementSnapshotDeclared = "file_placement_snapshot_declared"
     case metadataSet = "metadata_set"
     case tagsUpdated = "tags_updated"
     case moveToTrash = "move_to_trash"
@@ -42,6 +45,7 @@ enum LedgerOperationType: String, Codable, Sendable {
     case importedOriginalDeclared = "imported_original_declared"
     case archiveRequested = "archive_requested"
     case originalArchiveReceiptRecorded = "original_archive_receipt_recorded"
+    case derivativeDeclared = "derivative_declared"
 }
 
 enum AssetMetadataField: String, Codable, Hashable, Sendable {
@@ -80,6 +84,75 @@ struct FilePlacement: Hashable, Codable, Sendable {
     var storageKind: StorageKind
     var authorityRole: AuthorityRole
     var availability: Availability
+}
+
+enum DerivativeRole: String, Codable, CaseIterable, Hashable, Sendable {
+    case thumbnail
+    case preview
+
+    var fileRole: FileRole {
+        switch self {
+        case .thumbnail: .thumbnail
+        case .preview: .preview
+        }
+    }
+}
+
+struct PixelSize: Hashable, Codable, Sendable {
+    var width: Int
+    var height: Int
+}
+
+struct S3ObjectRef: Hashable, Codable, Sendable {
+    var bucket: String
+    var key: String
+    var eTag: String?
+}
+
+struct DerivativeObject: Hashable, Codable, Sendable {
+    var assetID: UUID
+    var role: DerivativeRole
+    var fileObject: FileObjectID
+    var s3Object: S3ObjectRef
+    var pixelSize: PixelSize
+}
+
+enum SyncMigrationStatus: String, Codable, Sendable {
+    case started
+    case completed
+}
+
+struct SyncMigrationState: Hashable, Sendable {
+    var libraryID: String
+    var status: SyncMigrationStatus
+    var sourceDatabaseFingerprint: String
+    var startedAt: Date
+    var completedAt: Date?
+    var ledgerHighWatermark: Int
+    var projectionVerified: Bool
+}
+
+struct SyncBootstrapResult: Hashable, Sendable {
+    var createdOperationCount: Int
+    var ledgerHighWatermark: Int
+    var projectionVerified: Bool
+}
+
+struct AssetSnapshot: Hashable, Codable, Sendable {
+    var assetID: UUID
+    var captureTime: Date?
+    var cameraMake: String
+    var cameraModel: String
+    var lensModel: String
+    var originalFilename: String
+    var contentFingerprint: String
+    var metadataFingerprint: String
+    var rating: Int
+    var flagState: AssetFlagState
+    var colorLabel: AssetColorLabel?
+    var tags: [String]
+    var createdAt: Date
+    var updatedAt: Date
 }
 
 enum ProjectedTrashState: String, Codable, Sendable {
@@ -139,10 +212,13 @@ struct SyncLedgerProjection: Sendable {
     var trash: [UUID: ProjectedTrashEntry] = [:]
     var fileObjects: [FileObjectID: FileObject] = [:]
     var filePlacements: [FileObjectID: [FilePlacement]] = [:]
+    var derivatives: [UUID: [DerivativeRole: DerivativeObject]] = [:]
     var conflicts: [SyncConflict] = []
 }
 
 enum OperationPayload: Codable, Equatable, Sendable {
+    case assetSnapshotDeclared(snapshot: AssetSnapshot)
+    case filePlacementSnapshotDeclared(assetID: UUID, fileObject: FileObjectID, placement: FilePlacement)
     case metadataSet(assetID: UUID, field: AssetMetadataField, value: LedgerValue)
     case tagsUpdated(assetID: UUID, add: Set<String>, remove: Set<String>)
     case moveToTrash(assetID: UUID, reason: String)
@@ -150,6 +226,7 @@ enum OperationPayload: Codable, Equatable, Sendable {
     case importedOriginalDeclared(assetID: UUID, fileObject: FileObjectID, placement: FilePlacement)
     case archiveRequested(assetID: UUID)
     case originalArchiveReceiptRecorded(assetID: UUID, fileObject: FileObjectID, serverPlacement: FilePlacement)
+    case derivativeDeclared(assetID: UUID, derivative: DerivativeObject)
 }
 
 struct OperationLedgerEntry: Identifiable, Codable, Equatable, Sendable {
@@ -167,6 +244,62 @@ struct OperationLedgerEntry: Identifiable, Codable, Equatable, Sendable {
     var payload: OperationPayload
     var baseVersion: String?
     var createdAt: Date
+
+    static func assetSnapshotDeclared(
+        opID: UUID = UUID(),
+        libraryID: String,
+        deviceID: SyncDeviceID,
+        deviceSequence: Int64,
+        time: HybridLogicalTime,
+        actorID: String,
+        snapshot: AssetSnapshot,
+        baseVersion: String? = nil,
+        createdAt: Date = Date()
+    ) -> OperationLedgerEntry {
+        OperationLedgerEntry(
+            opID: opID,
+            libraryID: libraryID,
+            deviceID: deviceID,
+            deviceSequence: deviceSequence,
+            hybridLogicalTime: time,
+            actorID: actorID,
+            entityType: .asset,
+            entityID: snapshot.assetID.uuidString,
+            opType: .assetSnapshotDeclared,
+            payload: .assetSnapshotDeclared(snapshot: snapshot),
+            baseVersion: baseVersion,
+            createdAt: createdAt
+        )
+    }
+
+    static func filePlacementSnapshotDeclared(
+        opID: UUID = UUID(),
+        libraryID: String,
+        deviceID: SyncDeviceID,
+        deviceSequence: Int64,
+        time: HybridLogicalTime,
+        actorID: String,
+        assetID: UUID,
+        fileObject: FileObjectID,
+        placement: FilePlacement,
+        baseVersion: String? = nil,
+        createdAt: Date = Date()
+    ) -> OperationLedgerEntry {
+        OperationLedgerEntry(
+            opID: opID,
+            libraryID: libraryID,
+            deviceID: deviceID,
+            deviceSequence: deviceSequence,
+            hybridLogicalTime: time,
+            actorID: actorID,
+            entityType: .filePlacement,
+            entityID: assetID.uuidString,
+            opType: .filePlacementSnapshotDeclared,
+            payload: .filePlacementSnapshotDeclared(assetID: assetID, fileObject: fileObject, placement: placement),
+            baseVersion: baseVersion,
+            createdAt: createdAt
+        )
+    }
 
     static func metadataSet(
         opID: UUID = UUID(),
@@ -365,6 +498,34 @@ struct OperationLedgerEntry: Identifiable, Codable, Equatable, Sendable {
             createdAt: createdAt
         )
     }
+
+    static func derivativeDeclared(
+        opID: UUID = UUID(),
+        libraryID: String,
+        deviceID: SyncDeviceID,
+        deviceSequence: Int64,
+        time: HybridLogicalTime,
+        actorID: String,
+        assetID: UUID,
+        derivative: DerivativeObject,
+        baseVersion: String? = nil,
+        createdAt: Date = Date()
+    ) -> OperationLedgerEntry {
+        OperationLedgerEntry(
+            opID: opID,
+            libraryID: libraryID,
+            deviceID: deviceID,
+            deviceSequence: deviceSequence,
+            hybridLogicalTime: time,
+            actorID: actorID,
+            entityType: .derivativeObject,
+            entityID: "\(assetID.uuidString):\(derivative.role.rawValue):\(derivative.fileObject.contentHash)",
+            opType: .derivativeDeclared,
+            payload: .derivativeDeclared(assetID: assetID, derivative: derivative),
+            baseVersion: baseVersion,
+            createdAt: createdAt
+        )
+    }
 }
 
 enum LedgerUploadStatus: String, Codable, Sendable {
@@ -389,6 +550,7 @@ protocol SyncCommandWriting {
     func declareImportedOriginal(assetID: UUID, fileObject: FileObjectID, localPlacement: FilePlacement) throws
     func requestArchive(assetID: UUID) throws
     func recordArchiveReceipt(assetID: UUID, fileObject: FileObjectID, serverPlacement: FilePlacement) throws
+    func declareDerivative(assetID: UUID, role: DerivativeRole, fileObject: FileObjectID, s3Object: S3ObjectRef, pixelSize: PixelSize) throws
 
     func makeRatingOperation(assetID: UUID, rating: Int, deviceSequence: Int64, time: HybridLogicalTime) -> OperationLedgerEntry
     func makeFlagOperation(assetID: UUID, flagState: AssetFlagState, deviceSequence: Int64, time: HybridLogicalTime) -> OperationLedgerEntry
@@ -570,6 +732,30 @@ struct SyncCommandLayer: SyncCommandWriting, Sendable {
         }
     }
 
+    func declareDerivative(assetID: UUID, role: DerivativeRole, fileObject: FileObjectID, s3Object: S3ObjectRef, pixelSize: PixelSize) throws {
+        guard role.fileRole == fileObject.role else {
+            throw SyncCommandError.invalidDerivativeRole(role: role, fileRole: fileObject.role)
+        }
+        let derivative = DerivativeObject(assetID: assetID, role: role, fileObject: fileObject, s3Object: s3Object, pixelSize: pixelSize)
+        let wallTime = Int64(nowProvider().timeIntervalSince1970 * 1000)
+        try database.recordLedgerOperation(
+            libraryID: libraryID,
+            deviceID: deviceID,
+            currentWallTimeMilliseconds: wallTime,
+            uploadStatus: .pending
+        ) { sequence, time in
+            .derivativeDeclared(
+                libraryID: libraryID,
+                deviceID: deviceID,
+                deviceSequence: sequence,
+                time: time,
+                actorID: actorID,
+                assetID: assetID,
+                derivative: derivative
+            )
+        }
+    }
+
     func makeRatingOperation(assetID: UUID, rating: Int, deviceSequence: Int64, time: HybridLogicalTime) -> OperationLedgerEntry {
         .metadataSet(
             libraryID: libraryID,
@@ -635,14 +821,22 @@ extension SyncCommandWriting {
             try restoreFromTrash(assetID: assetID)
         }
     }
+
+    func declareDerivative(assetID: UUID, role: DerivativeRole, fileObject: FileObjectID, s3Object: S3ObjectRef, pixelSize: PixelSize) throws {
+        throw SyncCommandError.unsupportedDerivativeControlPlane
+    }
 }
 
 enum SyncCommandError: LocalizedError {
     case invalidRating(Int)
+    case invalidDerivativeRole(role: DerivativeRole, fileRole: FileRole)
+    case unsupportedDerivativeControlPlane
 
     var errorDescription: String? {
         switch self {
         case .invalidRating(let rating): "评分必须在 0 到 5 之间，实际值：\(rating)"
+        case let .invalidDerivativeRole(role, fileRole): "衍生图 role 与文件 role 不匹配：\(role.rawValue) / \(fileRole.rawValue)"
+        case .unsupportedDerivativeControlPlane: "当前控制面客户端不支持衍生图接口"
         }
     }
 }
@@ -666,6 +860,17 @@ struct SyncControlPlaneRoute: Equatable, Sendable {
 
     static var archiveReceipts: SyncControlPlaneRoute {
         SyncControlPlaneRoute(method: "POST", path: makePath(segments: ["archive", "receipts"]))
+    }
+
+    static var derivativeUploads: SyncControlPlaneRoute {
+        SyncControlPlaneRoute(method: "POST", path: makePath(segments: ["derivatives", "uploads"]))
+    }
+
+    static func derivativeMetadata(assetID: UUID, role: DerivativeRole) -> SyncControlPlaneRoute {
+        SyncControlPlaneRoute(
+            method: "GET",
+            path: makePath(segments: ["derivatives", assetID.uuidString], queryItems: [("role", role.rawValue)])
+        )
     }
 
     static func trash(libraryID: String) -> SyncControlPlaneRoute {
@@ -715,11 +920,41 @@ struct ArchiveReceiptRequest: Codable, Equatable, Sendable {
     var operation: OperationLedgerEntry
 }
 
+struct DerivativeUploadRequest: Codable, Equatable, Sendable {
+    var libraryID: String
+    var assetID: UUID
+    var role: DerivativeRole
+    var fileObject: FileObjectID
+    var pixelSize: PixelSize
+}
+
+struct DerivativeUploadResponse: Codable, Equatable, Sendable {
+    var s3Object: S3ObjectRef
+    var uploadURL: URL
+}
+
+struct DerivativeMetadataResponse: Codable, Equatable, Sendable {
+    var derivative: DerivativeObject
+    var downloadURL: URL
+}
+
 protocol SyncControlPlaneClient: Sendable {
     func uploadOperations(_ request: SyncOpsUploadRequest, libraryID: String) async throws
     func fetchOperations(libraryID: String, after cursor: String?) async throws -> SyncOpsFetchResponse
     func sendHeartbeat(_ request: DeviceHeartbeatRequest) async throws
     func recordArchiveReceipt(_ request: ArchiveReceiptRequest) async throws
+    func createDerivativeUpload(_ request: DerivativeUploadRequest) async throws -> DerivativeUploadResponse
+    func fetchDerivativeMetadata(libraryID: String, assetID: UUID, role: DerivativeRole) async throws -> DerivativeMetadataResponse
+}
+
+extension SyncControlPlaneClient {
+    func createDerivativeUpload(_ request: DerivativeUploadRequest) async throws -> DerivativeUploadResponse {
+        throw SyncCommandError.unsupportedDerivativeControlPlane
+    }
+
+    func fetchDerivativeMetadata(libraryID: String, assetID: UUID, role: DerivativeRole) async throws -> DerivativeMetadataResponse {
+        throw SyncCommandError.unsupportedDerivativeControlPlane
+    }
 }
 
 enum SyncLedgerProjector {
@@ -763,10 +998,23 @@ private struct ProjectorState {
     private var trash: [UUID: ProjectedTrashEntry] = [:]
     private var fileObjects: [FileObjectID: FileObject] = [:]
     private var placements: [FileObjectID: Set<FilePlacement>] = [:]
+    private var derivatives: [UUID: [DerivativeRole: DerivativeObject]] = [:]
     private var conflicts: [SyncConflict] = []
 
     mutating func apply(_ entry: OperationLedgerEntry) {
         switch entry.payload {
+        case let .assetSnapshotDeclared(snapshot):
+            var asset = mutableAsset(snapshot.assetID)
+            asset.asset.id = snapshot.assetID
+            asset.rating = newer(current: asset.rating, value: snapshot.rating, entry: entry)
+            asset.flagState = newer(current: asset.flagState, value: snapshot.flagState, entry: entry)
+            asset.colorLabel = newer(current: asset.colorLabel, value: snapshot.colorLabel, entry: entry)
+            for tag in snapshot.tags {
+                asset.tagRegisters[tag] = newer(current: asset.tagRegisters[tag], value: true, entry: entry)
+            }
+            assets[snapshot.assetID] = asset
+        case let .filePlacementSnapshotDeclared(_, fileObjectID, placement):
+            record(fileObjectID, placement: placement)
         case let .metadataSet(assetID, field, value):
             applyMetadata(assetID: assetID, field: field, value: value, entry: entry)
         case let .tagsUpdated(assetID, add, remove):
@@ -806,6 +1054,17 @@ private struct ProjectorState {
             asset.asset.archiveState = .archived
             assets[assetID] = asset
             record(fileObjectID, placement: serverPlacement)
+        case let .derivativeDeclared(assetID, derivative):
+            let asset = mutableAsset(assetID)
+            assets[assetID] = asset
+            record(derivative.fileObject, placement: FilePlacement(
+                fileObjectID: derivative.fileObject,
+                holderID: derivative.s3Object.bucket,
+                storageKind: .cloudPreview,
+                authorityRole: .canonical,
+                availability: .online
+            ))
+            derivatives[assetID, default: [:]][derivative.role] = derivative
         }
     }
 
@@ -829,6 +1088,7 @@ private struct ProjectorState {
             trash: trash,
             fileObjects: fileObjects,
             filePlacements: placements.mapValues { Array($0).sorted { $0.holderID < $1.holderID } },
+            derivatives: derivatives,
             conflicts: conflicts
         )
     }

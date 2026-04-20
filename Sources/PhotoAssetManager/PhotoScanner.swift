@@ -33,6 +33,9 @@ struct ScannedFile {
     var thumbnailURL: URL?
     var thumbnailHash: String?
     var thumbnailSize: Int64
+    var previewURL: URL? = nil
+    var previewHash: String? = nil
+    var previewSize: Int64 = 0
     var sidecars: [ScannedSidecar]
 }
 
@@ -192,6 +195,7 @@ struct PhotoScanner: @unchecked Sendable {
         let authority = storageKind == .nas ? AuthorityRole.canonical : AuthorityRole.workingCopy
         let syncStatus = storageKind == .nas ? SyncStatus.synced : SyncStatus.needsArchive
         let thumbnail = try? generateThumbnail(source: url, contentHash: hash, derivativeRoot: derivativeRoot)
+        let preview = try? generatePreview(source: url, contentHash: hash, derivativeRoot: derivativeRoot)
 
         return ScannedFile(
             url: url,
@@ -211,6 +215,9 @@ struct PhotoScanner: @unchecked Sendable {
             thumbnailURL: thumbnail,
             thumbnailHash: thumbnail.flatMap { try? FileHasher.sha256(url: $0) },
             thumbnailSize: thumbnail.flatMap { (try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) } ?? 0,
+            previewURL: preview,
+            previewHash: preview.flatMap { try? FileHasher.sha256(url: $0) },
+            previewSize: preview.flatMap { (try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) } ?? 0,
             sidecars: try scanSidecars(for: url, storageKind: storageKind)
         )
     }
@@ -248,20 +255,28 @@ struct PhotoScanner: @unchecked Sendable {
     }
 
     private func generateThumbnail(source: URL, contentHash: String, derivativeRoot: URL?) throws -> URL? {
-        guard let derivativeRoot else { return nil }
-        let thumbDir = derivativeRoot.appendingPathComponent("thumbnails", isDirectory: true)
-        try FileManager.default.createDirectory(at: thumbDir, withIntermediateDirectories: true)
+        try generateDerivative(source: source, contentHash: contentHash, derivativeRoot: derivativeRoot, directoryName: "thumbnails", maxPixel: 320)
+    }
 
-        let thumbnailURL = thumbDir.appendingPathComponent("\(contentHash)-320.jpg")
-        if FileManager.default.fileExists(atPath: thumbnailURL.path) {
-            return thumbnailURL
+    private func generatePreview(source: URL, contentHash: String, derivativeRoot: URL?) throws -> URL? {
+        try generateDerivative(source: source, contentHash: contentHash, derivativeRoot: derivativeRoot, directoryName: "previews", maxPixel: 2048)
+    }
+
+    private func generateDerivative(source: URL, contentHash: String, derivativeRoot: URL?, directoryName: String, maxPixel: Int) throws -> URL? {
+        guard let derivativeRoot else { return nil }
+        let derivativeDirectory = derivativeRoot.appendingPathComponent(directoryName, isDirectory: true)
+        try FileManager.default.createDirectory(at: derivativeDirectory, withIntermediateDirectories: true)
+
+        let derivativeURL = derivativeDirectory.appendingPathComponent("\(contentHash)-\(maxPixel).jpg")
+        if FileManager.default.fileExists(atPath: derivativeURL.path) {
+            return derivativeURL
         }
 
         guard let image = ImageRenderer.renderableImage(url: source) else {
             return nil
         }
-        try ImageRenderer.writeJPEG(image: image, maxPixel: 320, destination: thumbnailURL)
-        return thumbnailURL
+        try ImageRenderer.writeJPEG(image: image, maxPixel: CGFloat(maxPixel), destination: derivativeURL)
+        return derivativeURL
     }
 }
 

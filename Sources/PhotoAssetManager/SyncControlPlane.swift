@@ -52,6 +52,34 @@ final class SyncControlPlaneHTTPClient: SyncControlPlaneClient {
         try await sendJSON(method: "POST", url: url, body: request)
     }
 
+    func createDerivativeUpload(_ request: DerivativeUploadRequest) async throws -> DerivativeUploadResponse {
+        let url = try makeURL(pathSegments: ["derivatives", "uploads"])
+        let encodedBody = try Self.makeEncoder().encode(request)
+        let (data, response) = try await send(method: "POST", url: url, body: encodedBody)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SyncControlPlaneHTTPError.invalidHTTPResponse
+        }
+        guard 200..<300 ~= httpResponse.statusCode else {
+            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode)
+        }
+        return try Self.makeDecoder().decode(DerivativeUploadResponse.self, from: data)
+    }
+
+    func fetchDerivativeMetadata(libraryID: String, assetID: UUID, role: DerivativeRole) async throws -> DerivativeMetadataResponse {
+        let url = try makeURL(
+            pathSegments: ["derivatives", assetID.uuidString],
+            queryItems: [URLQueryItem(name: "role", value: role.rawValue)]
+        )
+        let (data, response) = try await send(method: "GET", url: url, body: nil)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SyncControlPlaneHTTPError.invalidHTTPResponse
+        }
+        guard 200..<300 ~= httpResponse.statusCode else {
+            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode)
+        }
+        return try Self.makeDecoder().decode(DerivativeMetadataResponse.self, from: data)
+    }
+
     private func sendJSON<Body: Encodable>(method: String, url: URL, body: Body) async throws {
         let encodedBody = try Self.makeEncoder().encode(body)
         let (data, response) = try await send(method: method, url: url, body: encodedBody)

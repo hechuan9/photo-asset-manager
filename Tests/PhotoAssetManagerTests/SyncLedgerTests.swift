@@ -188,6 +188,340 @@ struct SyncLedgerTests {
         #expect(try database.tableExists("file_objects"))
         #expect(try database.tableExists("file_placements"))
         #expect(try database.tableExists("asset_trash_states"))
+        #expect(try database.tableExists("sync_migration_state"))
+        #expect(try database.tableExists("derivative_objects"))
+    }
+
+    @Test func bootstrapExistingLibraryWritesIdempotentSnapshotLedgerAndMigrationWatermark() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
+        let assetID = UUID(uuidString: "00000000-0000-0000-0000-00000000ba01")!
+        let originalID = UUID(uuidString: "00000000-0000-0000-0000-00000000ba02")!
+        let thumbnailID = UUID(uuidString: "00000000-0000-0000-0000-00000000ba03")!
+        let createdAt = DateCoding.encode(Date(timeIntervalSince1970: 1_700_001_000))
+
+        try database.execute(
+            """
+            INSERT INTO assets (
+                id, capture_time, camera_make, camera_model, lens_model, original_filename,
+                content_fingerprint, metadata_fingerprint, rating, flag, flag_state, color_label, tags, created_at, updated_at
+            ) VALUES (
+                '\(assetID.uuidString)', NULL, 'Sony', 'A7C', '35mm', 'DSC0001.ARW',
+                'asset-fp', 'metadata-fp', 5, 1, 'picked', 'red', '["family","print"]', '\(createdAt)', '\(createdAt)'
+            )
+            """
+        )
+        try database.execute(
+            """
+            INSERT INTO file_instances (
+                id, asset_id, path, device_id, storage_kind, file_role, authority_role,
+                sync_status, size_bytes, content_hash, last_seen_at, availability
+            ) VALUES
+            (
+                '\(originalID.uuidString)', '\(assetID.uuidString)', '\(root.appendingPathComponent("DSC0001.ARW").path)',
+                'mac', 'nas', 'raw_original', 'canonical', 'synced', 12345, 'raw-hash', '\(createdAt)', 'online'
+            ),
+            (
+                '\(thumbnailID.uuidString)', '\(assetID.uuidString)', '\(root.appendingPathComponent("thumb.jpg").path)',
+                'mac', 'local', 'thumbnail', 'cache', 'cache_only', 321, 'thumb-hash', '\(createdAt)', 'online'
+            )
+            """
+        )
+
+        let bootstrapper = SyncBootstrapper(
+            libraryID: "library",
+            deviceID: SyncDeviceID("mac"),
+            actorID: "system:migration",
+            database: database,
+            nowProvider: { Date(timeIntervalSince1970: 1_700_002_000) }
+        )
+
+        let first = try bootstrapper.bootstrapExistingLibraryToLedger()
+        let second = try bootstrapper.bootstrapExistingLibraryToLedger()
+        let entries = try database.ledgerEntries(libraryID: "library")
+        let projection = try SyncLedgerProjector.project(entries)
+        let state = try database.syncMigrationState(libraryID: "library")
+
+        #expect(first.createdOperationCount == entries.count)
+        #expect(second.createdOperationCount == 0)
+        #expect(entries.map(\.actorID).allSatisfy { $0 == "system:migration" })
+        #expect(entries.contains(where: { $0.opType == .assetSnapshotDeclared }))
+        #expect(entries.contains(where: { $0.opType == .filePlacementSnapshotDeclared }))
+        #expect(entries.contains(where: { $0.opType == .derivativeDeclared }))
+        #expect(projection.assets[assetID]?.rating == 5)
+        #expect(projection.assets[assetID]?.flagState == .picked)
+        #expect(projection.assets[assetID]?.colorLabel == .red)
+        #expect(projection.assets[assetID]?.tags == ["family", "print"])
+        #expect(projection.fileObjects[FileObjectID(contentHash: "raw-hash", sizeBytes: 12345, role: .rawOriginal)] != nil)
+        #expect(projection.derivatives[assetID]?[.thumbnail]?.s3Object.key.contains(assetID.uuidString) == true)
+        #expect(state?.status == .completed)
+        #expect(state?.projectionVerified == true)
+        #expect(state?.ledgerHighWatermark == entries.count)
+    }
+
+    @Test func bootstrapStableOperationIDFailsWhenSnapshotPayloadChanges() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
+        let assetID = UUID(uuidString: "00000000-0000-0000-0000-00000000bb01")!
+        let createdAt = DateCoding.encode(Date(timeIntervalSince1970: 1_700_003_000))
+
+        try database.execute(
+            """
+            INSERT INTO assets (
+                id, capture_time, camera_make, camera_model, lens_model, original_filename,
+                content_fingerprint, metadata_fingerprint, rating, flag, flag_state, color_label, tags, created_at, updated_at
+            ) VALUES (
+                '\(assetID.uuidString)', NULL, '', '', '', 'one.jpg',
+                'asset-fp', 'metadata-fp', 3, 0, 'unflagged', NULL, '[]', '\(createdAt)', '\(createdAt)'
+            )
+            """
+        )
+
+        let bootstrapper = SyncBootstrapper(
+            libraryID: "library",
+            deviceID: SyncDeviceID("mac"),
+            actorID: "system:migration",
+            database: database,
+            nowProvider: { Date(timeIntervalSince1970: 1_700_004_000) }
+        )
+        _ = try bootstrapper.bootstrapExistingLibraryToLedger()
+
+        try database.execute("UPDATE assets SET rating = 4 WHERE id = '\(assetID.uuidString)'")
+
+        do {
+            _ = try bootstrapper.bootstrapExistingLibraryToLedger()
+            Issue.record("expected stable bootstrap op conflict")
+        } catch {
+            #expect(error.localizedDescription.contains("operation_ledger.op_id 冲突"))
+        }
+    }
+
+    @Test func commandLayerDeclaresS3ThumbnailAndPreviewDerivativesWithoutStoringBytesInLedger() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
+        let commandLayer = SyncCommandLayer(
+            libraryID: "library",
+            deviceID: SyncDeviceID("mac"),
+            actorID: "user",
+            database: database,
+            nowProvider: { Date(timeIntervalSince1970: 1_700_005_000) }
+        )
+        let assetID = UUID(uuidString: "00000000-0000-0000-0000-00000000bc01")!
+        let thumbnailObject = FileObjectID(contentHash: "thumb-hash", sizeBytes: 320, role: .thumbnail)
+        let previewObject = FileObjectID(contentHash: "preview-hash", sizeBytes: 2048, role: .preview)
+        let createdAt = DateCoding.encode(Date(timeIntervalSince1970: 1_700_004_900))
+        try database.execute(
+            """
+            INSERT INTO assets (
+                id, capture_time, camera_make, camera_model, lens_model, original_filename,
+                content_fingerprint, metadata_fingerprint, rating, flag, flag_state, color_label, tags, created_at, updated_at
+            ) VALUES (
+                '\(assetID.uuidString)', NULL, '', '', '', 'one.jpg',
+                'asset-fp', 'metadata-fp', 0, 0, 'unflagged', NULL, '[]', '\(createdAt)', '\(createdAt)'
+            )
+            """
+        )
+
+        try commandLayer.declareDerivative(
+            assetID: assetID,
+            role: .thumbnail,
+            fileObject: thumbnailObject,
+            s3Object: S3ObjectRef(bucket: "photo-derivatives", key: "libraries/library/assets/\(assetID.uuidString)/thumbnail/thumb-hash.jpg", eTag: "etag-thumb"),
+            pixelSize: PixelSize(width: 320, height: 240)
+        )
+        try commandLayer.declareDerivative(
+            assetID: assetID,
+            role: .preview,
+            fileObject: previewObject,
+            s3Object: S3ObjectRef(bucket: "photo-derivatives", key: "libraries/library/assets/\(assetID.uuidString)/preview/preview-hash.jpg", eTag: "etag-preview"),
+            pixelSize: PixelSize(width: 2048, height: 1365)
+        )
+
+        let entries = try database.ledgerEntries(libraryID: "library")
+        let projection = try SyncLedgerProjector.project(entries)
+        let derivatives = try database.derivatives(assetID: assetID)
+
+        #expect(entries.map(\.opType) == [.derivativeDeclared, .derivativeDeclared])
+        #expect(entries.allSatisfy { $0.entityType == .derivativeObject })
+        #expect(entries.allSatisfy { !$0.entityID.contains("/Users/") })
+        #expect(projection.derivatives[assetID]?[.thumbnail]?.fileObject == thumbnailObject)
+        #expect(projection.derivatives[assetID]?[.preview]?.pixelSize.width == 2048)
+        #expect(derivatives.map(\.role).sorted { $0.rawValue < $1.rawValue } == [.preview, .thumbnail])
+        #expect(try database.pendingLedgerUploadCount() == 2)
+    }
+
+    @Test func controlPlaneSupportsDerivativeUploadAndDownloadRoutes() async throws {
+        let assetID = UUID(uuidString: "00000000-0000-0000-0000-00000000bd01")!
+        let uploadRequest = DerivativeUploadRequest(
+            libraryID: "library",
+            assetID: assetID,
+            role: .preview,
+            fileObject: FileObjectID(contentHash: "preview-hash", sizeBytes: 2048, role: .preview),
+            pixelSize: PixelSize(width: 2048, height: 1365)
+        )
+        let uploadResponse = DerivativeUploadResponse(
+            s3Object: S3ObjectRef(bucket: "photo-derivatives", key: "libraries/library/assets/\(assetID.uuidString)/preview/preview-hash.jpg", eTag: nil),
+            uploadURL: URL(string: "https://upload.example.com/preview")!
+        )
+        let metadata = DerivativeMetadataResponse(
+            derivative: DerivativeObject(
+                assetID: assetID,
+                role: .preview,
+                fileObject: uploadRequest.fileObject,
+                s3Object: uploadResponse.s3Object,
+                pixelSize: uploadRequest.pixelSize
+            ),
+            downloadURL: URL(string: "https://download.example.com/preview")!
+        )
+
+        var captured: [URLRequest] = []
+        let sessionStub = makeStubSession { request in
+            captured.append(request)
+            guard let url = request.url else {
+                throw NSError(domain: "PhotoAssetManagerTests", code: 41, userInfo: [NSLocalizedDescriptionKey: "missing url"])
+            }
+            let encoder = makeJSONEncoder()
+            let decoder = makeJSONDecoder()
+            switch (request.httpMethod, url.path) {
+            case ("POST", "/derivatives/uploads"):
+                #expect(try decoder.decode(DerivativeUploadRequest.self, from: request.httpBodyData) == uploadRequest)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, try encoder.encode(uploadResponse))
+            case ("GET", "/derivatives/\(assetID.uuidString)"):
+                #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "role" })?.value == "preview")
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, try encoder.encode(metadata))
+            default:
+                throw NSError(domain: "PhotoAssetManagerTests", code: 42, userInfo: [NSLocalizedDescriptionKey: "unexpected derivative request"])
+            }
+        }
+
+        let client = SyncControlPlaneHTTPClient(
+            baseURL: URL(string: "https://control.example.com")!,
+            headerProvider: { ["X-Stub-Key": sessionStub.stubKey] },
+            session: sessionStub.session
+        )
+
+        let signedUpload = try await client.createDerivativeUpload(uploadRequest)
+        let fetchedMetadata = try await client.fetchDerivativeMetadata(libraryID: "library", assetID: assetID, role: .preview)
+
+        #expect(signedUpload == uploadResponse)
+        #expect(fetchedMetadata == metadata)
+        #expect(captured.map(\.httpMethod) == ["POST", "GET"])
+    }
+
+    @Test func derivativeCacheMissDownloadsOnlyIntoCacheRoot() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cacheRoot = root.appendingPathComponent("DerivativeCache", isDirectory: true)
+        let original = root.appendingPathComponent("Originals/DSC0001.ARW")
+        try FileManager.default.createDirectory(at: original.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("original".utf8).write(to: original)
+
+        let ref = S3ObjectRef(bucket: "photo-derivatives", key: "libraries/library/assets/a/thumbnail/thumb.jpg", eTag: "etag")
+        let fetcher = StubDerivativeDataFetcher(data: Data("thumbnail".utf8))
+        let store = DerivativeCacheStore(cacheRoot: cacheRoot, fetcher: fetcher)
+
+        let cached = try await store.cacheDerivative(
+            assetID: UUID(uuidString: "00000000-0000-0000-0000-00000000be01")!,
+            role: .thumbnail,
+            s3Object: ref
+        )
+
+        #expect(try Data(contentsOf: cached) == Data("thumbnail".utf8))
+        #expect(try Data(contentsOf: original) == Data("original".utf8))
+        #expect(cached.path.hasPrefix(cacheRoot.path))
+        #expect(fetcher.requests == [ref])
+    }
+
+    @Test func derivativeUploadServiceDeclaresLedgerOnlyAfterUploadSucceeds() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
+        let assetID = UUID(uuidString: "00000000-0000-0000-0000-00000000bf01")!
+        let derivativeFile = root.appendingPathComponent("preview.jpg")
+        try Data("preview".utf8).write(to: derivativeFile)
+        let createdAt = DateCoding.encode(Date(timeIntervalSince1970: 1_700_006_000))
+        try database.execute(
+            """
+            INSERT INTO assets (
+                id, capture_time, camera_make, camera_model, lens_model, original_filename,
+                content_fingerprint, metadata_fingerprint, rating, flag, flag_state, color_label, tags, created_at, updated_at
+            ) VALUES (
+                '\(assetID.uuidString)', NULL, '', '', '', 'one.jpg',
+                'asset-fp', 'metadata-fp', 0, 0, 'unflagged', NULL, '[]', '\(createdAt)', '\(createdAt)'
+            )
+            """
+        )
+        let commandLayer = SyncCommandLayer(
+            libraryID: "library",
+            deviceID: SyncDeviceID("mac"),
+            actorID: "user",
+            database: database,
+            nowProvider: { Date(timeIntervalSince1970: 1_700_006_100) }
+        )
+        let control = StubDerivativeControlPlane()
+        let uploader = StubDerivativeUploader()
+        let service = DerivativeUploadService(
+            libraryID: "library",
+            commandLayer: commandLayer,
+            controlPlane: control,
+            uploader: uploader
+        )
+
+        try await service.uploadDerivative(
+            assetID: assetID,
+            role: .preview,
+            localFile: derivativeFile,
+            pixelSize: PixelSize(width: 2048, height: 1365)
+        )
+
+        let entries = try database.ledgerEntries(libraryID: "library")
+        #expect(control.uploadRequests.count == 1)
+        #expect(uploader.uploads.count == 1)
+        #expect(entries.map(\.opType) == [.derivativeDeclared])
+        #expect(try database.derivatives(assetID: assetID).first?.role == .preview)
+    }
+
+    @Test func derivativeUploadServiceDoesNotDeclareLedgerWhenUploadFails() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
+        let assetID = UUID(uuidString: "00000000-0000-0000-0000-00000000bf02")!
+        let derivativeFile = root.appendingPathComponent("thumbnail.jpg")
+        try Data("thumbnail".utf8).write(to: derivativeFile)
+        let commandLayer = SyncCommandLayer(
+            libraryID: "library",
+            deviceID: SyncDeviceID("mac"),
+            actorID: "user",
+            database: database,
+            nowProvider: { Date(timeIntervalSince1970: 1_700_006_200) }
+        )
+        let control = StubDerivativeControlPlane()
+        let uploader = StubDerivativeUploader()
+        uploader.error = NSError(domain: "PhotoAssetManagerTests", code: 61, userInfo: [NSLocalizedDescriptionKey: "upload failed"])
+        let service = DerivativeUploadService(
+            libraryID: "library",
+            commandLayer: commandLayer,
+            controlPlane: control,
+            uploader: uploader
+        )
+
+        do {
+            try await service.uploadDerivative(
+                assetID: assetID,
+                role: .thumbnail,
+                localFile: derivativeFile,
+                pixelSize: PixelSize(width: 320, height: 240)
+            )
+            Issue.record("expected derivative upload failure")
+        } catch {
+            #expect(error.localizedDescription.contains("upload failed"))
+        }
+
+        #expect(try database.ledgerEntries(libraryID: "library").isEmpty)
+        #expect(try database.derivatives(assetID: assetID).isEmpty)
     }
 
     @Test func commandLayerWritesBusinessOpsAndUploadQueueWithoutDirectSqlReplay() throws {
@@ -1982,6 +2316,70 @@ struct SyncLedgerTests {
         func sendHeartbeat(_ request: DeviceHeartbeatRequest) async throws {}
 
         func recordArchiveReceipt(_ request: ArchiveReceiptRequest) async throws {}
+    }
+
+    private final class StubDerivativeDataFetcher: @unchecked Sendable, DerivativeDataFetching {
+        private let data: Data
+        private(set) var requests: [S3ObjectRef] = []
+
+        init(data: Data) {
+            self.data = data
+        }
+
+        func fetchDerivative(_ object: S3ObjectRef) async throws -> Data {
+            requests.append(object)
+            return data
+        }
+    }
+
+    private final class StubDerivativeControlPlane: @unchecked Sendable, SyncControlPlaneClient {
+        private(set) var uploadRequests: [DerivativeUploadRequest] = []
+
+        func uploadOperations(_ request: SyncOpsUploadRequest, libraryID: String) async throws {}
+
+        func fetchOperations(libraryID: String, after cursor: String?) async throws -> SyncOpsFetchResponse {
+            SyncOpsFetchResponse(operations: [], cursor: cursor ?? "")
+        }
+
+        func sendHeartbeat(_ request: DeviceHeartbeatRequest) async throws {}
+
+        func recordArchiveReceipt(_ request: ArchiveReceiptRequest) async throws {}
+
+        func createDerivativeUpload(_ request: DerivativeUploadRequest) async throws -> DerivativeUploadResponse {
+            uploadRequests.append(request)
+            return DerivativeUploadResponse(
+                s3Object: S3ObjectRef(
+                    bucket: "photo-derivatives",
+                    key: "libraries/\(request.libraryID)/assets/\(request.assetID.uuidString)/\(request.role.rawValue)/\(request.fileObject.contentHash).jpg",
+                    eTag: "etag"
+                ),
+                uploadURL: URL(string: "https://upload.example.com/\(request.role.rawValue)")!
+            )
+        }
+
+        func fetchDerivativeMetadata(libraryID: String, assetID: UUID, role: DerivativeRole) async throws -> DerivativeMetadataResponse {
+            throw NSError(domain: "PhotoAssetManagerTests", code: 62, userInfo: [NSLocalizedDescriptionKey: "unused"])
+        }
+    }
+
+    private final class StubDerivativeUploader: @unchecked Sendable, DerivativeDataUploading {
+        private(set) var uploads: [(data: Data, url: URL)] = []
+        var error: Error?
+
+        func uploadDerivativeData(_ data: Data, to uploadURL: URL) async throws {
+            if let error {
+                throw error
+            }
+            uploads.append((data, uploadURL))
+        }
+    }
+
+    private func makeTemporaryRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("PhotoAssetManagerTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
     }
 
     private actor UploadGateState {
