@@ -86,6 +86,21 @@ struct SidebarUXTests {
         #expect(!filterBarBody.contains("library.recordExportForSelected"))
     }
 
+    @Test func fileSearchFieldStaysCollapsedUntilExplicitlyOpened() throws {
+        let source = try contentViewSource()
+        let filterBarBody = structBody(named: "FilterBar", in: source)
+
+        #expect(filterBarBody.contains("@State private var isFileSearchOpen = false"))
+        #expect(filterBarBody.contains("@FocusState private var isFileSearchFocused"))
+        #expect(filterBarBody.contains("if isFileSearchOpen"))
+        #expect(filterBarBody.contains("TextField(\"文件搜索\""))
+        #expect(filterBarBody.contains("Button(\"文件搜索\")"))
+        #expect(filterBarBody.contains("isFileSearchOpen = true"))
+        #expect(filterBarBody.contains(".focused($isFileSearchFocused)"))
+        #expect(filterBarBody.contains("isFileSearchFocused = true"))
+        #expect(!filterBarBody.contains("TextField(\"搜索\""))
+    }
+
     @Test func folderSidebarUsesTreeWithChildDisclosureAndMoveMenu() throws {
         let source = try contentViewSource()
         let store = try libraryStoreSource()

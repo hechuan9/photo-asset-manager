@@ -1522,6 +1522,8 @@ struct LoupeFilmstripView: View {
 
 struct FilterBar: View {
     @EnvironmentObject private var library: LibraryStore
+    @State private var isFileSearchOpen = false
+    @FocusState private var isFileSearchFocused: Bool
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1554,18 +1556,35 @@ struct FilterBar: View {
             .pickerStyle(.menu)
             .frame(width: 150)
 
-            TextField("搜索", text: $library.filter.searchText)
-                .textFieldStyle(.plain)
-                .onSubmit {
-                    library.refresh()
+            if isFileSearchOpen {
+                TextField("文件搜索", text: $library.filter.searchText)
+                    .textFieldStyle(.plain)
+                    .focused($isFileSearchFocused)
+                    .onAppear {
+                        isFileSearchFocused = true
+                    }
+                    .onSubmit {
+                        library.refresh()
+                    }
+                    .onExitCommand {
+                        isFileSearchFocused = false
+                        isFileSearchOpen = false
+                    }
+                    .padding(.horizontal, 8)
+                    .frame(width: 220, height: 28)
+                    .background(Color.black.opacity(0.22))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    )
+            } else {
+                Button("文件搜索") {
+                    isFileSearchOpen = true
+                    isFileSearchFocused = true
                 }
-                .padding(.horizontal, 8)
-                .frame(width: 220, height: 28)
-                .background(Color.black.opacity(0.22))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4)
-                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                )
+                .buttonStyle(.borderless)
+                .frame(width: 90, height: 28)
+            }
 
             Button("应用") {
                 library.refresh()
@@ -1574,6 +1593,8 @@ struct FilterBar: View {
 
             Button("重置") {
                 library.filter = LibraryFilter()
+                isFileSearchFocused = false
+                isFileSearchOpen = false
                 library.refresh()
             }
             .buttonStyle(.borderless)
