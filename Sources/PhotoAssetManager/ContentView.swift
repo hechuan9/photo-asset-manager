@@ -1731,12 +1731,63 @@ struct AssetTile: View {
                 placeholderSize: 34,
                 onAspectRatioChange: onAspectRatioChange
             )
+            .saturation(asset.flagState == .rejected ? 0.0 : 1.0)
+            .brightness(asset.flagState == .rejected ? -0.18 : 0.0)
+            if asset.flagState == .rejected {
+                RejectedAssetOverlay()
+            }
+            AssetFlagBadge(flagState: asset.flagState)
         }
         .clipped()
         .clipShape(RoundedRectangle(cornerRadius: 0))
         .border(Color(nsColor: .selectedContentBackgroundColor), width: selected ? 3 : 0)
         .contentShape(Rectangle())
         .accessibilityLabel(asset.originalFilename)
+    }
+}
+
+struct RejectedAssetOverlay: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color.gray.opacity(0.42))
+    }
+}
+
+struct AssetFlagBadge: View {
+    var flagState: AssetFlagState
+
+    var body: some View {
+        VStack {
+            HStack {
+                Spacer()
+                if flagState != .unflagged {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Color.white)
+                        .frame(width: 20, height: 20)
+                        .background(badgeColor)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .padding(5)
+                }
+            }
+            Spacer()
+        }
+    }
+
+    private var systemImage: String {
+        switch flagState {
+        case .unflagged: ""
+        case .picked: "flag.fill"
+        case .rejected: "xmark"
+        }
+    }
+
+    private var badgeColor: Color {
+        switch flagState {
+        case .unflagged: Color.clear
+        case .picked: Color(red: 0.12, green: 0.58, blue: 0.32)
+        case .rejected: Color(red: 0.42, green: 0.42, blue: 0.42)
+        }
     }
 }
 

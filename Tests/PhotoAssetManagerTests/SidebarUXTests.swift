@@ -286,6 +286,20 @@ struct SidebarUXTests {
         #expect(!tileBody.contains("asset.rating"))
     }
 
+    @Test func assetTilesShowPickedBadgeAndDimRejectedAssets() throws {
+        let content = try contentViewSource()
+        let tileBody = structBody(named: "AssetTile", in: content)
+
+        #expect(tileBody.contains("asset.flagState == .rejected"))
+        #expect(tileBody.contains(".saturation(asset.flagState == .rejected ? 0.0 : 1.0)"))
+        #expect(tileBody.contains(".brightness(asset.flagState == .rejected ? -0.18 : 0.0)"))
+        #expect(tileBody.contains("RejectedAssetOverlay()"))
+        #expect(tileBody.contains("AssetFlagBadge(flagState: asset.flagState)"))
+        #expect(content.contains("struct AssetFlagBadge"))
+        #expect(content.contains("case .picked: \"flag.fill\""))
+        #expect(content.contains("case .rejected: \"xmark\""))
+    }
+
     @Test func doubleClickOpensLightroomStyleLoupeWithFilmstrip() throws {
         let content = try contentViewSource()
         let browserBody = structBody(named: "AssetBrowserView", in: content)
