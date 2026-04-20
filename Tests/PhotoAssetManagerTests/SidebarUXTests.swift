@@ -307,6 +307,13 @@ struct SidebarUXTests {
         #expect(filmstripBody.contains("ForEach(assets)"))
         #expect(filmstripBody.contains("AssetPreviewImage(asset: filmstripAsset, contentMode: .fit, placeholderSize: 18)"))
         #expect(!filmstripBody.contains("contentMode: .fill"))
+        #expect(filmstripBody.contains("LoupeFilmstripMetrics.thumbnailWidth"))
+        #expect(filmstripBody.contains("LoupeFilmstripMetrics.thumbnailHeight"))
+        #expect(filmstripBody.contains("LoupeFilmstripMetrics.verticalPadding"))
+        #expect(filmstripBody.contains("LoupeFilmstripMetrics.height"))
+        #expect(filmstripBody.contains(".layoutPriority(1)"))
+        #expect(!filmstripBody.contains(".frame(width: 70, height: 52)"))
+        #expect(!filmstripBody.contains(".frame(height: 60)"))
         #expect(filmstripBody.contains("select(filmstripAsset)"))
     }
 

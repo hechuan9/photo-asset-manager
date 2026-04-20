@@ -1465,6 +1465,13 @@ struct LightroomLoupeView: View {
     }
 }
 
+private enum LoupeFilmstripMetrics {
+    static let thumbnailWidth: CGFloat = 104
+    static let thumbnailHeight: CGFloat = 78
+    static let verticalPadding: CGFloat = 6
+    static let height = thumbnailHeight + verticalPadding * 2
+}
+
 struct LoupeFilmstripView: View {
     var assets: [Asset]
     var selectedAssetID: UUID
@@ -1481,7 +1488,10 @@ struct LoupeFilmstripView: View {
                             Color.black
                             AssetPreviewImage(asset: filmstripAsset, contentMode: .fit, placeholderSize: 18)
                         }
-                        .frame(width: 70, height: 52)
+                        .frame(
+                            width: LoupeFilmstripMetrics.thumbnailWidth,
+                            height: LoupeFilmstripMetrics.thumbnailHeight
+                        )
                         .clipped()
                         .overlay {
                             Rectangle()
@@ -1495,9 +1505,10 @@ struct LoupeFilmstripView: View {
                 }
             }
             .padding(.horizontal, 2)
-            .padding(.vertical, 3)
+            .padding(.vertical, LoupeFilmstripMetrics.verticalPadding)
         }
-        .frame(height: 60)
+        .frame(height: LoupeFilmstripMetrics.height)
+        .layoutPriority(1)
         .background(Color(nsColor: .windowBackgroundColor).opacity(0.35))
     }
 }

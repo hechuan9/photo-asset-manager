@@ -597,10 +597,17 @@ final class SQLiteDatabase: @unchecked Sendable {
                 """
                 UPDATE assets
                 SET rating = CASE WHEN rating = 0 AND ? > 0 THEN ? ELSE rating END,
+                    capture_time = CASE WHEN capture_time IS NULL THEN ? ELSE capture_time END,
                     updated_at = ?
                 WHERE id = ?
                 """,
-                [.int(Int64(scanned.rating)), .int(Int64(scanned.rating)), .text(DateCoding.encode(now)), .text(assetID.uuidString)]
+                [
+                    .int(Int64(scanned.rating)),
+                    .int(Int64(scanned.rating)),
+                    .nullableText(scanned.captureTime.map(DateCoding.encode)),
+                    .text(DateCoding.encode(now)),
+                    .text(assetID.uuidString)
+                ]
             )
         }
 

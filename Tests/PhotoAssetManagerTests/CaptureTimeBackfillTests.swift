@@ -3,6 +3,100 @@ import Testing
 @testable import PhotoAssetManager
 
 struct CaptureTimeBackfillTests {
+    @Test func scannerStoresFileCreationDateForNewImportedPhotoWhenMetadataHasNoCaptureTime() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("PhotoAssetManagerTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let photo = root.appendingPathComponent("new-import.jpg")
+        try Data("not-an-image".utf8).write(to: photo)
+        let fileCreationDate = Date(timeIntervalSince1970: 1_704_247_200)
+        try FileManager.default.setAttributes(
+            [
+                .creationDate: fileCreationDate,
+                .modificationDate: fileCreationDate
+            ],
+            ofItemAtPath: photo.path
+        )
+
+        let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
+        let report = await PhotoScanner().scanDirectory(root, storageKind: .local, derivativeRoot: nil, database: database) { _ in }
+        let assets = try database.queryAssets(filter: LibraryFilter(sortOrder: .captureTimeAscending), limit: 10)
+
+        #expect(report.errors.isEmpty)
+        #expect(report.importedAssets == 1)
+        #expect(assets.count == 1)
+        #expect(abs((assets.first?.captureTime?.timeIntervalSince1970 ?? 0) - fileCreationDate.timeIntervalSince1970) < 1)
+    }
+
+    @Test func rescanningExistingAssetAtNewLocationBackfillsMissingCaptureTime() throws {
+        let root = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("PhotoAssetManagerTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let firstPath = root.appendingPathComponent("first.jpg")
+        let secondPath = root.appendingPathComponent("second.jpg")
+        let captureTime = Date(timeIntervalSince1970: 1_704_333_600)
+        let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
+        let batchID = try database.createImportBatch(sourcePath: root.path, deviceID: "test")
+
+        let firstScan = ScannedFile(
+            url: firstPath,
+            deviceID: "test",
+            storageKind: .local,
+            fileRole: .jpegOriginal,
+            authorityRole: .workingCopy,
+            syncStatus: .needsArchive,
+            sizeBytes: 1,
+            contentHash: "same-content",
+            metadataFingerprint: "same-metadata",
+            captureTime: nil,
+            cameraMake: "",
+            cameraModel: "",
+            lensModel: "",
+            rating: 0,
+            thumbnailURL: nil,
+            thumbnailHash: nil,
+            thumbnailSize: 0,
+            sidecars: []
+        )
+        let secondScan = ScannedFile(
+            url: secondPath,
+            deviceID: "test",
+            storageKind: .local,
+            fileRole: .jpegOriginal,
+            authorityRole: .workingCopy,
+            syncStatus: .needsArchive,
+            sizeBytes: 1,
+            contentHash: "same-content",
+            metadataFingerprint: "same-metadata",
+            captureTime: captureTime,
+            cameraMake: "",
+            cameraModel: "",
+            lensModel: "",
+            rating: 0,
+            thumbnailURL: nil,
+            thumbnailHash: nil,
+            thumbnailSize: 0,
+            sidecars: []
+        )
+
+        _ = try database.upsertScannedFile(firstScan, batchID: batchID)
+        _ = try database.upsertScannedFile(secondScan, batchID: batchID)
+        let assets = try database.queryAssets(filter: LibraryFilter(), limit: 10)
+
+        #expect(assets.count == 1)
+        #expect(assets.first?.captureTime == captureTime)
+    }
+
     @Test func scannerBackfillsMissingCaptureTimesFromFileCreationDateWithoutOverwritingExistingCaptureTimes() async throws {
         let root = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
