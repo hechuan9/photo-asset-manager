@@ -62,7 +62,7 @@ locals {
     "/aws/apigateway/${local.api_name}"
   )
 
-  resolved_vpc_id   = coalesce(var.vpc_id, data.aws_vpc.default[0].id)
+  resolved_vpc_id   = var.vpc_id != null ? var.vpc_id : data.aws_vpc.default[0].id
   lambda_subnet_ids = length(var.lambda_subnet_ids) > 0 ? var.lambda_subnet_ids : data.aws_subnets.default[0].ids
   db_subnet_ids     = length(var.db_subnet_ids) > 0 ? var.db_subnet_ids : data.aws_subnets.default[0].ids
   route_table_ids   = length(var.route_table_ids) > 0 ? var.route_table_ids : data.aws_route_tables.default[0].ids
