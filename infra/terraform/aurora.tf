@@ -29,7 +29,7 @@ resource "aws_rds_cluster" "aurora" {
 }
 
 resource "aws_rds_cluster_instance" "aurora_writer" {
-  identifier_prefix   = "${local.aurora_cluster_identifier}-writer-"
+  identifier          = "${local.naming_prefix}-${local.account_scoped_suffix}-aurora-writer"
   cluster_identifier  = aws_rds_cluster.aurora.id
   instance_class      = "db.serverless"
   engine              = aws_rds_cluster.aurora.engine

@@ -87,7 +87,6 @@ resource "aws_lambda_function" "control_plane" {
 
   environment {
     variables = {
-      AWS_REGION                       = var.aws_region
       CONTROL_PLANE_AUTO_CREATE_SCHEMA = "1"
       DATABASE_CONNECTION_SECRET_ARN   = aws_secretsmanager_secret.aurora_connection.arn
       DATABASE_NAME                    = var.database_name
