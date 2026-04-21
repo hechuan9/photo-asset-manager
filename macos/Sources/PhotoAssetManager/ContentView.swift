@@ -240,7 +240,7 @@ struct BackgroundTaskBar: View {
         VStack(spacing: 0) {
             Divider()
             HStack(spacing: 10) {
-                if let task = library.backgroundTask {
+                if let task = library.syncProgressTask ?? library.backgroundTask {
                     if task.isFinished {
                         Image(systemName: "checkmark.circle")
                             .foregroundStyle(.secondary)
@@ -571,6 +571,29 @@ struct SyncStatusPopover: View {
                 Text(library.lastSyncSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                if let task = library.syncProgressTask {
+                    if task.totalItems > 0 {
+                        ProgressView(value: Double(task.completedItems), total: Double(task.totalItems))
+                        HStack {
+                            Text(task.phase)
+                            Spacer()
+                            Text("\(task.completedItems) / \(task.totalItems)")
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    } else {
+                        ProgressView()
+                        Text(task.phase)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    if !task.message.isEmpty {
+                        Text(task.message)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
 
                 TextField("https://control-plane.example.com", text: $baseURL)
                     .textFieldStyle(.roundedBorder)

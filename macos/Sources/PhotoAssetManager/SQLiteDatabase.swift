@@ -2059,7 +2059,8 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
-    func claimPendingLedgerUploadEntries(libraryID: String) throws -> [OperationLedgerEntry] {
+    func claimPendingLedgerUploadEntries(libraryID: String, limit: Int) throws -> [OperationLedgerEntry] {
+        precondition(limit > 0, "ledger upload claim limit must be positive")
         try recoverStaleLedgerUploads(olderThan: Date().addingTimeInterval(-Self.ledgerUploadClaimLeaseDuration))
         return try transaction {
             let pendingEntries = try prepare(
@@ -2072,8 +2073,9 @@ final class SQLiteDatabase: @unchecked Sendable {
                 WHERE q.status = ?
                   AND ol.library_id = ?
                 ORDER BY ol.hybrid_logical_time ASC, ol.device_id ASC, ol.op_id ASC
+                LIMIT ?
                 """,
-                [.text(LedgerUploadStatus.pending.rawValue), .text(libraryID)]
+                [.text(LedgerUploadStatus.pending.rawValue), .text(libraryID), .int(Int64(limit))]
             ) { statement in
                 try decodeLedgerEntry(statement)
             }

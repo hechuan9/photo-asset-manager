@@ -1980,6 +1980,57 @@ struct SyncLedgerTests {
         #expect(try database.syncCursor(peerID: "control-plane") == "cursor-before-upload")
     }
 
+    @Test func syncServiceUploadsPendingOperationsInBatches() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
+        let opIDs = [
+            UUID(uuidString: "00000000-0000-0000-0000-000000000100")!,
+            UUID(uuidString: "00000000-0000-0000-0000-000000000101")!,
+            UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
+        ]
+        var ops: [OperationLedgerEntry] = []
+        for index in 0..<opIDs.count {
+            ops.append(
+                OperationLedgerEntry.metadataSet(
+                    opID: opIDs[index],
+                    libraryID: "library",
+                    deviceID: SyncDeviceID("mac"),
+                    deviceSequence: Int64(index + 1),
+                    time: HybridLogicalTime(wallTimeMilliseconds: Int64(400 + index), counter: 0, nodeID: "mac"),
+                    actorID: "user",
+                    assetID: UUID(),
+                    field: .rating,
+                    value: .int(index + 1),
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_900 + Double(index))
+                )
+            )
+        }
+        for op in ops {
+            try database.appendLedgerEntry(op, uploadStatus: .pending)
+        }
+
+        let client = MockSyncControlPlaneClient()
+        let service = SyncService(
+            libraryID: "library",
+            peerID: "control-plane",
+            database: database,
+            client: client,
+            uploadBatchSize: 2
+        )
+
+        try await service.uploadPendingOperations()
+
+        #expect(client.uploadedRequests.count == 2)
+        #expect(client.uploadedRequests.first?.operations == Array(ops.prefix(2)))
+        #expect(client.uploadedRequests.dropFirst().first?.operations == [ops[2]])
+        #expect(try database.pendingLedgerUploadCount() == 0)
+        for op in ops {
+            #expect(try database.ledgerUploadStatus(opID: op.opID) == .acknowledged)
+        }
+    }
+
     @Test func syncServiceClaimsPendingOperationsOnceWhileUploadIsInFlight() async throws {
         let root = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
@@ -2067,7 +2118,7 @@ struct SyncLedgerTests {
             createdAt: Date(timeIntervalSince1970: 1_700_000_304)
         )
         try database.appendLedgerEntry(op, uploadStatus: .pending)
-        _ = try database.claimPendingLedgerUploadEntries(libraryID: "library")
+        _ = try database.claimPendingLedgerUploadEntries(libraryID: "library", limit: 100)
         try database.execute(
             """
             UPDATE sync_upload_queue

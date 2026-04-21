@@ -497,27 +497,80 @@ struct SyncService: Sendable {
     var peerID: String
     let database: SQLiteDatabase
     let client: SyncControlPlaneClient
+    var uploadBatchSize = 500
+    var progressReporter: (@Sendable (SyncServiceProgress) -> Void)?
 
     func uploadPendingOperations() async throws {
-        let claimed = try database.claimPendingLedgerUploadEntries(libraryID: libraryID)
+        var claimed = try database.claimPendingLedgerUploadEntries(
+            libraryID: libraryID,
+            limit: uploadBatchSize
+        )
         guard !claimed.isEmpty else { return }
 
-        do {
-            let response = try await client.uploadOperations(SyncOpsUploadRequest(operations: claimed), libraryID: libraryID)
-            try database.markLedgerEntriesAcknowledged(response.accepted, cursor: response.cursor)
-        } catch SyncControlPlaneHTTPError.conflict(let response) {
-            try database.markLedgerEntriesAcknowledged(response.accepted, cursor: response.cursor)
-            let acceptedIDs = Set(response.accepted.map(\.opID))
-            let unacceptedIDs = claimed.map(\.opID).filter { !acceptedIDs.contains($0) }
-            try? database.restoreClaimedLedgerUploadEntries(unacceptedIDs, lastError: String(reflecting: SyncControlPlaneHTTPError.conflict(response)))
-            throw SyncControlPlaneHTTPError.conflict(response)
-        } catch {
-            try? database.restoreClaimedLedgerUploadEntries(claimed.map(\.opID), lastError: String(reflecting: error))
-            throw error
+        let totalPending = try database.pendingLedgerUploadCount() + claimed.count
+
+        var uploadedCount = 0
+        progressReporter?(
+            SyncServiceProgress(
+                phase: .uploadingLedger,
+                completedItems: uploadedCount,
+                totalItems: totalPending,
+                message: "准备上传 \(totalPending) 条 ledger"
+            )
+        )
+
+        while true {
+            do {
+                let response = try await client.uploadOperations(
+                    SyncOpsUploadRequest(operations: claimed),
+                    libraryID: libraryID
+                )
+                try database.markLedgerEntriesAcknowledged(response.accepted, cursor: response.cursor)
+                uploadedCount += response.accepted.count
+                progressReporter?(
+                    SyncServiceProgress(
+                        phase: .uploadingLedger,
+                        completedItems: uploadedCount,
+                        totalItems: totalPending,
+                        message: "已上传 \(uploadedCount) / \(totalPending) 条 ledger"
+                    )
+                )
+            } catch SyncControlPlaneHTTPError.conflict(let response) {
+                try database.markLedgerEntriesAcknowledged(response.accepted, cursor: response.cursor)
+                let acceptedIDs = Set(response.accepted.map(\.opID))
+                let unacceptedIDs = claimed.map(\.opID).filter { !acceptedIDs.contains($0) }
+                try? database.restoreClaimedLedgerUploadEntries(
+                    unacceptedIDs,
+                    lastError: String(reflecting: SyncControlPlaneHTTPError.conflict(response))
+                )
+                throw SyncControlPlaneHTTPError.conflict(response)
+            } catch {
+                try? database.restoreClaimedLedgerUploadEntries(
+                    claimed.map(\.opID),
+                    lastError: String(reflecting: error)
+                )
+                throw error
+            }
+
+            claimed = try database.claimPendingLedgerUploadEntries(
+                libraryID: libraryID,
+                limit: uploadBatchSize
+            )
+            if claimed.isEmpty {
+                return
+            }
         }
     }
 
     func pullRemoteOperations() async throws {
+        progressReporter?(
+            SyncServiceProgress(
+                phase: .pullingRemoteLedger,
+                completedItems: 0,
+                totalItems: 0,
+                message: "正在拉取远端变更"
+            )
+        )
         var cursor = try database.syncCursor(peerID: peerID)
 
         while true {
@@ -538,4 +591,16 @@ struct SyncService: Sendable {
         try await uploadPendingOperations()
         try await pullRemoteOperations()
     }
+}
+
+enum SyncServiceProgressPhase: Sendable {
+    case uploadingLedger
+    case pullingRemoteLedger
+}
+
+struct SyncServiceProgress: Sendable {
+    var phase: SyncServiceProgressPhase
+    var completedItems: Int
+    var totalItems: Int
+    var message: String
 }

@@ -22,6 +22,7 @@ final class LibraryStore: ObservableObject {
     @Published var migrationReport: String?
     @Published var blockingTask: BlockingTaskReport?
     @Published var backgroundTask: BackgroundTaskReport?
+    @Published var syncProgressTask: BackgroundTaskReport?
     @Published var hasMoreAssets = false
     @Published var pendingBrowseSelection: BrowseSelection?
     @Published private(set) var isSyncing = false
@@ -97,7 +98,7 @@ final class LibraryStore: ObservableObject {
             sourceDirectories = try database.sourceDirectories()
             indexedBrowseFolders = try database.browseFolders()
             refresh()
-            reloadSyncConfiguration(scheduleSync: false)
+            reloadSyncConfiguration(scheduleSync: true)
             if performStartupWork {
                 resumeInterruptedFolderMoveIfNeeded()
                 startStartupLibraryOrganizationIfNeeded()
@@ -129,6 +130,7 @@ final class LibraryStore: ObservableObject {
 
     func reloadSyncConfiguration(scheduleSync: Bool = true) {
         syncConfiguration = SyncClientConfiguration.load()
+        syncProgressTask = nil
         if syncConfiguration.hasRemoteSync {
             if scheduleSync {
                 scheduleAutomaticSync(reason: "同步配置已更新", immediate: true)
@@ -1787,12 +1789,18 @@ final class LibraryStore: ObservableObject {
 
         guard let baseURL = configuration.baseURL else {
             mergePendingThumbnailUploads(queuedThumbnails)
+            syncProgressTask = nil
             lastSyncSummary = queuedThumbnails.isEmpty ? "未配置自动同步" : "未配置自动同步，待上传缩略图已保留"
             return
         }
 
         isSyncing = true
         lastSyncSummary = "自动同步中"
+        syncProgressTask = BackgroundTaskReport(
+            title: "自动同步",
+            phase: "准备同步",
+            message: "正在统计待补传缩略图和 ledger 队列。"
+        )
 
         let database = database
         let libraryID = syncLibraryID
@@ -1820,13 +1828,23 @@ final class LibraryStore: ObservableObject {
                     libraryID: libraryID,
                     database: database,
                     controlPlane: client,
-                    commandLayer: commandLayer
+                    commandLayer: commandLayer,
+                    progressReporter: { progress in
+                        Task { @MainActor in
+                            self.syncProgressTask = Self.syncProgressReport(for: progress)
+                        }
+                    }
                 )
                 let service = SyncService(
                     libraryID: libraryID,
                     peerID: peerID,
                     database: database,
-                    client: client
+                    client: client,
+                    progressReporter: { progress in
+                        Task { @MainActor in
+                            self.syncProgressTask = Self.syncProgressReport(for: progress)
+                        }
+                    }
                 )
                 try await service.sync()
                 return AutomaticSyncOutcome(
@@ -1843,6 +1861,12 @@ final class LibraryStore: ObservableObject {
                 pendingAutomaticSyncReason = "重试缩略图上传"
             }
             isSyncing = false
+            syncProgressTask = BackgroundTaskReport(
+                title: "自动同步",
+                phase: "同步完成",
+                message: Self.syncSummaryText(reason: reason, outcome: outcome),
+                isFinished: true
+            )
             lastSyncSummary = Self.syncSummaryText(
                 reason: reason,
                 outcome: outcome
@@ -1852,6 +1876,7 @@ final class LibraryStore: ObservableObject {
             pendingAutomaticSync = true
             pendingAutomaticSyncReason = reason
             isSyncing = false
+            syncProgressTask = nil
             lastSyncSummary = "自动同步失败"
             lastError = error.fullTrace
         }
@@ -1893,7 +1918,8 @@ final class LibraryStore: ObservableObject {
         libraryID: String,
         database: SQLiteDatabase,
         controlPlane: SyncControlPlaneHTTPClient,
-        commandLayer: SyncCommandLayer
+        commandLayer: SyncCommandLayer,
+        progressReporter: @escaping @Sendable (AutomaticSyncProgress) -> Void
     ) async throws -> ThumbnailUploadOutcome {
         let deduped = Dictionary(uniqueKeysWithValues: candidates.map { ($0.assetID, $0) })
         let service = DerivativeUploadService(
@@ -1905,9 +1931,29 @@ final class LibraryStore: ObservableObject {
 
         var uploadedCount = 0
         var failedCandidates: [ScannedDerivativeUploadCandidate] = []
-        for candidate in deduped.values.sorted(by: { $0.assetID.uuidString < $1.assetID.uuidString }) {
+        let sortedCandidates = deduped.values.sorted(by: { $0.assetID.uuidString < $1.assetID.uuidString })
+        let totalCandidates = sortedCandidates.count
+        progressReporter(
+            AutomaticSyncProgress(
+                phase: .uploadingThumbnails,
+                completedItems: 0,
+                totalItems: totalCandidates,
+                message: totalCandidates == 0 ? "没有待补传缩略图" : "准备补传 \(totalCandidates) 张缩略图"
+            )
+        )
+        for (index, candidate) in sortedCandidates.enumerated() {
             guard candidate.role == .thumbnail else { continue }
-            guard FileManager.default.fileExists(atPath: candidate.fileURL.path) else { continue }
+            guard FileManager.default.fileExists(atPath: candidate.fileURL.path) else {
+                progressReporter(
+                    AutomaticSyncProgress(
+                        phase: .uploadingThumbnails,
+                        completedItems: index + 1,
+                        totalItems: totalCandidates,
+                        message: "跳过缺失缩略图 \(index + 1) / \(totalCandidates)"
+                    )
+                )
+                continue
+            }
 
             do {
                 let fileSize = try Int64(candidate.fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
@@ -1920,6 +1966,14 @@ final class LibraryStore: ObservableObject {
                     $0.role == .thumbnail && $0.fileObject == fileObject
                 }
                 if existingDerivative != nil {
+                    progressReporter(
+                        AutomaticSyncProgress(
+                            phase: .uploadingThumbnails,
+                            completedItems: index + 1,
+                            totalItems: totalCandidates,
+                            message: "缩略图已存在 \(index + 1) / \(totalCandidates)"
+                        )
+                    )
                     continue
                 }
 
@@ -1930,8 +1984,24 @@ final class LibraryStore: ObservableObject {
                     pixelSize: try pixelSize(for: candidate.fileURL)
                 )
                 uploadedCount += 1
+                progressReporter(
+                    AutomaticSyncProgress(
+                        phase: .uploadingThumbnails,
+                        completedItems: index + 1,
+                        totalItems: totalCandidates,
+                        message: "已补传 \(uploadedCount) 张缩略图"
+                    )
+                )
             } catch {
                 failedCandidates.append(candidate)
+                progressReporter(
+                    AutomaticSyncProgress(
+                        phase: .uploadingThumbnails,
+                        completedItems: index + 1,
+                        totalItems: totalCandidates,
+                        message: "补传失败 \(failedCandidates.count) / \(totalCandidates)"
+                    )
+                )
             }
         }
 
@@ -1971,6 +2041,52 @@ final class LibraryStore: ObservableObject {
         }
         let detail = parts.joined(separator: " · ")
         return detail.isEmpty ? "\(reason)完成" : "\(reason) · \(detail)"
+    }
+
+    nonisolated private static func syncProgressReport(for progress: AutomaticSyncProgress) -> BackgroundTaskReport {
+        switch progress.phase {
+        case .uploadingThumbnails:
+            return BackgroundTaskReport(
+                title: "自动同步",
+                phase: "补传缩略图",
+                totalItems: progress.totalItems,
+                completedItems: progress.completedItems,
+                message: progress.message
+            )
+        case .uploadingLedger:
+            return BackgroundTaskReport(
+                title: "自动同步",
+                phase: "上传 ledger",
+                totalItems: progress.totalItems,
+                completedItems: progress.completedItems,
+                message: progress.message
+            )
+        case .pullingRemoteLedger:
+            return BackgroundTaskReport(
+                title: "自动同步",
+                phase: "拉取远端变更",
+                message: progress.message
+            )
+        }
+    }
+
+    nonisolated private static func syncProgressReport(for progress: SyncServiceProgress) -> BackgroundTaskReport {
+        switch progress.phase {
+        case .uploadingLedger:
+            return BackgroundTaskReport(
+                title: "自动同步",
+                phase: "上传 ledger",
+                totalItems: progress.totalItems,
+                completedItems: progress.completedItems,
+                message: progress.message
+            )
+        case .pullingRemoteLedger:
+            return BackgroundTaskReport(
+                title: "自动同步",
+                phase: "拉取远端变更",
+                message: progress.message
+            )
+        }
     }
 
     nonisolated private static func backfillLedger(
@@ -2142,6 +2258,19 @@ private struct AutomaticSyncOutcome: Sendable {
 private struct ThumbnailUploadOutcome: Sendable {
     var uploadedCount: Int
     var failedCandidates: [ScannedDerivativeUploadCandidate]
+}
+
+private enum AutomaticSyncProgressPhase: Sendable {
+    case uploadingThumbnails
+    case uploadingLedger
+    case pullingRemoteLedger
+}
+
+private struct AutomaticSyncProgress: Sendable {
+    var phase: AutomaticSyncProgressPhase
+    var completedItems: Int
+    var totalItems: Int
+    var message: String
 }
 
 private struct LedgerBackfillOutcome: Sendable {
