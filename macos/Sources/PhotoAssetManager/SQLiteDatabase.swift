@@ -1778,6 +1778,46 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
+    func thumbnailsNeedingDerivativeUpload() throws -> [FileInstance] {
+        let sql = """
+        SELECT file_instances.id, file_instances.asset_id, file_instances.path, file_instances.device_id,
+               file_instances.storage_kind, file_instances.file_role, file_instances.authority_role,
+               file_instances.sync_status, file_instances.size_bytes, file_instances.content_hash,
+               file_instances.last_seen_at, file_instances.availability
+        FROM file_instances
+        LEFT JOIN derivative_objects d
+          ON d.asset_id = file_instances.asset_id
+         AND d.role = 'thumbnail'
+        LEFT JOIN file_objects fo
+          ON fo.id = d.file_object_id
+        WHERE file_instances.file_role = 'thumbnail'
+          AND (
+            d.asset_id IS NULL
+            OR fo.content_hash IS NULL
+            OR fo.content_hash != file_instances.content_hash
+            OR fo.size_bytes != file_instances.size_bytes
+            OR fo.file_role != file_instances.file_role
+          )
+        ORDER BY path
+        """
+        return try prepare(sql, []) { statement in
+            FileInstance(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                assetID: UUID(uuidString: statement.text(1)) ?? UUID(),
+                path: statement.text(2),
+                deviceID: statement.text(3),
+                storageKind: StorageKind(rawValue: statement.text(4)) ?? .local,
+                fileRole: FileRole(rawValue: statement.text(5)) ?? .thumbnail,
+                authorityRole: AuthorityRole(rawValue: statement.text(6)) ?? .cache,
+                syncStatus: SyncStatus(rawValue: statement.text(7)) ?? .cacheOnly,
+                sizeBytes: statement.int64(8),
+                contentHash: statement.text(9),
+                lastSeenAt: DateCoding.decode(statement.text(10)) ?? Date(),
+                availability: Availability(rawValue: statement.text(11)) ?? .missing
+            )
+        }
+    }
+
     func updateFileInstanceLocation(id: UUID, path: String, hash: String, sizeBytes: Int64) throws {
         try execute(
             """

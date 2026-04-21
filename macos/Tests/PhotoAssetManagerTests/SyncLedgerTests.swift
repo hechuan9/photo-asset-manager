@@ -436,6 +436,71 @@ struct SyncLedgerTests {
         }
     }
 
+    @Test func thumbnailsNeedingDerivativeUploadOnlyReturnsMissingOrStaleThumbnailDerivatives() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
+        let assetNeedingUpload = UUID(uuidString: "00000000-0000-0000-0000-00000000bd01")!
+        let assetAlreadyUploaded = UUID(uuidString: "00000000-0000-0000-0000-00000000bd02")!
+        let createdAt = DateCoding.encode(Date(timeIntervalSince1970: 1_700_006_000))
+
+        for assetID in [assetNeedingUpload, assetAlreadyUploaded] {
+            try database.execute(
+                """
+                INSERT INTO assets (
+                    id, capture_time, camera_make, camera_model, lens_model, original_filename,
+                    content_fingerprint, metadata_fingerprint, rating, flag, flag_state, color_label, tags, created_at, updated_at
+                ) VALUES (
+                    '\(assetID.uuidString)', NULL, '', '', '', '\(assetID.uuidString).jpg',
+                    'asset-fp-\(assetID.uuidString)', 'metadata-fp-\(assetID.uuidString)', 0, 0, 'unflagged', NULL, '[]', '\(createdAt)', '\(createdAt)'
+                )
+                """
+            )
+        }
+
+        let thumbnailAPath = root.appendingPathComponent("thumb-a.jpg").path
+        let thumbnailBPath = root.appendingPathComponent("thumb-b.jpg").path
+        try database.execute(
+            """
+            INSERT INTO file_instances (
+                id, asset_id, path, device_id, storage_kind, file_role, authority_role,
+                sync_status, size_bytes, content_hash, last_seen_at, availability
+            ) VALUES
+            (
+                '00000000-0000-0000-0000-00000000bd11', '\(assetNeedingUpload.uuidString)', '\(thumbnailAPath)',
+                'mac', 'local', 'thumbnail', 'cache', 'cache_only', 111, 'thumb-hash-a', '\(createdAt)', 'online'
+            ),
+            (
+                '00000000-0000-0000-0000-00000000bd12', '\(assetAlreadyUploaded.uuidString)', '\(thumbnailBPath)',
+                'mac', 'local', 'thumbnail', 'cache', 'cache_only', 222, 'thumb-hash-b', '\(createdAt)', 'online'
+            )
+            """
+        )
+        try database.execute(
+            """
+            INSERT INTO file_objects (
+                id, content_hash, size_bytes, file_role, created_at
+            ) VALUES (
+                'thumb-hash-b:222:thumbnail', 'thumb-hash-b', 222, 'thumbnail', '\(createdAt)'
+            )
+            """
+        )
+        try database.execute(
+            """
+            INSERT INTO derivative_objects (
+                asset_id, role, file_object_id, s3_bucket, s3_key, s3_etag, pixel_width, pixel_height, updated_at
+            ) VALUES (
+                '\(assetAlreadyUploaded.uuidString)', 'thumbnail', 'thumb-hash-b:222:thumbnail',
+                'bucket', 'key', 'etag', 400, 300, '\(createdAt)'
+            )
+            """
+        )
+
+        let candidates = try database.thumbnailsNeedingDerivativeUpload()
+
+        #expect(candidates.map(\.assetID) == [assetNeedingUpload])
+    }
+
     @Test func commandLayerDeclaresS3ThumbnailAndPreviewDerivativesWithoutStoringBytesInLedger() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -959,6 +1024,69 @@ struct SyncLedgerTests {
             #expect(spy.moveToTrashCalls.first?.1 == "deleted_from_library")
             #expect(pendingEntries.map(\.opType) == [.moveToTrash])
             #expect(try database.pendingLedgerUploadCount() == 1)
+        }
+    }
+
+    @MainActor
+    @Test func libraryStoreCanManuallyBackfillLedgerBeforeRemoteSync() async throws {
+        try await withTempDatabaseAsync { database, databaseURL in
+            let assetID = UUID(uuidString: "00000000-0000-0000-0000-00000000be01")!
+            let createdAt = DateCoding.encode(Date(timeIntervalSince1970: 1_700_007_000))
+            let thumbnailURL = databaseURL.deletingLastPathComponent().appendingPathComponent("manual-backfill-thumb.jpg")
+            try Data("thumb".utf8).write(to: thumbnailURL)
+
+            try database.execute(
+                """
+                INSERT INTO assets (
+                    id, capture_time, camera_make, camera_model, lens_model, original_filename,
+                    content_fingerprint, metadata_fingerprint, rating, flag, flag_state, color_label, tags, created_at, updated_at
+                ) VALUES (
+                    '\(assetID.uuidString)', NULL, 'FUJIFILM', 'X100VI', '', 'IMG_0001.JPG',
+                    'asset-fp', 'metadata-fp', 4, 0, 'picked', NULL, '["travel"]', '\(createdAt)', '\(createdAt)'
+                )
+                """
+            )
+            try database.execute(
+                """
+                INSERT INTO file_instances (
+                    id, asset_id, path, device_id, storage_kind, file_role, authority_role,
+                    sync_status, size_bytes, content_hash, last_seen_at, availability
+                ) VALUES (
+                    '00000000-0000-0000-0000-00000000be02', '\(assetID.uuidString)', '\(thumbnailURL.path)',
+                    'mac', 'local', 'thumbnail', 'cache', 'cache_only', 5, 'thumb-hash', '\(createdAt)', 'online'
+                )
+                """
+            )
+
+            let store = LibraryStore(
+                databasePath: databaseURL,
+                database: database,
+                syncCommandLayerFactory: {
+                    SyncCommandLayer(
+                        libraryID: "local-library",
+                        deviceID: SyncDeviceID("mac"),
+                        actorID: "user",
+                        database: database
+                    )
+                },
+                performStartupWork: false
+            )
+
+            store.backfillSyncLedger()
+
+            try await waitUntil(timeoutSeconds: 3) {
+                store.backgroundTask?.phase == "同步 ledger 补齐完成"
+            }
+
+            let entries = try database.ledgerEntries(libraryID: "local-library")
+            let migrationState = try #require(try database.syncMigrationState(libraryID: "local-library"))
+
+            #expect(entries.map(\.opType) == [.assetSnapshotDeclared, .filePlacementSnapshotDeclared])
+            #expect(entries.map(\.actorID).allSatisfy { $0 == "system:migration" })
+            #expect(migrationState.projectionVerified == true)
+            #expect(store.lastSyncSummary.contains("已补齐初始 ledger"))
+            #expect(store.lastSyncSummary.contains("待上传 1 张缩略图"))
+            #expect(store.backgroundTask?.phase == "同步 ledger 补齐完成")
         }
     }
 

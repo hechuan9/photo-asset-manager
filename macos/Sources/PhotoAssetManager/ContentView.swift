@@ -577,6 +577,11 @@ struct SyncStatusPopover: View {
                         library.reloadSyncConfiguration()
                     }
 
+                    Button("补齐 ledger") {
+                        library.backfillSyncLedger()
+                    }
+                    .disabled(library.isBusy)
+
                     Button("立即同步") {
                         library.reloadSyncConfiguration(scheduleSync: false)
                         library.forceAutomaticSync()

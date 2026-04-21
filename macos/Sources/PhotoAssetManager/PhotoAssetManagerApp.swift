@@ -126,6 +126,13 @@ struct ToolCommands: Commands {
 
     var body: some Commands {
         CommandMenu("工具") {
+            Button("补齐同步 Ledger") {
+                library.backfillSyncLedger()
+            }
+            .disabled(library.isBusy)
+
+            Divider()
+
             Button("补齐拍摄时间") {
                 library.fillMissingCaptureTimes()
             }

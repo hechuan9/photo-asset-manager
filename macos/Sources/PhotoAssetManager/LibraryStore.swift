@@ -51,6 +51,7 @@ final class LibraryStore: ObservableObject {
     private let syncLibraryID = "local-library"
     private let syncPeerID = "control-plane"
     private let automaticSyncDebounceNanoseconds: UInt64 = 800_000_000
+    private let syncMigrationActorID = "system:migration"
 
     convenience init() {
         do {
@@ -141,6 +142,57 @@ final class LibraryStore: ObservableObject {
 
     func forceAutomaticSync() {
         scheduleAutomaticSync(reason: "手动触发同步", immediate: true)
+    }
+
+    func backfillSyncLedger() {
+        guard !isBusy else { return }
+        lastError = nil
+        blockingTask = BlockingTaskReport(
+            title: "工具",
+            phase: "补齐同步 ledger",
+            message: "正在把当前资料库状态写入 append-only 初始快照。"
+        )
+
+        let database = database
+        let libraryID = syncLibraryID
+        let migrationActorID = syncMigrationActorID
+        let shouldScheduleSync = hasRemoteSyncConfiguration
+        Task {
+            do {
+                let outcome = try await Task.detached(priority: .utility) {
+                    try Self.backfillLedger(
+                        database: database,
+                        libraryID: libraryID,
+                        deviceID: SyncDeviceID(currentDeviceID()),
+                        actorID: migrationActorID
+                    )
+                }.value
+
+                blockingTask = nil
+                backgroundTask = BackgroundTaskReport(
+                    title: "工具",
+                    phase: outcome.phase,
+                    totalItems: outcome.ledgerHighWatermark,
+                    completedItems: outcome.ledgerHighWatermark,
+                    message: outcome.message,
+                    isFinished: true
+                )
+                lastSyncSummary = outcome.syncSummary
+
+                if shouldScheduleSync {
+                    scheduleAutomaticSync(reason: "ledger 补齐完成", immediate: true)
+                }
+            } catch {
+                blockingTask = nil
+                backgroundTask = BackgroundTaskReport(
+                    title: "工具",
+                    phase: "补齐同步 ledger 失败",
+                    message: error.localizedDescription,
+                    isFinished: true
+                )
+                lastError = error.fullTrace
+            }
+        }
     }
 
     func chooseAndAddFolders(scanImmediately: Bool) {
@@ -1747,9 +1799,7 @@ final class LibraryStore: ObservableObject {
             let outcome = try await Task.detached(priority: .utility) {
                 let didBootstrap = try Self.bootstrapLedgerIfNeeded(database: database, libraryID: libraryID)
                 var allThumbnails = queuedThumbnails
-                if didBootstrap {
-                    allThumbnails.append(contentsOf: try Self.bootstrapThumbnailCandidates(database: database))
-                }
+                allThumbnails.append(contentsOf: try Self.pendingThumbnailSyncCandidates(database: database))
 
                 let client = SyncControlPlaneHTTPClient(
                     baseURL: baseURL,
@@ -1817,15 +1867,15 @@ final class LibraryStore: ObservableObject {
         let bootstrapper = SyncBootstrapper(
             libraryID: libraryID,
             deviceID: SyncDeviceID(currentDeviceID()),
-            actorID: NSUserName(),
+            actorID: "system:migration",
             database: database
         )
         _ = try bootstrapper.bootstrapExistingLibraryToLedger()
         return true
     }
 
-    nonisolated private static func bootstrapThumbnailCandidates(database: SQLiteDatabase) throws -> [ScannedDerivativeUploadCandidate] {
-        try database.thumbnailFileInstances().map {
+    nonisolated private static func pendingThumbnailSyncCandidates(database: SQLiteDatabase) throws -> [ScannedDerivativeUploadCandidate] {
+        try database.thumbnailsNeedingDerivativeUpload().map {
             ScannedDerivativeUploadCandidate(
                 assetID: $0.assetID,
                 role: .thumbnail,
@@ -1919,6 +1969,103 @@ final class LibraryStore: ObservableObject {
         return detail.isEmpty ? "\(reason)完成" : "\(reason) · \(detail)"
     }
 
+    nonisolated private static func backfillLedger(
+        database: SQLiteDatabase,
+        libraryID: String,
+        deviceID: SyncDeviceID,
+        actorID: String
+    ) throws -> LedgerBackfillOutcome {
+        let migrationState = try database.syncMigrationState(libraryID: libraryID)
+        let existingLedgerCount = try database.ledgerEntries(libraryID: libraryID).count
+
+        if let migrationState, migrationState.status == .completed {
+            let pendingThumbnails = try database.thumbnailsNeedingDerivativeUpload().count
+            return LedgerBackfillOutcome(
+                phase: "同步 ledger 已补齐",
+                message: Self.ledgerBackfillMessage(
+                    createdOperationCount: 0,
+                    ledgerHighWatermark: migrationState.ledgerHighWatermark,
+                    projectionVerified: migrationState.projectionVerified,
+                    pendingThumbnailCount: pendingThumbnails,
+                    alreadyCompleted: true
+                ),
+                syncSummary: Self.ledgerBackfillSummary(
+                    pendingThumbnailCount: pendingThumbnails,
+                    projectionVerified: migrationState.projectionVerified
+                ),
+                ledgerHighWatermark: migrationState.ledgerHighWatermark
+            )
+        }
+
+        if migrationState == nil, existingLedgerCount > 0 {
+            throw NSError(
+                domain: "PhotoAssetManager",
+                code: 2001,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "当前资料库已经存在 \(existingLedgerCount) 条 ledger 记录，不能再做初始 backfill。请直接继续自动同步，或先人工检查 migration 状态。"
+                ]
+            )
+        }
+
+        let result = try SyncBootstrapper(
+            libraryID: libraryID,
+            deviceID: deviceID,
+            actorID: actorID,
+            database: database
+        ).bootstrapExistingLibraryToLedger()
+        let pendingThumbnails = try database.thumbnailsNeedingDerivativeUpload().count
+        return LedgerBackfillOutcome(
+            phase: "同步 ledger 补齐完成",
+            message: Self.ledgerBackfillMessage(
+                createdOperationCount: result.createdOperationCount,
+                ledgerHighWatermark: result.ledgerHighWatermark,
+                projectionVerified: result.projectionVerified,
+                pendingThumbnailCount: pendingThumbnails,
+                alreadyCompleted: false
+            ),
+            syncSummary: Self.ledgerBackfillSummary(
+                pendingThumbnailCount: pendingThumbnails,
+                projectionVerified: result.projectionVerified
+            ),
+            ledgerHighWatermark: result.ledgerHighWatermark
+        )
+    }
+
+    nonisolated private static func ledgerBackfillMessage(
+        createdOperationCount: Int,
+        ledgerHighWatermark: Int,
+        projectionVerified: Bool,
+        pendingThumbnailCount: Int,
+        alreadyCompleted: Bool
+    ) -> String {
+        var parts: [String] = []
+        if alreadyCompleted {
+            parts.append("初始 ledger 已存在")
+        } else {
+            parts.append("新增 \(createdOperationCount) 条初始操作")
+        }
+        parts.append("当前水位 \(ledgerHighWatermark) 条")
+        parts.append(projectionVerified ? "projection 校验通过" : "projection 校验未通过")
+        if pendingThumbnailCount > 0 {
+            parts.append("待自动上传 \(pendingThumbnailCount) 张缩略图")
+        }
+        return parts.joined(separator: "，")
+    }
+
+    nonisolated private static func ledgerBackfillSummary(
+        pendingThumbnailCount: Int,
+        projectionVerified: Bool
+    ) -> String {
+        var parts = ["已补齐初始 ledger"]
+        if projectionVerified {
+            parts.append("projection 已校验")
+        }
+        if pendingThumbnailCount > 0 {
+            parts.append("待上传 \(pendingThumbnailCount) 张缩略图")
+        }
+        return parts.joined(separator: " · ")
+    }
+
     private static func applicationSupport() throws -> URL {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("PhotoAssetManager", isDirectory: true)
@@ -1953,6 +2100,13 @@ private struct AutomaticSyncOutcome: Sendable {
 private struct ThumbnailUploadOutcome: Sendable {
     var uploadedCount: Int
     var failedCandidates: [ScannedDerivativeUploadCandidate]
+}
+
+private struct LedgerBackfillOutcome: Sendable {
+    var phase: String
+    var message: String
+    var syncSummary: String
+    var ledgerHighWatermark: Int
 }
 
 private extension Array {
