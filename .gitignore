@@ -5,6 +5,7 @@
 terraform.tfstate
 terraform.tfstate.*
 DerivedData/
+.deriveddata-ios/
 *.xcodeproj/project.xcworkspace/xcuserdata/
 *.xcworkspace/xcuserdata/
 xcuserdata/

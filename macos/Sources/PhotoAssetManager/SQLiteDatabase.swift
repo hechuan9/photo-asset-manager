@@ -1,4 +1,7 @@
 import Foundation
+#if os(iOS)
+import UIKit
+#endif
 import SQLite3
 
 enum DatabaseError: LocalizedError {
@@ -845,103 +848,122 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
-    func upsertScannedFile(_ scanned: ScannedFile, batchID: UUID) throws -> Bool {
-        let existingAssetID = try assetID(contentHash: scanned.contentHash, metadataFingerprint: scanned.metadataFingerprint)
-        let assetID = existingAssetID ?? UUID()
-        let now = Date()
-        let isNewAsset = existingAssetID == nil
+    #if os(macOS)
+    func upsertScannedFile(
+        _ scanned: ScannedFile,
+        batchID: UUID,
+        ledgerContext: ScannedFileLedgerContext? = nil
+    ) throws -> ScannedFileUpsertResult {
+        try transaction {
+            let existingAssetID = try assetID(contentHash: scanned.contentHash, metadataFingerprint: scanned.metadataFingerprint)
+            let assetID = existingAssetID ?? UUID()
+            let now = Date()
+            let isNewAsset = existingAssetID == nil
 
-        if isNewAsset {
+            if isNewAsset {
+                try execute(
+                    """
+                    INSERT INTO assets (
+                        id, capture_time, camera_make, camera_model, lens_model, original_filename,
+                        content_fingerprint, metadata_fingerprint, rating, flag, flag_state, color_label, tags, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'unflagged', NULL, '[]', ?, ?)
+                    """,
+                    [
+                        .text(assetID.uuidString),
+                        .nullableText(scanned.captureTime.map(DateCoding.encode)),
+                        .text(scanned.cameraMake),
+                        .text(scanned.cameraModel),
+                        .text(scanned.lensModel),
+                        .text(scanned.url.lastPathComponent),
+                        .text(scanned.contentHash),
+                        .text(scanned.metadataFingerprint),
+                        .int(Int64(scanned.rating)),
+                        .text(DateCoding.encode(now)),
+                        .text(DateCoding.encode(now))
+                    ]
+                )
+                try insertVersion(assetID: assetID, name: "Original", kind: .original, parentID: nil, notes: "导入批次 \(batchID.uuidString)")
+            } else {
+                try execute(
+                    """
+                    UPDATE assets
+                    SET rating = CASE WHEN rating = 0 AND ? > 0 THEN ? ELSE rating END,
+                        capture_time = CASE WHEN capture_time IS NULL THEN ? ELSE capture_time END,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    [
+                        .int(Int64(scanned.rating)),
+                        .int(Int64(scanned.rating)),
+                        .nullableText(scanned.captureTime.map(DateCoding.encode)),
+                        .text(DateCoding.encode(now)),
+                        .text(assetID.uuidString)
+                    ]
+                )
+            }
+
+            let existingFileID = try fileInstanceID(path: scanned.url.path)
+            let fileID = existingFileID ?? UUID()
             try execute(
                 """
-                INSERT INTO assets (
-                    id, capture_time, camera_make, camera_model, lens_model, original_filename,
-                    content_fingerprint, metadata_fingerprint, rating, flag, flag_state, color_label, tags, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'unflagged', NULL, '[]', ?, ?)
+                INSERT INTO file_instances (
+                    id, asset_id, path, device_id, storage_kind, file_role, authority_role,
+                    sync_status, size_bytes, content_hash, last_seen_at, availability
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    asset_id = excluded.asset_id,
+                    device_id = excluded.device_id,
+                    storage_kind = excluded.storage_kind,
+                    file_role = excluded.file_role,
+                    authority_role = excluded.authority_role,
+                    sync_status = excluded.sync_status,
+                    size_bytes = excluded.size_bytes,
+                    content_hash = excluded.content_hash,
+                    last_seen_at = excluded.last_seen_at,
+                    availability = excluded.availability
                 """,
                 [
+                    .text(fileID.uuidString),
                     .text(assetID.uuidString),
-                    .nullableText(scanned.captureTime.map(DateCoding.encode)),
-                    .text(scanned.cameraMake),
-                    .text(scanned.cameraModel),
-                    .text(scanned.lensModel),
-                    .text(scanned.url.lastPathComponent),
+                    .text(scanned.url.path),
+                    .text(scanned.deviceID),
+                    .text(scanned.storageKind.rawValue),
+                    .text(scanned.fileRole.rawValue),
+                    .text(scanned.authorityRole.rawValue),
+                    .text(scanned.syncStatus.rawValue),
+                    .int(scanned.sizeBytes),
                     .text(scanned.contentHash),
-                    .text(scanned.metadataFingerprint),
-                    .int(Int64(scanned.rating)),
                     .text(DateCoding.encode(now)),
-                    .text(DateCoding.encode(now))
+                    .text(Availability.online.rawValue)
                 ]
             )
-            try insertVersion(assetID: assetID, name: "Original", kind: .original, parentID: nil, notes: "导入批次 \(batchID.uuidString)")
-        } else {
-            try execute(
-                """
-                UPDATE assets
-                SET rating = CASE WHEN rating = 0 AND ? > 0 THEN ? ELSE rating END,
-                    capture_time = CASE WHEN capture_time IS NULL THEN ? ELSE capture_time END,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                [
-                    .int(Int64(scanned.rating)),
-                    .int(Int64(scanned.rating)),
-                    .nullableText(scanned.captureTime.map(DateCoding.encode)),
-                    .text(DateCoding.encode(now)),
-                    .text(assetID.uuidString)
-                ]
+            try upsertBrowseFolderMembership(filePath: scanned.url.path, fileInstanceID: fileID, storageKind: scanned.storageKind)
+
+            if let thumbnailURL = scanned.thumbnailURL {
+                try upsertAssetThumbnail(assetID: assetID, url: thumbnailURL, hash: scanned.thumbnailHash ?? "", sizeBytes: scanned.thumbnailSize)
+            }
+            if let previewURL = scanned.previewURL {
+                try upsertAssetDerivative(assetID: assetID, role: .preview, url: previewURL, hash: scanned.previewHash ?? "", sizeBytes: scanned.previewSize)
+            }
+
+            for sidecar in scanned.sidecars {
+                try upsertScannedSidecar(sidecar, assetID: assetID)
+            }
+
+            if let ledgerContext {
+                try appendScannedSnapshotAndPlacement(assetID: assetID, scanned: scanned, ledgerContext: ledgerContext)
+            }
+
+            let derivativeCandidates = scanned.thumbnailURL.map {
+                [ScannedDerivativeUploadCandidate(assetID: assetID, role: .thumbnail, fileURL: $0)]
+            } ?? []
+            return ScannedFileUpsertResult(
+                assetID: assetID,
+                insertedAsset: isNewAsset,
+                insertedLocation: existingFileID == nil,
+                derivativeCandidates: derivativeCandidates
             )
         }
-
-        let fileID = try fileInstanceID(path: scanned.url.path) ?? UUID()
-        let exists = try fileInstanceID(path: scanned.url.path) != nil
-        try execute(
-            """
-            INSERT INTO file_instances (
-                id, asset_id, path, device_id, storage_kind, file_role, authority_role,
-                sync_status, size_bytes, content_hash, last_seen_at, availability
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(path) DO UPDATE SET
-                asset_id = excluded.asset_id,
-                device_id = excluded.device_id,
-                storage_kind = excluded.storage_kind,
-                file_role = excluded.file_role,
-                authority_role = excluded.authority_role,
-                sync_status = excluded.sync_status,
-                size_bytes = excluded.size_bytes,
-                content_hash = excluded.content_hash,
-                last_seen_at = excluded.last_seen_at,
-                availability = excluded.availability
-            """,
-            [
-                .text(fileID.uuidString),
-                .text(assetID.uuidString),
-                .text(scanned.url.path),
-                .text(scanned.deviceID),
-                .text(scanned.storageKind.rawValue),
-                .text(scanned.fileRole.rawValue),
-                .text(scanned.authorityRole.rawValue),
-                .text(scanned.syncStatus.rawValue),
-                .int(scanned.sizeBytes),
-                .text(scanned.contentHash),
-                .text(DateCoding.encode(now)),
-                .text(Availability.online.rawValue)
-            ]
-        )
-        try upsertBrowseFolderMembership(filePath: scanned.url.path, fileInstanceID: fileID, storageKind: scanned.storageKind)
-
-        if let thumbnailURL = scanned.thumbnailURL {
-            try upsertAssetThumbnail(assetID: assetID, url: thumbnailURL, hash: scanned.thumbnailHash ?? "", sizeBytes: scanned.thumbnailSize)
-        }
-        if let previewURL = scanned.previewURL {
-            try upsertAssetDerivative(assetID: assetID, role: .preview, url: previewURL, hash: scanned.previewHash ?? "", sizeBytes: scanned.previewSize)
-        }
-
-        for sidecar in scanned.sidecars {
-            try upsertScannedSidecar(sidecar, assetID: assetID)
-        }
-
-        return isNewAsset || !exists
     }
 
     func upsertSidecarsForFileInstance(_ sidecars: [ScannedSidecar], fileInstanceID: UUID) throws {
@@ -989,6 +1011,120 @@ final class SQLiteDatabase: @unchecked Sendable {
         )
         try upsertBrowseFolderMembership(filePath: sidecar.url.path, fileInstanceID: fileID, storageKind: sidecar.storageKind)
     }
+
+    private func appendScannedSnapshotAndPlacement(
+        assetID: UUID,
+        scanned: ScannedFile,
+        ledgerContext: ScannedFileLedgerContext
+    ) throws {
+        guard let snapshot = try currentAssetSnapshot(assetID: assetID) else { return }
+        let clock = try reserveLedgerClock(
+            libraryID: ledgerContext.libraryID,
+            deviceID: ledgerContext.deviceID,
+            currentWallTimeMilliseconds: ledgerContext.currentWallTimeMilliseconds()
+        )
+        let fileObject = FileObjectID(
+            contentHash: scanned.contentHash,
+            sizeBytes: scanned.sizeBytes,
+            role: scanned.fileRole
+        )
+        let placement = FilePlacement(
+            fileObjectID: fileObject,
+            holderID: scanned.deviceID,
+            storageKind: scanned.storageKind,
+            authorityRole: scanned.authorityRole,
+            availability: .online
+        )
+        let entries = [
+            OperationLedgerEntry.assetSnapshotDeclared(
+                libraryID: ledgerContext.libraryID,
+                deviceID: ledgerContext.deviceID,
+                deviceSequence: clock.deviceSequence,
+                time: clock.hybridLogicalTime,
+                actorID: ledgerContext.actorID,
+                snapshot: snapshot
+            ),
+            OperationLedgerEntry.filePlacementSnapshotDeclared(
+                libraryID: ledgerContext.libraryID,
+                deviceID: ledgerContext.deviceID,
+                deviceSequence: clock.deviceSequence + 1,
+                time: clock.hybridLogicalTime,
+                actorID: ledgerContext.actorID,
+                assetID: assetID,
+                fileObject: fileObject,
+                placement: placement
+            )
+        ]
+        for entry in entries {
+            try appendLedgerEntryBody(entry, uploadStatus: .pending)
+        }
+    }
+
+    private func appendScannedAssetSnapshot(
+        assetID: UUID,
+        ledgerContext: ScannedFileLedgerContext
+    ) throws {
+        guard let snapshot = try currentAssetSnapshot(assetID: assetID) else { return }
+        let clock = try reserveLedgerClock(
+            libraryID: ledgerContext.libraryID,
+            deviceID: ledgerContext.deviceID,
+            currentWallTimeMilliseconds: ledgerContext.currentWallTimeMilliseconds()
+        )
+        try appendLedgerEntryBody(
+            .assetSnapshotDeclared(
+                libraryID: ledgerContext.libraryID,
+                deviceID: ledgerContext.deviceID,
+                deviceSequence: clock.deviceSequence,
+                time: clock.hybridLogicalTime,
+                actorID: ledgerContext.actorID,
+                snapshot: snapshot
+            ),
+            uploadStatus: .pending
+        )
+    }
+
+    private func currentAssetSnapshot(assetID: UUID) throws -> AssetSnapshot? {
+        let rows = try prepare(
+            """
+            SELECT id, capture_time, camera_make, camera_model, lens_model, original_filename,
+                   content_fingerprint, metadata_fingerprint, rating,
+                   COALESCE(flag_state, CASE WHEN flag = 1 THEN 'picked' ELSE 'unflagged' END),
+                   color_label, tags, created_at, updated_at
+            FROM assets
+            WHERE id = ?
+            LIMIT 1
+            """,
+            [.text(assetID.uuidString)]
+        ) { statement in
+            guard let assetID = UUID(uuidString: statement.text(0)) else {
+                throw DatabaseError.stepFailed("assets.id 不是 UUID：\(statement.text(0))")
+            }
+            guard let createdAt = DateCoding.decode(statement.text(12)) else {
+                throw DatabaseError.stepFailed("assets.created_at 无效：\(statement.text(12))")
+            }
+            guard let updatedAt = DateCoding.decode(statement.text(13)) else {
+                throw DatabaseError.stepFailed("assets.updated_at 无效：\(statement.text(13))")
+            }
+            return AssetSnapshot(
+                assetID: assetID,
+                captureTime: statement.optionalText(1).flatMap(DateCoding.decode),
+                cameraMake: statement.text(2),
+                cameraModel: statement.text(3),
+                lensModel: statement.text(4),
+                originalFilename: statement.text(5),
+                contentFingerprint: statement.text(6),
+                metadataFingerprint: statement.text(7),
+                rating: Int(statement.int(8)),
+                flagState: AssetFlagState(rawValue: statement.text(9)) ?? .unflagged,
+                colorLabel: statement.optionalText(10).flatMap(AssetColorLabel.init(rawValue:)),
+                tags: decodeTags(statement.text(11)),
+                createdAt: createdAt,
+                updatedAt: updatedAt
+            )
+        }
+        return rows.first
+    }
+    #endif
 
     func derivativeStoragePath() throws -> String? {
         try prepare("SELECT value FROM app_settings WHERE key = 'derivative_storage_path'", []) { statement in
@@ -1314,6 +1450,7 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
+    #if os(macOS)
     func removeDeletedFileInstance(_ file: FileInstance, deletionMethod: AssetFileDeletionMethod) throws {
         let now = DateCoding.encode(Date())
         try execute("BEGIN IMMEDIATE TRANSACTION")
@@ -1354,6 +1491,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             throw error
         }
     }
+    #endif
 
     func rewriteFolderMovePaths(job: FolderMoveJob, parentID: UUID?) throws {
         let now = DateCoding.encode(Date())
@@ -1474,9 +1612,14 @@ final class SQLiteDatabase: @unchecked Sendable {
     }
 
     func failFolderMoveJob(id: UUID, error: Error) throws {
+        #if os(macOS)
+        let detail = error.fullTrace
+        #else
+        let detail = String(reflecting: error)
+        #endif
         try execute(
             "UPDATE folder_move_jobs SET status = 'failed', error_detail = ?, updated_at = ? WHERE id = ?",
-            [.text(error.fullTrace), .text(DateCoding.encode(Date())), .text(id.uuidString)]
+            [.text(detail), .text(DateCoding.encode(Date())), .text(id.uuidString)]
         )
     }
 
@@ -1558,6 +1701,56 @@ final class SQLiteDatabase: @unchecked Sendable {
             ]
         )
     }
+
+    #if os(macOS)
+    func applyScannedMetadataBackfillIfNeeded(
+        fileInstanceID: UUID,
+        rating: Int,
+        captureTime: Date?,
+        ledgerContext: ScannedFileLedgerContext? = nil
+    ) throws -> Bool {
+        try transaction {
+            guard let assetID = try assetID(fileInstanceID: fileInstanceID) else { return false }
+            let rows = try prepare(
+                """
+                SELECT rating, capture_time
+                FROM assets
+                WHERE id = ?
+                LIMIT 1
+                """,
+                [.text(assetID.uuidString)]
+            ) { statement in
+                (
+                    rating: Int(statement.int(0)),
+                    captureTime: statement.optionalText(1).flatMap(DateCoding.decode)
+                )
+            }
+            guard let row = rows.first else { return false }
+
+            var changed = false
+            let now = DateCoding.encode(Date())
+            if row.rating == 0, rating > 0 {
+                try execute(
+                    "UPDATE assets SET rating = ?, updated_at = ? WHERE id = ?",
+                    [.int(Int64(rating)), .text(now), .text(assetID.uuidString)]
+                )
+                changed = true
+            }
+            if row.captureTime == nil, let captureTime {
+                try execute(
+                    "UPDATE assets SET capture_time = ?, updated_at = ? WHERE id = ?",
+                    [.text(DateCoding.encode(captureTime)), .text(now), .text(assetID.uuidString)]
+                )
+                changed = true
+            }
+
+            if changed, let ledgerContext {
+                try appendScannedAssetSnapshot(assetID: assetID, ledgerContext: ledgerContext)
+            }
+            return changed
+        }
+    }
+    #endif
 
     func thumbnailFileInstances() throws -> [FileInstance] {
         let sql = """
@@ -2204,8 +2397,8 @@ final class SQLiteDatabase: @unchecked Sendable {
     private func applyLedgerSideTables(_ entry: OperationLedgerEntry) throws {
         let now = DateCoding.encode(Date())
         switch entry.payload {
-        case .assetSnapshotDeclared:
-            break
+        case let .assetSnapshotDeclared(snapshot):
+            try upsertProjectedAssetSnapshot(snapshot)
         case let .filePlacementSnapshotDeclared(_, fileObject, placement):
             try upsertFileObject(fileObject, now: now)
             try upsertFilePlacement(placement, now: now)
@@ -2271,7 +2464,11 @@ final class SQLiteDatabase: @unchecked Sendable {
                 ),
                 now: now
             )
-        case .metadataSet, .tagsUpdated, .archiveRequested:
+        case let .metadataSet(assetID, field, value):
+            try updateProjectedAssetMetadata(assetID: assetID, field: field, value: value, now: now)
+        case let .tagsUpdated(assetID, add, remove):
+            try updateProjectedAssetTags(assetID: assetID, add: add, remove: remove, now: now)
+        case .archiveRequested:
             break
         }
     }
@@ -2345,6 +2542,122 @@ final class SQLiteDatabase: @unchecked Sendable {
         )
     }
 
+    private func upsertProjectedAssetSnapshot(_ snapshot: AssetSnapshot) throws {
+        try execute(
+            """
+            INSERT INTO assets (
+                id, capture_time, camera_make, camera_model, lens_model, original_filename,
+                content_fingerprint, metadata_fingerprint, rating, flag, flag_state, color_label,
+                tags, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                capture_time = excluded.capture_time,
+                camera_make = excluded.camera_make,
+                camera_model = excluded.camera_model,
+                lens_model = excluded.lens_model,
+                original_filename = excluded.original_filename,
+                content_fingerprint = excluded.content_fingerprint,
+                metadata_fingerprint = excluded.metadata_fingerprint,
+                rating = excluded.rating,
+                flag = excluded.flag,
+                flag_state = excluded.flag_state,
+                color_label = excluded.color_label,
+                tags = excluded.tags,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            """,
+            [
+                .text(snapshot.assetID.uuidString),
+                .nullableText(snapshot.captureTime.map(DateCoding.encode)),
+                .text(snapshot.cameraMake),
+                .text(snapshot.cameraModel),
+                .text(snapshot.lensModel),
+                .text(snapshot.originalFilename),
+                .text(snapshot.contentFingerprint),
+                .text(snapshot.metadataFingerprint),
+                .int(Int64(snapshot.rating)),
+                .int(snapshot.flagState == .picked ? 1 : 0),
+                .text(snapshot.flagState.rawValue),
+                .nullableText(snapshot.colorLabel?.rawValue),
+                .text(encodeTags(snapshot.tags)),
+                .text(DateCoding.encode(snapshot.createdAt)),
+                .text(DateCoding.encode(snapshot.updatedAt))
+            ]
+        )
+    }
+
+    private func updateProjectedAssetMetadata(
+        assetID: UUID,
+        field: AssetMetadataField,
+        value: LedgerValue,
+        now: String
+    ) throws {
+        switch field {
+        case .rating:
+            guard case let .int(rating) = value else { return }
+            try execute(
+                "UPDATE assets SET rating = ?, updated_at = ? WHERE id = ?",
+                [.int(Int64(rating)), .text(now), .text(assetID.uuidString)]
+            )
+        case .flagState:
+            guard case let .string(rawValue) = value, let flagState = AssetFlagState(rawValue: rawValue) else {
+                return
+            }
+            try execute(
+                "UPDATE assets SET flag_state = ?, flag = ?, updated_at = ? WHERE id = ?",
+                [
+                    .text(flagState.rawValue),
+                    .int(flagState == .picked ? 1 : 0),
+                    .text(now),
+                    .text(assetID.uuidString)
+                ]
+            )
+        case .colorLabel:
+            let colorLabelRaw: String?
+            switch value {
+            case let .string(rawValue):
+                guard let colorLabel = AssetColorLabel(rawValue: rawValue) else {
+                    throw DatabaseError.stepFailed("不支持的 color_label：\(rawValue)")
+                }
+                colorLabelRaw = colorLabel.rawValue
+            case .null:
+                colorLabelRaw = nil
+            case .int:
+                return
+            }
+            try execute(
+                "UPDATE assets SET color_label = ?, updated_at = ? WHERE id = ?",
+                [.nullableText(colorLabelRaw), .text(now), .text(assetID.uuidString)]
+            )
+        case .caption:
+            break
+        }
+    }
+
+    private func updateProjectedAssetTags(
+        assetID: UUID,
+        add: Set<String>,
+        remove: Set<String>,
+        now: String
+    ) throws {
+        let rows = try prepare(
+            "SELECT tags FROM assets WHERE id = ? LIMIT 1",
+            [.text(assetID.uuidString)]
+        ) { statement in
+            decodeTags(statement.text(0))
+        }
+        guard let existingTags = rows.first else { return }
+
+        var nextTags = Set(existingTags)
+        nextTags.subtract(remove)
+        nextTags.formUnion(add)
+
+        try execute(
+            "UPDATE assets SET tags = ?, updated_at = ? WHERE id = ?",
+            [.text(encodeTags(nextTags.sorted())), .text(now), .text(assetID.uuidString)]
+        )
+    }
+
     func markFileStatus(id: UUID, syncStatus: SyncStatus, authorityRole: AuthorityRole? = nil) throws {
         if let authorityRole {
             try execute(
@@ -2388,6 +2701,7 @@ final class SQLiteDatabase: @unchecked Sendable {
         )
     }
 
+    #if os(macOS)
     func insertExport(assetID: UUID, exportURL: URL, sourceVersionID: UUID?) throws {
         let hash = (try? FileHasher.sha256(url: exportURL)) ?? ""
         let size = (try? exportURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
@@ -2416,6 +2730,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             ]
         )
     }
+    #endif
 
     func writeOperation(action: String, source: String?, destination: String?, status: String, detail: String) throws {
         try execute(
@@ -3223,7 +3538,18 @@ struct SQLiteStatement {
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 func currentDeviceID() -> String {
+    #if os(iOS)
+    let defaults = UserDefaults.standard
+    let key = "photo_asset_manager.installation_device_id"
+    if let stored = defaults.string(forKey: key), !stored.isEmpty {
+        return stored
+    }
+    let generated = "ios-\(UUID().uuidString)"
+    defaults.set(generated, forKey: key)
+    return generated
+    #else
     Host.current().localizedName ?? Host.current().name ?? "mac"
+    #endif
 }
 
 func encodeTags(_ tags: [String]) -> String {

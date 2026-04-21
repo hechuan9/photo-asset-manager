@@ -403,6 +403,7 @@ struct SidebarView: View {
                 HStack {
                     Text("文件夹")
                     Spacer()
+                    SyncStatusPopover()
                     ThumbnailStoragePopover()
                     Button {
                         library.scanTrackedSources()
@@ -533,6 +534,57 @@ struct ThumbnailStoragePopover: View {
                 }
             }
             .frame(width: 320, alignment: .leading)
+            .padding(14)
+        }
+    }
+}
+
+struct SyncStatusPopover: View {
+    @EnvironmentObject private var library: LibraryStore
+    @AppStorage(SyncPreferenceKey.baseURL) private var baseURL = ""
+    @AppStorage(SyncPreferenceKey.accessCredential) private var accessCredential = ""
+    @State private var isPresented = false
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            Image(systemName: library.hasRemoteSyncConfiguration ? "icloud" : "icloud.slash")
+        }
+        .buttonStyle(.plain)
+        .help("自动同步")
+        .popover(isPresented: $isPresented) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("自动同步")
+                    .font(.headline)
+
+                Text(library.lastSyncSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextField("https://control-plane.example.com", text: $baseURL)
+                    .textFieldStyle(.roundedBorder)
+                SecureField("Bearer token（可留空）", text: $accessCredential)
+                    .textFieldStyle(.roundedBorder)
+
+                Text("macOS 会自动把 ledger 和缩略图上传到 control plane；不会把原图发给 iOS。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Button("保存") {
+                        library.reloadSyncConfiguration()
+                    }
+
+                    Button("立即同步") {
+                        library.reloadSyncConfiguration(scheduleSync: false)
+                        library.forceAutomaticSync()
+                    }
+                    .disabled(!library.hasRemoteSyncConfiguration || library.isSyncing)
+                }
+            }
+            .frame(width: 340, alignment: .leading)
             .padding(14)
         }
     }

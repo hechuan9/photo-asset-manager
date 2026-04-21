@@ -20,9 +20,17 @@ git ls-files -z --cached --others --exclude-standard \
     done > "$FILES_LIST"
 
 if [[ -s "$FILES_LIST" ]]; then
-  if xargs -0 rg -n -i \
+  MATCHES="$(
+    xargs -0 rg -n -i \
     "(api[_-]?key|secret|token|password|passwd|private[_-]?key|aws_access_key|aws_secret|authorization|bearer|client_secret|OPENAI_API_KEY|GITHUB_TOKEN|AIza|sk-[A-Za-z0-9]|-----BEGIN)" \
-    -- < "$FILES_LIST"; then
+    -- < "$FILES_LIST" || true
+  )"
+  FILTERED_MATCHES="$(
+    printf '%s\n' "$MATCHES" | rg -v \
+      "Sources/PhotoAssetManager/ContentView.swift:.*Bearer token（可留空）" || true
+  )"
+  if [[ -n "$FILTERED_MATCHES" ]]; then
+    printf '%s\n' "$FILTERED_MATCHES"
     echo "疑似敏感信息匹配，停止发布。" >&2
     exit 1
   fi

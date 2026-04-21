@@ -39,10 +39,40 @@ struct ScannedFile {
     var sidecars: [ScannedSidecar]
 }
 
+struct ScannedFileLedgerContext: Sendable {
+    var libraryID: String
+    var deviceID: SyncDeviceID
+    var actorID: String
+    var currentWallTimeMilliseconds: @Sendable () -> Int64 = {
+        Int64(Date().timeIntervalSince1970 * 1000)
+    }
+}
+
+struct ScannedDerivativeUploadCandidate: Hashable, Sendable {
+    var assetID: UUID
+    var role: DerivativeRole
+    var fileURL: URL
+}
+
+struct ScannedFileUpsertResult: Sendable {
+    var assetID: UUID
+    var insertedAsset: Bool
+    var insertedLocation: Bool
+    var derivativeCandidates: [ScannedDerivativeUploadCandidate]
+}
+
 struct PhotoScanner: @unchecked Sendable {
     init() {}
 
-    func scanDirectory(_ root: URL, storageKind: StorageKind, derivativeRoot: URL?, database: SQLiteDatabase, progress: @escaping @MainActor (ScanReport) -> Void) async -> ScanReport {
+    func scanDirectory(
+        _ root: URL,
+        storageKind: StorageKind,
+        derivativeRoot: URL?,
+        database: SQLiteDatabase,
+        ledgerContext: ScannedFileLedgerContext? = nil,
+        progress: @escaping @MainActor (ScanReport) -> Void,
+        didPersist: @escaping @MainActor (ScannedFileUpsertResult) -> Void = { _ in }
+    ) async -> ScanReport {
         var report = ScanReport()
         report.phase = "准备扫描"
         let batchID: UUID
@@ -89,8 +119,12 @@ struct PhotoScanner: @unchecked Sendable {
                         let captureTime = try bestCaptureTime(metadata: metadata, url: url)
                         let sidecars = try scanSidecars(for: url, storageKind: storageKind)
                         try await MainActor.run {
-                            try database.applyScannedRatingIfEmpty(path: url.path, rating: rating)
-                            try database.applyScannedCaptureTimeIfEmpty(path: url.path, captureTime: captureTime)
+                            _ = try database.applyScannedMetadataBackfillIfNeeded(
+                                fileInstanceID: unchangedFileInstanceID,
+                                rating: rating,
+                                captureTime: captureTime,
+                                ledgerContext: ledgerContext
+                            )
                             try database.upsertBrowseFolderMembership(filePath: url.path, fileInstanceID: unchangedFileInstanceID, storageKind: storageKind)
                             try database.upsertSidecarsForFileInstance(sidecars, fileInstanceID: unchangedFileInstanceID)
                         }
@@ -105,13 +139,16 @@ struct PhotoScanner: @unchecked Sendable {
                         report.skippedFiles += 1
                         continue
                     }
-                    let inserted = try await MainActor.run {
-                        try database.upsertScannedFile(scanned, batchID: batchID)
+                    let result = try await MainActor.run {
+                        try database.upsertScannedFile(scanned, batchID: batchID, ledgerContext: ledgerContext)
+                    }
+                    await MainActor.run {
+                        didPersist(result)
                     }
                     report.scannedFiles += 1
-                    if inserted {
+                    if result.insertedAsset {
                         report.importedAssets += 1
-                    } else {
+                    } else if result.insertedLocation {
                         report.newLocations += 1
                     }
                     await publishScanProgress(report, progress: progress)

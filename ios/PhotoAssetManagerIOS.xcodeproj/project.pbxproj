@@ -1,0 +1,293 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000010000000000000001 /* Sources/PhotoAssetManagerIOS/PhotoAssetManagerIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001010000000000000001 /* Sources/PhotoAssetManagerIOS/PhotoAssetManagerIOSApp.swift */; };
+		A10000020000000000000001 /* Sources/PhotoAssetManagerIOS/IOSLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001020000000000000001 /* Sources/PhotoAssetManagerIOS/IOSLibraryStore.swift */; };
+		A10000030000000000000001 /* Sources/PhotoAssetManagerIOS/WaterfallGalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001030000000000000001 /* Sources/PhotoAssetManagerIOS/WaterfallGalleryView.swift */; };
+		A10000040000000000000001 /* ../macos/Sources/PhotoAssetManager/Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001040000000000000001 /* ../macos/Sources/PhotoAssetManager/Models.swift */; };
+		A10000050000000000000001 /* ../macos/Sources/PhotoAssetManager/DateCoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001050000000000000001 /* ../macos/Sources/PhotoAssetManager/DateCoding.swift */; };
+		A10000060000000000000001 /* ../macos/Sources/PhotoAssetManager/PerformanceLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001060000000000000001 /* ../macos/Sources/PhotoAssetManager/PerformanceLog.swift */; };
+		A10000070000000000000001 /* ../macos/Sources/PhotoAssetManager/SQLiteDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001070000000000000001 /* ../macos/Sources/PhotoAssetManager/SQLiteDatabase.swift */; };
+		A10000080000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001080000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncLedger.swift */; };
+		A10000090000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001090000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift */; };
+		A100000A0000000000000001 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A100010A0000000000000001 /* libsqlite3.tbd */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A10001010000000000000001 /* Sources/PhotoAssetManagerIOS/PhotoAssetManagerIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/PhotoAssetManagerIOS/PhotoAssetManagerIOSApp.swift; sourceTree = SOURCE_ROOT; };
+		A10001020000000000000001 /* Sources/PhotoAssetManagerIOS/IOSLibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/PhotoAssetManagerIOS/IOSLibraryStore.swift; sourceTree = SOURCE_ROOT; };
+		A10001030000000000000001 /* Sources/PhotoAssetManagerIOS/WaterfallGalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/PhotoAssetManagerIOS/WaterfallGalleryView.swift; sourceTree = SOURCE_ROOT; };
+		A10001040000000000000001 /* ../macos/Sources/PhotoAssetManager/Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../macos/Sources/PhotoAssetManager/Models.swift; sourceTree = SOURCE_ROOT; };
+		A10001050000000000000001 /* ../macos/Sources/PhotoAssetManager/DateCoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../macos/Sources/PhotoAssetManager/DateCoding.swift; sourceTree = SOURCE_ROOT; };
+		A10001060000000000000001 /* ../macos/Sources/PhotoAssetManager/PerformanceLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../macos/Sources/PhotoAssetManager/PerformanceLog.swift; sourceTree = SOURCE_ROOT; };
+		A10001070000000000000001 /* ../macos/Sources/PhotoAssetManager/SQLiteDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../macos/Sources/PhotoAssetManager/SQLiteDatabase.swift; sourceTree = SOURCE_ROOT; };
+		A10001080000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../macos/Sources/PhotoAssetManager/SyncLedger.swift; sourceTree = SOURCE_ROOT; };
+		A10001090000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift; sourceTree = SOURCE_ROOT; };
+		A100010A0000000000000001 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
+		A100010B0000000000000001 /* PhotoAssetManagerIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhotoAssetManagerIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A10000110000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A100000A0000000000000001 /* libsqlite3.tbd in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A100001B0000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A100001C0000000000000001 /* App */,
+				A100001D0000000000000001 /* SharedCore */,
+				A100001E0000000000000001 /* Frameworks */,
+				A100001F0000000000000001 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A100001C0000000000000001 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				A10001010000000000000001 /* Sources/PhotoAssetManagerIOS/PhotoAssetManagerIOSApp.swift */,
+				A10001020000000000000001 /* Sources/PhotoAssetManagerIOS/IOSLibraryStore.swift */,
+				A10001030000000000000001 /* Sources/PhotoAssetManagerIOS/WaterfallGalleryView.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		A100001D0000000000000001 /* SharedCore */ = {
+			isa = PBXGroup;
+			children = (
+				A10001040000000000000001 /* ../macos/Sources/PhotoAssetManager/Models.swift */,
+				A10001050000000000000001 /* ../macos/Sources/PhotoAssetManager/DateCoding.swift */,
+				A10001060000000000000001 /* ../macos/Sources/PhotoAssetManager/PerformanceLog.swift */,
+				A10001070000000000000001 /* ../macos/Sources/PhotoAssetManager/SQLiteDatabase.swift */,
+				A10001080000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncLedger.swift */,
+				A10001090000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift */,
+			);
+			path = SharedCore;
+			sourceTree = "<group>";
+		};
+		A100001E0000000000000001 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				A100010A0000000000000001 /* libsqlite3.tbd */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		A100001F0000000000000001 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A100010B0000000000000001 /* PhotoAssetManagerIOS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A10000200000000000000001 /* PhotoAssetManagerIOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000230000000000000001 /* Build configuration list for PBXNativeTarget "PhotoAssetManagerIOS" */;
+			buildPhases = (
+				A10000210000000000000001 /* Sources */,
+				A10000110000000000000001 /* Frameworks */,
+				A10000220000000000000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = PhotoAssetManagerIOS;
+			productName = PhotoAssetManagerIOS;
+			productReference = A100010B0000000000000001 /* PhotoAssetManagerIOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000300000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2604;
+				LastUpgradeCheck = 2604;
+				TargetAttributes = {
+					A10000200000000000000001 = {
+						CreatedOnToolsVersion = 26.4.1;
+					};
+				};
+			};
+			buildConfigurationList = A10000330000000000000001 /* Build configuration list for PBXProject "PhotoAssetManagerIOS" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A100001B0000000000000001;
+			productRefGroup = A100001F0000000000000001 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A10000200000000000000001 /* PhotoAssetManagerIOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A10000220000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10000210000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000010000000000000001 /* Sources/PhotoAssetManagerIOS/PhotoAssetManagerIOSApp.swift in Sources */,
+				A10000020000000000000001 /* Sources/PhotoAssetManagerIOS/IOSLibraryStore.swift in Sources */,
+				A10000030000000000000001 /* Sources/PhotoAssetManagerIOS/WaterfallGalleryView.swift in Sources */,
+				A10000040000000000000001 /* ../macos/Sources/PhotoAssetManager/Models.swift in Sources */,
+				A10000050000000000000001 /* ../macos/Sources/PhotoAssetManager/DateCoding.swift in Sources */,
+				A10000060000000000000001 /* ../macos/Sources/PhotoAssetManager/PerformanceLog.swift in Sources */,
+				A10000070000000000000001 /* ../macos/Sources/PhotoAssetManager/SQLiteDatabase.swift in Sources */,
+				A10000080000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncLedger.swift in Sources */,
+				A10000090000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A10000400000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+			};
+			name = Debug;
+		};
+		A10000410000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		A10000420000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 3TZ6RCL8NE;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.hechuan.PhotoAssetManagerIOS;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A10000430000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 3TZ6RCL8NE;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.hechuan.PhotoAssetManagerIOS;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A10000230000000000000001 /* Build configuration list for PBXNativeTarget "PhotoAssetManagerIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000420000000000000001 /* Debug */,
+				A10000430000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000330000000000000001 /* Build configuration list for PBXProject "PhotoAssetManagerIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000400000000000000001 /* Debug */,
+				A10000410000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A10000300000000000000001 /* Project object */;
+}

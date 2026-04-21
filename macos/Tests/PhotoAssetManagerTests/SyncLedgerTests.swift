@@ -123,6 +123,112 @@ struct SyncLedgerTests {
         #expect(projection.assets[assetID]?.rating == 5)
     }
 
+    @Test func remoteSnapshotPageMaterializesAssetsProjectionForFreshDevice() throws {
+        let assetID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+        let captureTime = Date(timeIntervalSince1970: 1_710_000_000)
+        let createdAt = Date(timeIntervalSince1970: 1_709_999_900)
+        let updatedAt = Date(timeIntervalSince1970: 1_710_000_100)
+
+        try withTempDatabase { database, _ in
+            var snapshot = OperationLedgerEntry.assetSnapshotDeclared(
+                opID: UUID(uuidString: "00000000-0000-0000-0000-000000000102")!,
+                libraryID: "library",
+                deviceID: SyncDeviceID("server"),
+                deviceSequence: 1,
+                time: HybridLogicalTime(wallTimeMilliseconds: 1_710_000_100_000, counter: 0, nodeID: "server"),
+                actorID: "system:migration",
+                snapshot: AssetSnapshot(
+                    assetID: assetID,
+                    captureTime: captureTime,
+                    cameraMake: "FUJIFILM",
+                    cameraModel: "X-T5",
+                    lensModel: "XF33mmF1.4",
+                    originalFilename: "IMG_0001.DNG",
+                    contentFingerprint: "fingerprint-a",
+                    metadataFingerprint: "metadata-a",
+                    rating: 0,
+                    flagState: .unflagged,
+                    colorLabel: nil,
+                    tags: ["seed"],
+                    createdAt: createdAt,
+                    updatedAt: updatedAt
+                )
+            )
+            snapshot.globalSeq = 1
+
+            var rating = OperationLedgerEntry.metadataSet(
+                opID: UUID(uuidString: "00000000-0000-0000-0000-000000000103")!,
+                libraryID: "library",
+                deviceID: SyncDeviceID("server"),
+                deviceSequence: 2,
+                time: HybridLogicalTime(wallTimeMilliseconds: 1_710_000_101_000, counter: 0, nodeID: "server"),
+                actorID: "server",
+                assetID: assetID,
+                field: .rating,
+                value: .int(5)
+            )
+            rating.globalSeq = 2
+
+            var flag = OperationLedgerEntry.metadataSet(
+                opID: UUID(uuidString: "00000000-0000-0000-0000-000000000104")!,
+                libraryID: "library",
+                deviceID: SyncDeviceID("server"),
+                deviceSequence: 3,
+                time: HybridLogicalTime(wallTimeMilliseconds: 1_710_000_102_000, counter: 0, nodeID: "server"),
+                actorID: "server",
+                assetID: assetID,
+                field: .flagState,
+                value: .string(AssetFlagState.picked.rawValue)
+            )
+            flag.globalSeq = 3
+
+            var color = OperationLedgerEntry.metadataSet(
+                opID: UUID(uuidString: "00000000-0000-0000-0000-000000000105")!,
+                libraryID: "library",
+                deviceID: SyncDeviceID("server"),
+                deviceSequence: 4,
+                time: HybridLogicalTime(wallTimeMilliseconds: 1_710_000_103_000, counter: 0, nodeID: "server"),
+                actorID: "server",
+                assetID: assetID,
+                field: .colorLabel,
+                value: .string(AssetColorLabel.red.rawValue)
+            )
+            color.globalSeq = 4
+
+            var tags = OperationLedgerEntry.tagsUpdated(
+                opID: UUID(uuidString: "00000000-0000-0000-0000-000000000106")!,
+                libraryID: "library",
+                deviceID: SyncDeviceID("server"),
+                deviceSequence: 5,
+                time: HybridLogicalTime(wallTimeMilliseconds: 1_710_000_104_000, counter: 0, nodeID: "server"),
+                actorID: "server",
+                assetID: assetID,
+                add: ["portfolio"],
+                remove: ["seed"]
+            )
+            tags.globalSeq = 5
+
+            try database.appendAcknowledgedRemoteLedgerPage(
+                [snapshot, rating, flag, color, tags],
+                peerID: "control-plane",
+                cursor: "cursor-5"
+            )
+
+            let assets = try database.queryAssets(filter: LibraryFilter(), limit: 10)
+            let asset = try #require(assets.first)
+
+            #expect(assets.count == 1)
+            #expect(asset.id == assetID)
+            #expect(asset.captureTime == captureTime)
+            #expect(asset.originalFilename == "IMG_0001.DNG")
+            #expect(asset.rating == 5)
+            #expect(asset.flagState == .picked)
+            #expect(asset.colorLabel == .red)
+            #expect(asset.tags == ["portfolio"])
+            #expect(try database.syncCursor(peerID: "control-plane") == "cursor-5")
+        }
+    }
+
     @Test func sharedTrashIsARecoverableLibraryWideStateMachine() throws {
         let assetID = UUID()
         let device = SyncDeviceID("mac")
@@ -280,13 +386,13 @@ struct SyncLedgerTests {
         #expect(entries.map(\.actorID).allSatisfy { $0 == "system:migration" })
         #expect(entries.contains(where: { $0.opType == .assetSnapshotDeclared }))
         #expect(entries.contains(where: { $0.opType == .filePlacementSnapshotDeclared }))
-        #expect(entries.contains(where: { $0.opType == .derivativeDeclared }))
+        #expect(!entries.contains(where: { $0.opType == .derivativeDeclared }))
         #expect(projection.assets[assetID]?.rating == 5)
         #expect(projection.assets[assetID]?.flagState == .picked)
         #expect(projection.assets[assetID]?.colorLabel == .red)
         #expect(projection.assets[assetID]?.tags == ["family", "print"])
         #expect(projection.fileObjects[FileObjectID(contentHash: "raw-hash", sizeBytes: 12345, role: .rawOriginal)] != nil)
-        #expect(projection.derivatives[assetID]?[.thumbnail]?.s3Object.key.contains(assetID.uuidString) == true)
+        #expect(projection.derivatives[assetID] == nil)
         #expect(state?.status == .completed)
         #expect(state?.projectionVerified == true)
         #expect(state?.ledgerHighWatermark == entries.count)
@@ -1864,6 +1970,81 @@ struct SyncLedgerTests {
         #expect(try database.pendingLedgerUploadCount() == 0)
         #expect(try database.syncCursor(peerID: "control-plane") == "cursor-2")
         #expect(try database.ledgerGlobalSeq(opID: remoteOp.opID) == 44)
+    }
+
+    @Test func syncServicePullsAllRemotePagesBeforeReturning() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("PhotoAssetManagerTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
+        let assetID = UUID(uuidString: "00000000-0000-0000-0000-000000000201")!
+
+        var snapshot = OperationLedgerEntry.assetSnapshotDeclared(
+            opID: UUID(uuidString: "00000000-0000-0000-0000-000000000202")!,
+            libraryID: "library",
+            deviceID: SyncDeviceID("server"),
+            deviceSequence: 1,
+            time: HybridLogicalTime(wallTimeMilliseconds: 500, counter: 0, nodeID: "server"),
+            actorID: "system:migration",
+            snapshot: AssetSnapshot(
+                assetID: assetID,
+                captureTime: Date(timeIntervalSince1970: 1_710_000_200),
+                cameraMake: "Apple",
+                cameraModel: "iPhone",
+                lensModel: "Main",
+                originalFilename: "IMG_0201.HEIC",
+                contentFingerprint: "fingerprint-b",
+                metadataFingerprint: "metadata-b",
+                rating: 0,
+                flagState: .unflagged,
+                colorLabel: nil,
+                tags: [],
+                createdAt: Date(timeIntervalSince1970: 1_710_000_200),
+                updatedAt: Date(timeIntervalSince1970: 1_710_000_200)
+            )
+        )
+        snapshot.globalSeq = 1
+
+        var rating = OperationLedgerEntry.metadataSet(
+            opID: UUID(uuidString: "00000000-0000-0000-0000-000000000203")!,
+            libraryID: "library",
+            deviceID: SyncDeviceID("server"),
+            deviceSequence: 2,
+            time: HybridLogicalTime(wallTimeMilliseconds: 600, counter: 0, nodeID: "server"),
+            actorID: "server",
+            assetID: assetID,
+            field: .rating,
+            value: .int(4)
+        )
+        rating.globalSeq = 2
+
+        let client = MockSyncControlPlaneClient()
+        client.fetchResponse = { after in
+            if after == nil {
+                return SyncOpsFetchResponse(operations: [snapshot], cursor: "cursor-1", hasMore: true)
+            }
+            if after == "cursor-1" {
+                return SyncOpsFetchResponse(operations: [rating], cursor: "cursor-2", hasMore: false)
+            }
+            return SyncOpsFetchResponse(operations: [], cursor: after ?? "cursor-2", hasMore: false)
+        }
+
+        let service = SyncService(
+            libraryID: "library",
+            peerID: "control-plane",
+            database: database,
+            client: client
+        )
+
+        try await service.pullRemoteOperations()
+
+        #expect(client.fetchCalls == [nil, "cursor-1"])
+        #expect(try database.ledgerEntries(libraryID: "library").count == 2)
+        #expect(try database.syncCursor(peerID: "control-plane") == "cursor-2")
+        #expect(try database.queryAssets(filter: LibraryFilter(), limit: 10).first?.rating == 4)
     }
 
     @Test func syncServiceReconcilesPulledOperationWithLocalPendingOpID() async throws {

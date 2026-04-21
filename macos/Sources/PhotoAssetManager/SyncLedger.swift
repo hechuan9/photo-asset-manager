@@ -564,7 +564,7 @@ struct SyncCommandLayer: SyncCommandWriting, Sendable {
     var deviceID: SyncDeviceID
     var actorID: String
     let database: SQLiteDatabase
-    var nowProvider: @Sendable () -> Date = Date.init
+    var nowProvider: @Sendable () -> Date = { Date() }
 
     func setRating(assetID: UUID, rating: Int) throws {
         guard (0...5).contains(rating) else {

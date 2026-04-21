@@ -90,33 +90,6 @@ struct SyncBootstrapper: Sendable {
                 createdAt: createdAt
             ))
             sequence += 1
-
-            if let role = DerivativeRole(rawValue: file.fileRole.rawValue) {
-                let derivative = DerivativeObject(
-                    assetID: file.assetID,
-                    role: role,
-                    fileObject: fileObject,
-                    s3Object: Self.defaultDerivativeObjectRef(
-                        libraryID: libraryID,
-                        assetID: file.assetID,
-                        role: role,
-                        contentHash: file.contentHash
-                    ),
-                    pixelSize: Self.defaultPixelSize(role: role)
-                )
-                entries.append(.derivativeDeclared(
-                    opID: Self.stableUUID("bootstrap:\(libraryID):derivative:\(file.assetID.uuidString):\(role.rawValue):\(file.contentHash)"),
-                    libraryID: libraryID,
-                    deviceID: deviceID,
-                    deviceSequence: sequence,
-                    time: HybridLogicalTime(wallTimeMilliseconds: baseTime, counter: sequence, nodeID: deviceID.rawValue),
-                    actorID: actorID,
-                    assetID: file.assetID,
-                    derivative: derivative,
-                    createdAt: createdAt
-                ))
-                sequence += 1
-            }
         }
 
         return entries
@@ -133,22 +106,6 @@ struct SyncBootstrapper: Sendable {
         }
         return true
     }
-
-    private static func defaultDerivativeObjectRef(libraryID: String, assetID: UUID, role: DerivativeRole, contentHash: String) -> S3ObjectRef {
-        S3ObjectRef(
-            bucket: "photo-derivatives",
-            key: "libraries/\(libraryID)/assets/\(assetID.uuidString)/\(role.rawValue)/\(contentHash).jpg",
-            eTag: nil
-        )
-    }
-
-    private static func defaultPixelSize(role: DerivativeRole) -> PixelSize {
-        switch role {
-        case .thumbnail: PixelSize(width: 320, height: 320)
-        case .preview: PixelSize(width: 2048, height: 2048)
-        }
-    }
-
     private static func sourceDatabaseFingerprint(snapshots: [AssetSnapshot], files: [FileInstance]) -> String {
         let value = snapshots.map { "\($0.assetID.uuidString):\($0.rating):\($0.flagState.rawValue):\($0.tags.joined(separator: ","))" }
             .joined(separator: "|") + "#" + files.map { "\($0.id.uuidString):\($0.contentHash):\($0.sizeBytes):\($0.fileRole.rawValue)" }

@@ -7,6 +7,47 @@ enum SyncControlPlaneHTTPError: Error, Equatable, Sendable {
     case conflict(SyncOpsUploadResponse)
 }
 
+struct SyncClientConfiguration: Equatable, Sendable {
+    var baseURLString: String
+    var libraryID: String
+    var peerID: String
+    var accessCredential: String
+
+    static func load(defaults: UserDefaults = .standard) -> SyncClientConfiguration {
+        SyncClientConfiguration(
+            baseURLString: defaults.string(forKey: SyncPreferenceKey.baseURL) ?? "",
+            libraryID: defaults.string(forKey: SyncPreferenceKey.libraryID) ?? "local-library",
+            peerID: defaults.string(forKey: SyncPreferenceKey.peerID) ?? "control-plane",
+            accessCredential: defaults.string(forKey: SyncPreferenceKey.accessCredential) ?? ""
+        )
+    }
+
+    var trimmedBaseURLString: String {
+        baseURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var baseURL: URL? {
+        guard !trimmedBaseURLString.isEmpty else { return nil }
+        return URL(string: trimmedBaseURLString)
+    }
+
+    var accessCredentialValue: String? {
+        let trimmed = accessCredential.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var hasRemoteSync: Bool {
+        baseURL != nil
+    }
+}
+
+enum SyncPreferenceKey {
+    static let baseURL = "ios.sync.base_url"
+    static let libraryID = "ios.sync.library_id"
+    static let peerID = "ios.sync.peer_id"
+    static let accessCredential = "ios.sync.access_credential"
+}
+
 final class SyncControlPlaneHTTPClient: SyncControlPlaneClient {
     private let baseURL: URL
     private let accessCredential: String?
@@ -210,13 +251,20 @@ struct SyncService: Sendable {
     }
 
     func pullRemoteOperations() async throws {
-        let cursor = try database.syncCursor(peerID: peerID)
-        let response = try await client.fetchOperations(libraryID: libraryID, after: cursor)
-        try database.appendAcknowledgedRemoteLedgerPage(
-            response.operations,
-            peerID: peerID,
-            cursor: response.cursor
-        )
+        var cursor = try database.syncCursor(peerID: peerID)
+
+        while true {
+            let response = try await client.fetchOperations(libraryID: libraryID, after: cursor)
+            try database.appendAcknowledgedRemoteLedgerPage(
+                response.operations,
+                peerID: peerID,
+                cursor: response.cursor
+            )
+            cursor = response.cursor
+            if response.hasMore != true {
+                break
+            }
+        }
     }
 
     func sync() async throws {

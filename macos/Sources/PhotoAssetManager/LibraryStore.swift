@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 import SwiftUI
 
 @MainActor
@@ -23,6 +24,9 @@ final class LibraryStore: ObservableObject {
     @Published var backgroundTask: BackgroundTaskReport?
     @Published var hasMoreAssets = false
     @Published var pendingBrowseSelection: BrowseSelection?
+    @Published private(set) var isSyncing = false
+    @Published private(set) var lastSyncSummary = "未配置自动同步"
+    @Published private(set) var syncConfiguration = SyncClientConfiguration.load()
 
     private let databasePath: URL
     private let database: SQLiteDatabase
@@ -33,6 +37,11 @@ final class LibraryStore: ObservableObject {
     private var availabilityTask: Task<Void, Never>?
     private var startupOrganizationTask: Task<Void, Never>?
     private var folderSelectionTask: Task<Void, Never>?
+    private var syncDebounceTask: Task<Void, Never>?
+    private var activeSyncTask: Task<Void, Never>?
+    private var pendingAutomaticSync = false
+    private var pendingAutomaticSyncReason = "本地变更"
+    private var pendingThumbnailUploads: [UUID: ScannedDerivativeUploadCandidate] = [:]
     private var folderSelectionID: UUID?
     private var assetSelectionAnchorID: UUID?
     private var startupNASMountSucceeded = false
@@ -40,6 +49,8 @@ final class LibraryStore: ObservableObject {
     private let assetLoadAheadThreshold = 24
     private let availabilityRefreshInterval: TimeInterval = 24 * 60 * 60
     private let syncLibraryID = "local-library"
+    private let syncPeerID = "control-plane"
+    private let automaticSyncDebounceNanoseconds: UInt64 = 800_000_000
 
     convenience init() {
         do {
@@ -85,6 +96,7 @@ final class LibraryStore: ObservableObject {
             sourceDirectories = try database.sourceDirectories()
             indexedBrowseFolders = try database.browseFolders()
             refresh()
+            reloadSyncConfiguration(scheduleSync: false)
             if performStartupWork {
                 resumeInterruptedFolderMoveIfNeeded()
                 startStartupLibraryOrganizationIfNeeded()
@@ -98,6 +110,8 @@ final class LibraryStore: ObservableObject {
         availabilityTask?.cancel()
         startupOrganizationTask?.cancel()
         folderSelectionTask?.cancel()
+        syncDebounceTask?.cancel()
+        activeSyncTask?.cancel()
     }
 
     var selectedAsset: Asset? {
@@ -106,6 +120,27 @@ final class LibraryStore: ObservableObject {
 
     var isBusy: Bool {
         isScanning || blockingTask != nil
+    }
+
+    var hasRemoteSyncConfiguration: Bool {
+        syncConfiguration.hasRemoteSync
+    }
+
+    func reloadSyncConfiguration(scheduleSync: Bool = true) {
+        syncConfiguration = SyncClientConfiguration.load()
+        if syncConfiguration.hasRemoteSync {
+            if scheduleSync {
+                scheduleAutomaticSync(reason: "同步配置已更新", immediate: true)
+            } else {
+                lastSyncSummary = "已配置自动同步"
+            }
+        } else {
+            lastSyncSummary = "未配置自动同步"
+        }
+    }
+
+    func forceAutomaticSync() {
+        scheduleAutomaticSync(reason: "手动触发同步", immediate: true)
     }
 
     func chooseAndAddFolders(scanImmediately: Bool) {
@@ -159,8 +194,16 @@ final class LibraryStore: ObservableObject {
         scanReport = ScanReport()
         lastError = nil
         Task {
-            let report = await scanner.scanDirectory(url, storageKind: storageKind, derivativeRoot: derivativeStorageURL, database: database) { [weak self] report in
+            let report = await scanner.scanDirectory(
+                url,
+                storageKind: storageKind,
+                derivativeRoot: derivativeStorageURL,
+                database: database,
+                ledgerContext: makeScanLedgerContext()
+            ) { [weak self] report in
                 self?.scanReport = report
+            } didPersist: { [weak self] result in
+                self?.enqueueDerivativeCandidates(result.derivativeCandidates)
             }
             scanReport = report
             isScanning = false
@@ -173,6 +216,7 @@ final class LibraryStore: ObservableObject {
             sourceDirectories = (try? database.sourceDirectories()) ?? sourceDirectories
             indexedBrowseFolders = (try? database.browseFolders()) ?? indexedBrowseFolders
             refresh()
+            scheduleAutomaticSync(reason: "扫描完成")
         }
     }
 
@@ -283,6 +327,7 @@ final class LibraryStore: ObservableObject {
         let database = database
         let scanner = scanner
         let derivativeStorageURL = derivativeStorageURL
+        let ledgerContext = makeScanLedgerContext()
         Task.detached(priority: .userInitiated) {
             do {
                 let plan = try FileOperations().buildPhotoImportPlan(source: source, destinationTarget: target)
@@ -324,7 +369,8 @@ final class LibraryStore: ObservableObject {
                     plan.destination,
                     storageKind: target.storageKind,
                     derivativeRoot: derivativeStorageURL,
-                    database: database
+                    database: database,
+                    ledgerContext: ledgerContext
                 ) { report in
                     self.scanReport = report
                     self.blockingTask = BlockingTaskReport(
@@ -336,6 +382,8 @@ final class LibraryStore: ObservableObject {
                         skippedItems: report.skippedFiles,
                         message: "新增 \(report.importedAssets)，位置更新 \(report.newLocations)"
                     )
+                } didPersist: { result in
+                    self.enqueueDerivativeCandidates(result.derivativeCandidates)
                 }
 
                 try database.markSourceDirectoryScanned(path: target.path)
@@ -354,6 +402,7 @@ final class LibraryStore: ObservableObject {
                     }
                     self.refresh()
                     self.startAvailabilityRefreshInBackground()
+                    self.scheduleAutomaticSync(reason: "导入完成")
                 }
             } catch {
                 await MainActor.run {
@@ -533,6 +582,7 @@ final class LibraryStore: ObservableObject {
                 )
             }
             refresh()
+            scheduleAutomaticSync(reason: "评分已更新")
         } catch {
             lastError = error.fullTrace
         }
@@ -559,6 +609,7 @@ final class LibraryStore: ObservableObject {
                 )
             }
             refresh()
+            scheduleAutomaticSync(reason: "旗标已更新")
         } catch {
             lastError = error.fullTrace
         }
@@ -585,6 +636,7 @@ final class LibraryStore: ObservableObject {
                 )
             }
             refresh()
+            scheduleAutomaticSync(reason: "颜色标签已更新")
         } catch {
             lastError = error.fullTrace
         }
@@ -617,6 +669,7 @@ final class LibraryStore: ObservableObject {
                 )
             }
             refresh()
+            scheduleAutomaticSync(reason: "标签已更新")
         } catch {
             lastError = error.fullTrace
         }
@@ -728,6 +781,7 @@ final class LibraryStore: ObservableObject {
         let database = database
         let scanner = scanner
         let derivativeStorageURL = derivativeStorageURL
+        let ledgerContext = makeScanLedgerContext()
         Task {
             var completedSources = 0
             var errors: [String] = []
@@ -747,7 +801,8 @@ final class LibraryStore: ObservableObject {
                     sourceURL,
                     storageKind: source.storageKind,
                     derivativeRoot: derivativeStorageURL,
-                    database: database
+                    database: database,
+                    ledgerContext: ledgerContext
                 ) { [weak self] report in
                     self?.scanReport = report
                     self?.blockingTask = BlockingTaskReport(
@@ -759,6 +814,8 @@ final class LibraryStore: ObservableObject {
                         skippedItems: report.skippedExistingFiles,
                         message: "正在扫描 \(source.path)"
                     )
+                } didPersist: { [weak self] result in
+                    self?.enqueueDerivativeCandidates(result.derivativeCandidates)
                 }
                 errors.append(contentsOf: report.errors)
                 completedSources += 1
@@ -782,6 +839,7 @@ final class LibraryStore: ObservableObject {
             if !errors.isEmpty {
                 lastError = errors.joined(separator: "\n\n")
             }
+            scheduleAutomaticSync(reason: "拍摄时间整理完成")
         }
     }
 
@@ -824,6 +882,7 @@ final class LibraryStore: ObservableObject {
             var completedSources = 0
             var scanErrors: [String] = []
             var shouldClearBlockingTask = true
+            let ledgerContext = makeScanLedgerContext()
             defer {
                 isScanning = false
                 if shouldClearBlockingTask {
@@ -875,7 +934,8 @@ final class LibraryStore: ObservableObject {
                         sourceURL,
                         storageKind: source.storageKind,
                         derivativeRoot: derivativeStorageURL,
-                        database: database
+                        database: database,
+                        ledgerContext: ledgerContext
                     ) { [weak self] report in
                         self?.scanReport = report
                         self?.blockingTask = BlockingTaskReport(
@@ -887,6 +947,8 @@ final class LibraryStore: ObservableObject {
                             skippedItems: report.skippedFiles,
                             message: self?.startupOrganizationMessage(sourcePath: source.path, report: report) ?? "正在整理 \(source.path)"
                         )
+                    } didPersist: { [weak self] result in
+                        self?.enqueueDerivativeCandidates(result.derivativeCandidates)
                     }
 
                     scanReport = report
@@ -909,6 +971,7 @@ final class LibraryStore: ObservableObject {
                 }
                 refresh()
                 startAvailabilityRefreshInBackground()
+                scheduleAutomaticSync(reason: "启动整理完成")
             } catch is CancellationError {
             } catch {
                 lastError = error.fullTrace
@@ -1270,6 +1333,7 @@ final class LibraryStore: ObservableObject {
             blockingTask = nil
             refresh()
             startAvailabilityRefreshInBackground()
+            scheduleAutomaticSync(reason: "已移入共享回收站")
         } catch {
             blockingTask = nil
             lastError = error.fullTrace
@@ -1299,6 +1363,7 @@ final class LibraryStore: ObservableObject {
             blockingTask = nil
             refresh()
             startAvailabilityRefreshInBackground()
+            scheduleAutomaticSync(reason: "已从共享回收站恢复")
         } catch {
             blockingTask = nil
             lastError = error.fullTrace
@@ -1599,6 +1664,261 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    private func makeScanLedgerContext() -> ScannedFileLedgerContext {
+        ScannedFileLedgerContext(
+            libraryID: syncLibraryID,
+            deviceID: SyncDeviceID(currentDeviceID()),
+            actorID: NSUserName()
+        )
+    }
+
+    private func enqueueDerivativeCandidates(_ candidates: [ScannedDerivativeUploadCandidate]) {
+        guard !candidates.isEmpty else { return }
+        for candidate in candidates where candidate.role == .thumbnail {
+            pendingThumbnailUploads[candidate.assetID] = candidate
+        }
+    }
+
+    private func mergePendingThumbnailUploads(_ candidates: [ScannedDerivativeUploadCandidate]) {
+        for candidate in candidates where candidate.role == .thumbnail {
+            pendingThumbnailUploads[candidate.assetID] = candidate
+        }
+    }
+
+    private func scheduleAutomaticSync(reason: String, immediate: Bool = false) {
+        pendingAutomaticSync = true
+        pendingAutomaticSyncReason = reason
+        guard activeSyncTask == nil else { return }
+
+        syncDebounceTask?.cancel()
+        let delay = immediate ? 0 : automaticSyncDebounceNanoseconds
+        syncDebounceTask = Task { [weak self] in
+            guard let self else { return }
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: delay)
+            }
+            await self.startAutomaticSyncIfNeeded()
+        }
+    }
+
+    private func startAutomaticSyncIfNeeded() async {
+        guard pendingAutomaticSync else { return }
+        guard activeSyncTask == nil else { return }
+
+        pendingAutomaticSync = false
+        let reason = pendingAutomaticSyncReason
+        let queuedThumbnails = Array(pendingThumbnailUploads.values)
+        pendingThumbnailUploads.removeAll()
+
+        activeSyncTask = Task { [weak self] in
+            guard let self else { return }
+            await self.performAutomaticSync(reason: reason, queuedThumbnails: queuedThumbnails)
+            await MainActor.run {
+                self.activeSyncTask = nil
+                if self.pendingAutomaticSync {
+                    self.scheduleAutomaticSync(reason: self.pendingAutomaticSyncReason, immediate: true)
+                }
+            }
+        }
+    }
+
+    private func performAutomaticSync(
+        reason: String,
+        queuedThumbnails: [ScannedDerivativeUploadCandidate]
+    ) async {
+        let configuration = SyncClientConfiguration.load()
+        syncConfiguration = configuration
+
+        guard let baseURL = configuration.baseURL else {
+            mergePendingThumbnailUploads(queuedThumbnails)
+            lastSyncSummary = queuedThumbnails.isEmpty ? "未配置自动同步" : "未配置自动同步，待上传缩略图已保留"
+            return
+        }
+
+        isSyncing = true
+        lastSyncSummary = "自动同步中"
+
+        let database = database
+        let libraryID = syncLibraryID
+        let peerID = configuration.peerID.isEmpty ? syncPeerID : configuration.peerID
+        let accessCredential = configuration.accessCredentialValue
+
+        do {
+            let outcome = try await Task.detached(priority: .utility) {
+                let didBootstrap = try Self.bootstrapLedgerIfNeeded(database: database, libraryID: libraryID)
+                var allThumbnails = queuedThumbnails
+                if didBootstrap {
+                    allThumbnails.append(contentsOf: try Self.bootstrapThumbnailCandidates(database: database))
+                }
+
+                let client = SyncControlPlaneHTTPClient(
+                    baseURL: baseURL,
+                    accessCredential: accessCredential
+                )
+                let commandLayer = SyncCommandLayer(
+                    libraryID: libraryID,
+                    deviceID: SyncDeviceID(currentDeviceID()),
+                    actorID: NSUserName(),
+                    database: database
+                )
+                let uploadSummary = try await Self.uploadThumbnailCandidates(
+                    allThumbnails,
+                    libraryID: libraryID,
+                    database: database,
+                    controlPlane: client,
+                    commandLayer: commandLayer
+                )
+                let service = SyncService(
+                    libraryID: libraryID,
+                    peerID: peerID,
+                    database: database,
+                    client: client
+                )
+                try await service.sync()
+                return AutomaticSyncOutcome(
+                    didBootstrap: didBootstrap,
+                    uploadedThumbnails: uploadSummary.uploadedCount,
+                    failedThumbnails: uploadSummary.failedCandidates,
+                    pendingLedgerUploads: try database.pendingLedgerUploadCount()
+                )
+            }.value
+
+            mergePendingThumbnailUploads(outcome.failedThumbnails)
+            if !outcome.failedThumbnails.isEmpty {
+                pendingAutomaticSync = true
+                pendingAutomaticSyncReason = "重试缩略图上传"
+            }
+            isSyncing = false
+            lastSyncSummary = Self.syncSummaryText(
+                reason: reason,
+                outcome: outcome
+            )
+        } catch {
+            mergePendingThumbnailUploads(queuedThumbnails)
+            pendingAutomaticSync = true
+            pendingAutomaticSyncReason = reason
+            isSyncing = false
+            lastSyncSummary = "自动同步失败"
+            lastError = error.fullTrace
+        }
+    }
+
+    nonisolated private static func bootstrapLedgerIfNeeded(
+        database: SQLiteDatabase,
+        libraryID: String
+    ) throws -> Bool {
+        guard try database.syncMigrationState(libraryID: libraryID) == nil else {
+            return false
+        }
+        guard try database.ledgerEntries(libraryID: libraryID).isEmpty else {
+            return false
+        }
+
+        let bootstrapper = SyncBootstrapper(
+            libraryID: libraryID,
+            deviceID: SyncDeviceID(currentDeviceID()),
+            actorID: NSUserName(),
+            database: database
+        )
+        _ = try bootstrapper.bootstrapExistingLibraryToLedger()
+        return true
+    }
+
+    nonisolated private static func bootstrapThumbnailCandidates(database: SQLiteDatabase) throws -> [ScannedDerivativeUploadCandidate] {
+        try database.thumbnailFileInstances().map {
+            ScannedDerivativeUploadCandidate(
+                assetID: $0.assetID,
+                role: .thumbnail,
+                fileURL: URL(fileURLWithPath: $0.path)
+            )
+        }
+    }
+
+    nonisolated private static func uploadThumbnailCandidates(
+        _ candidates: [ScannedDerivativeUploadCandidate],
+        libraryID: String,
+        database: SQLiteDatabase,
+        controlPlane: SyncControlPlaneHTTPClient,
+        commandLayer: SyncCommandLayer
+    ) async throws -> ThumbnailUploadOutcome {
+        let deduped = Dictionary(uniqueKeysWithValues: candidates.map { ($0.assetID, $0) })
+        let service = DerivativeUploadService(
+            libraryID: libraryID,
+            commandLayer: commandLayer,
+            controlPlane: controlPlane,
+            uploader: URLSessionDerivativeDataUploader()
+        )
+
+        var uploadedCount = 0
+        var failedCandidates: [ScannedDerivativeUploadCandidate] = []
+        for candidate in deduped.values.sorted(by: { $0.assetID.uuidString < $1.assetID.uuidString }) {
+            guard candidate.role == .thumbnail else { continue }
+            guard FileManager.default.fileExists(atPath: candidate.fileURL.path) else { continue }
+
+            do {
+                let fileSize = try Int64(candidate.fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+                let fileObject = FileObjectID(
+                    contentHash: try FileHasher.sha256(url: candidate.fileURL),
+                    sizeBytes: fileSize,
+                    role: .thumbnail
+                )
+                let existingDerivative = try database.derivatives(assetID: candidate.assetID).first {
+                    $0.role == .thumbnail && $0.fileObject == fileObject
+                }
+                if existingDerivative != nil {
+                    continue
+                }
+
+                try await service.uploadDerivative(
+                    assetID: candidate.assetID,
+                    role: .thumbnail,
+                    localFile: candidate.fileURL,
+                    pixelSize: try pixelSize(for: candidate.fileURL)
+                )
+                uploadedCount += 1
+            } catch {
+                failedCandidates.append(candidate)
+            }
+        }
+
+        return ThumbnailUploadOutcome(
+            uploadedCount: uploadedCount,
+            failedCandidates: failedCandidates
+        )
+    }
+
+    nonisolated private static func pixelSize(for fileURL: URL) throws -> PixelSize {
+        guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width > 0,
+              height > 0 else {
+            throw FileOperationError.cannotWrite(fileURL)
+        }
+        return PixelSize(width: width, height: height)
+    }
+
+    nonisolated private static func syncSummaryText(reason: String, outcome: AutomaticSyncOutcome) -> String {
+        var parts: [String] = []
+        if outcome.didBootstrap {
+            parts.append("已补齐初始 ledger")
+        }
+        if outcome.uploadedThumbnails > 0 {
+            parts.append("上传 \(outcome.uploadedThumbnails) 张缩略图")
+        }
+        if !outcome.failedThumbnails.isEmpty {
+            parts.append("待重试 \(outcome.failedThumbnails.count) 张缩略图")
+        }
+        if outcome.pendingLedgerUploads == 0 {
+            parts.append("ledger 已上传")
+        } else {
+            parts.append("剩余 \(outcome.pendingLedgerUploads) 条待上传")
+        }
+        let detail = parts.joined(separator: " · ")
+        return detail.isEmpty ? "\(reason)完成" : "\(reason) · \(detail)"
+    }
+
     private static func applicationSupport() throws -> URL {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("PhotoAssetManager", isDirectory: true)
@@ -1621,6 +1941,18 @@ final class LibraryStore: ObservableObject {
             }
         }.value
     }
+}
+
+private struct AutomaticSyncOutcome: Sendable {
+    var didBootstrap: Bool
+    var uploadedThumbnails: Int
+    var failedThumbnails: [ScannedDerivativeUploadCandidate]
+    var pendingLedgerUploads: Int
+}
+
+private struct ThumbnailUploadOutcome: Sendable {
+    var uploadedCount: Int
+    var failedCandidates: [ScannedDerivativeUploadCandidate]
 }
 
 private extension Array {

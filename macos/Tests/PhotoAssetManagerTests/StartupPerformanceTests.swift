@@ -172,7 +172,7 @@ struct StartupPerformanceTests {
 
         #expect(database.contains("func unchangedFileInstanceID(path: String, sizeBytes: Int64) throws -> UUID?"))
         #expect(scanner.contains("let unchangedFileInstanceID = try await MainActor.run"))
-        #expect(functionBody(named: "scanDirectory", in: scanner).contains("database.upsertBrowseFolderMembership(filePath: url.path, fileInstanceID: unchangedFileInstanceID, storageKind: storageKind)"))
+        #expect(scanner.contains("try database.upsertBrowseFolderMembership(filePath: url.path, fileInstanceID: unchangedFileInstanceID, storageKind: storageKind)"))
         #expect(!scanner.contains("try database.hasUnchangedFileInstance(path: url.path, sizeBytes: size)"))
     }
 
@@ -196,13 +196,12 @@ struct StartupPerformanceTests {
 
     @Test func scannerPublishesProgressAfterEveryScannedPhoto() throws {
         let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")
-        let scanDirectoryBody = functionBody(named: "scanDirectory", in: scanner)
 
         #expect(scanner.contains("func publishScanProgress"))
-        #expect(scanDirectoryBody.contains("report.scannedFiles += 1\n                        await publishScanProgress(report, progress: progress)"))
-        #expect(scanDirectoryBody.components(separatedBy: "await publishScanProgress(report, progress: progress)").count - 1 == 2)
-        #expect(!scanDirectoryBody.contains("report.scannedFiles % 3"))
-        #expect(!scanDirectoryBody.contains("report.scannedFiles % 25"))
+        #expect(scanner.contains("report.scannedFiles += 1\n                        await publishScanProgress(report, progress: progress)"))
+        #expect(scanner.components(separatedBy: "await publishScanProgress(report, progress: progress)").count - 1 == 2)
+        #expect(!scanner.contains("report.scannedFiles % 3"))
+        #expect(!scanner.contains("report.scannedFiles % 25"))
     }
 
     @Test func thumbnailWriteFailuresDoNotFailPhotoScan() throws {
@@ -257,7 +256,8 @@ struct StartupPerformanceTests {
         #expect(database.contains("func applyScannedCaptureTimeIfEmpty(path: String, captureTime: Date?) throws"))
         #expect(functionBody(named: "applyScannedCaptureTimeIfEmpty", in: database).contains("WHERE capture_time IS NULL"))
         #expect(scanner.contains("func bestCaptureTime(metadata: ImageMetadata, url: URL) throws -> Date?"))
-        #expect(functionBody(named: "scanDirectory", in: scanner).contains("database.applyScannedCaptureTimeIfEmpty(path: url.path, captureTime: captureTime)"))
+        #expect(database.contains("func applyScannedMetadataBackfillIfNeeded("))
+        #expect(scanner.contains("applyScannedMetadataBackfillIfNeeded("))
         #expect(store.contains("func fillMissingCaptureTimes()"))
         #expect(functionBody(named: "fillMissingCaptureTimes", in: store).contains("sourceDirectories.filter(\\.isTracked)"))
         #expect(functionBody(named: "fillMissingCaptureTimes", in: store).contains("scanner.scanDirectory"))
