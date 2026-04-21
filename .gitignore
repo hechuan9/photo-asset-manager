@@ -2,6 +2,8 @@
 .build/
 .swiftpm/
 .terraform/
+terraform.tfstate
+terraform.tfstate.*
 DerivedData/
 *.xcodeproj/project.xcworkspace/xcuserdata/
 *.xcworkspace/xcuserdata/
@@ -12,6 +14,15 @@ xcuserdata/
 *.sqlite-shm
 *.sqlite-wal
 *.app/
+
+# Python backend
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+control_plane/.venv/
+control_plane/__pycache__/
+control_plane/.pytest_cache/
 
 # Local Codex/operator instructions are not part of the public project.
 AGENTS.md

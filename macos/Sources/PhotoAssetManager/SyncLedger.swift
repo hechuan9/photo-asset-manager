@@ -233,6 +233,7 @@ struct OperationLedgerEntry: Identifiable, Codable, Equatable, Sendable {
     var id: UUID { opID }
 
     var opID: UUID
+    var globalSeq: Int64? = nil
     var libraryID: String
     var deviceID: SyncDeviceID
     var deviceSequence: Int64
@@ -904,9 +905,31 @@ struct SyncOpsUploadRequest: Codable, Equatable, Sendable {
     var operations: [OperationLedgerEntry]
 }
 
+struct SyncOpsAcceptedOperation: Codable, Equatable, Sendable {
+    var opID: UUID
+    var globalSeq: Int64
+    var status: String
+}
+
+struct SyncOpsUploadResponse: Codable, Equatable, Sendable {
+    var accepted: [SyncOpsAcceptedOperation]
+    var cursor: String
+    var conflicts: [SyncOpsConflictOperation]? = nil
+}
+
+struct SyncOpsConflictOperation: Codable, Equatable, Sendable {
+    var opID: UUID
+    var conflictType: String
+}
+
+struct SyncOpsUploadConflictEnvelope: Codable, Equatable, Sendable {
+    var detail: SyncOpsUploadResponse
+}
+
 struct SyncOpsFetchResponse: Codable, Equatable, Sendable {
     var operations: [OperationLedgerEntry]
     var cursor: String
+    var hasMore: Bool?
 }
 
 struct DeviceHeartbeatRequest: Codable, Equatable, Sendable {
@@ -939,7 +962,7 @@ struct DerivativeMetadataResponse: Codable, Equatable, Sendable {
 }
 
 protocol SyncControlPlaneClient: Sendable {
-    func uploadOperations(_ request: SyncOpsUploadRequest, libraryID: String) async throws
+    func uploadOperations(_ request: SyncOpsUploadRequest, libraryID: String) async throws -> SyncOpsUploadResponse
     func fetchOperations(libraryID: String, after cursor: String?) async throws -> SyncOpsFetchResponse
     func sendHeartbeat(_ request: DeviceHeartbeatRequest) async throws
     func recordArchiveReceipt(_ request: ArchiveReceiptRequest) async throws
@@ -967,6 +990,15 @@ enum SyncLedgerProjector {
     }
 
     private static func ledgerOrder(lhs: OperationLedgerEntry, rhs: OperationLedgerEntry) -> Bool {
+        if let lhsSeq = lhs.globalSeq, let rhsSeq = rhs.globalSeq, lhsSeq != rhsSeq {
+            return lhsSeq < rhsSeq
+        }
+        if lhs.globalSeq != nil, rhs.globalSeq == nil {
+            return true
+        }
+        if lhs.globalSeq == nil, rhs.globalSeq != nil {
+            return false
+        }
         if lhs.hybridLogicalTime != rhs.hybridLogicalTime {
             return lhs.hybridLogicalTime < rhs.hybridLogicalTime
         }
@@ -980,6 +1012,7 @@ enum SyncLedgerProjector {
 private struct ProjectorState {
     private struct Register<Value: Equatable> {
         var value: Value
+        var globalSeq: Int64?
         var time: HybridLogicalTime
         var opID: UUID
     }
@@ -1154,14 +1187,19 @@ private struct ProjectorState {
         conflict: ((Register<Value>) -> SyncConflict)? = nil
     ) -> Register<Value> {
         guard let current else {
-            return Register(value: value, time: entry.hybridLogicalTime, opID: entry.opID)
+            return Register(value: value, globalSeq: entry.globalSeq, time: entry.hybridLogicalTime, opID: entry.opID)
+        }
+        if let currentSeq = current.globalSeq, let entrySeq = entry.globalSeq, currentSeq != entrySeq {
+            return currentSeq < entrySeq
+                ? Register(value: value, globalSeq: entry.globalSeq, time: entry.hybridLogicalTime, opID: entry.opID)
+                : current
         }
         if current.time == entry.hybridLogicalTime, current.value != value, let conflict {
             conflicts.append(conflict(current))
         }
         if current.time < entry.hybridLogicalTime ||
             (current.time == entry.hybridLogicalTime && current.opID.uuidString < entry.opID.uuidString) {
-            return Register(value: value, time: entry.hybridLogicalTime, opID: entry.opID)
+            return Register(value: value, globalSeq: entry.globalSeq, time: entry.hybridLogicalTime, opID: entry.opID)
         }
         return current
     }

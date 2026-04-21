@@ -4,6 +4,7 @@ enum SyncControlPlaneHTTPError: Error, Equatable, Sendable {
     case invalidBaseURL
     case invalidHTTPResponse
     case unexpectedStatusCode(Int)
+    case conflict(SyncOpsUploadResponse)
 }
 
 final class SyncControlPlaneHTTPClient: SyncControlPlaneClient {
@@ -24,9 +25,21 @@ final class SyncControlPlaneHTTPClient: SyncControlPlaneClient {
         self.session = session
     }
 
-    func uploadOperations(_ request: SyncOpsUploadRequest, libraryID: String) async throws {
+    func uploadOperations(_ request: SyncOpsUploadRequest, libraryID: String) async throws -> SyncOpsUploadResponse {
         let url = try makeURL(pathSegments: ["libraries", libraryID, "ops"])
-        try await sendJSON(method: "POST", url: url, body: request)
+        let encodedBody = try Self.makeEncoder().encode(request)
+        let (data, response) = try await send(method: "POST", url: url, body: encodedBody)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SyncControlPlaneHTTPError.invalidHTTPResponse
+        }
+        if httpResponse.statusCode == 409,
+           let conflict = try? Self.makeDecoder().decode(SyncOpsUploadConflictEnvelope.self, from: data) {
+            throw SyncControlPlaneHTTPError.conflict(conflict.detail)
+        }
+        guard 200..<300 ~= httpResponse.statusCode else {
+            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode)
+        }
+        return try Self.makeDecoder().decode(SyncOpsUploadResponse.self, from: data)
     }
 
     func fetchOperations(libraryID: String, after cursor: String?) async throws -> SyncOpsFetchResponse {
@@ -68,7 +81,10 @@ final class SyncControlPlaneHTTPClient: SyncControlPlaneClient {
     func fetchDerivativeMetadata(libraryID: String, assetID: UUID, role: DerivativeRole) async throws -> DerivativeMetadataResponse {
         let url = try makeURL(
             pathSegments: ["derivatives", assetID.uuidString],
-            queryItems: [URLQueryItem(name: "role", value: role.rawValue)]
+            queryItems: [
+                URLQueryItem(name: "role", value: role.rawValue),
+                URLQueryItem(name: "libraryID", value: libraryID)
+            ]
         )
         let (data, response) = try await send(method: "GET", url: url, body: nil)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -179,8 +195,14 @@ struct SyncService: Sendable {
         guard !claimed.isEmpty else { return }
 
         do {
-            try await client.uploadOperations(SyncOpsUploadRequest(operations: claimed), libraryID: libraryID)
-            try database.markLedgerEntriesAcknowledged(claimed.map(\.opID))
+            let response = try await client.uploadOperations(SyncOpsUploadRequest(operations: claimed), libraryID: libraryID)
+            try database.markLedgerEntriesAcknowledged(response.accepted, cursor: response.cursor)
+        } catch SyncControlPlaneHTTPError.conflict(let response) {
+            try database.markLedgerEntriesAcknowledged(response.accepted, cursor: response.cursor)
+            let acceptedIDs = Set(response.accepted.map(\.opID))
+            let unacceptedIDs = claimed.map(\.opID).filter { !acceptedIDs.contains($0) }
+            try? database.restoreClaimedLedgerUploadEntries(unacceptedIDs, lastError: String(reflecting: SyncControlPlaneHTTPError.conflict(response)))
+            throw SyncControlPlaneHTTPError.conflict(response)
         } catch {
             try? database.restoreClaimedLedgerUploadEntries(claimed.map(\.opID), lastError: String(reflecting: error))
             throw error

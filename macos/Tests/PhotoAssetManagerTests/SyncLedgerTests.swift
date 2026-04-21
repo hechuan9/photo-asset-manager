@@ -91,6 +91,38 @@ struct SyncLedgerTests {
         #expect(projection.assets[assetID]?.tags == ["print"])
     }
 
+    @Test func projectionOrdersCommittedEventsByServerGlobalSequenceBeforeLocalTime() throws {
+        let assetID = UUID()
+        var firstCommitted = OperationLedgerEntry.metadataSet(
+            opID: UUID(uuidString: "00000000-0000-0000-0000-000000000014")!,
+            libraryID: "library",
+            deviceID: SyncDeviceID("mac"),
+            deviceSequence: 1,
+            time: HybridLogicalTime(wallTimeMilliseconds: 20, counter: 0, nodeID: "mac"),
+            actorID: "user",
+            assetID: assetID,
+            field: .rating,
+            value: .int(1)
+        )
+        firstCommitted.globalSeq = 1
+        var secondCommitted = OperationLedgerEntry.metadataSet(
+            opID: UUID(uuidString: "00000000-0000-0000-0000-000000000015")!,
+            libraryID: "library",
+            deviceID: SyncDeviceID("iphone"),
+            deviceSequence: 1,
+            time: HybridLogicalTime(wallTimeMilliseconds: 10, counter: 0, nodeID: "iphone"),
+            actorID: "user",
+            assetID: assetID,
+            field: .rating,
+            value: .int(5)
+        )
+        secondCommitted.globalSeq = 2
+
+        let projection = try SyncLedgerProjector.project([secondCommitted, firstCommitted])
+
+        #expect(projection.assets[assetID]?.rating == 5)
+    }
+
     @Test func sharedTrashIsARecoverableLibraryWideStateMachine() throws {
         let assetID = UUID()
         let device = SyncDeviceID("mac")
@@ -390,7 +422,9 @@ struct SyncLedgerTests {
                 #expect(try decoder.decode(DerivativeUploadRequest.self, from: request.httpBodyData) == uploadRequest)
                 return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, try encoder.encode(uploadResponse))
             case ("GET", "/derivatives/\(assetID.uuidString)"):
-                #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "role" })?.value == "preview")
+                let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
+                #expect(queryItems?.first(where: { $0.name == "role" })?.value == "preview")
+                #expect(queryItems?.first(where: { $0.name == "libraryID" })?.value == "library")
                 return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, try encoder.encode(metadata))
             default:
                 throw NSError(domain: "PhotoAssetManagerTests", code: 42, userInfo: [NSLocalizedDescriptionKey: "unexpected derivative request"])
@@ -1344,7 +1378,14 @@ struct SyncLedgerTests {
                 #expect(upload.operations == [localOp])
                 #expect(request.value(forHTTPHeaderField: Self.accessCredentialHeaderName) == "\(Self.accessCredentialScheme) cred-123")
                 #expect(request.value(forHTTPHeaderField: "X-Trace") == "trace-1")
-                return (HTTPURLResponse(url: url, statusCode: 204, httpVersion: nil, headerFields: nil)!, Data())
+                let response = SyncOpsUploadResponse(
+                    accepted: [SyncOpsAcceptedOperation(opID: localOp.opID, globalSeq: 11, status: "committed")],
+                    cursor: "11"
+                )
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!,
+                    try encoder.encode(response)
+                )
             case ("GET", "/libraries/library/ops"):
                 #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "after" })?.value == "cursor-1")
                 let response = SyncOpsFetchResponse(operations: [remoteOp], cursor: "cursor-2")
@@ -1373,7 +1414,7 @@ struct SyncLedgerTests {
             session: sessionStub.session
         )
 
-        try await client.uploadOperations(SyncOpsUploadRequest(operations: [localOp]), libraryID: "library")
+        let uploaded = try await client.uploadOperations(SyncOpsUploadRequest(operations: [localOp]), libraryID: "library")
         let fetched = try await client.fetchOperations(libraryID: "library", after: "cursor-1")
         try await client.sendHeartbeat(DeviceHeartbeatRequest(deviceID: "mac", libraryID: "library", placements: [], sentAt: Date(timeIntervalSince1970: 1_700_000_200)))
         try await client.recordArchiveReceipt(ArchiveReceiptRequest(operation: localOp))
@@ -1401,6 +1442,7 @@ struct SyncLedgerTests {
         #expect(capturedRequests.map { $0.url?.path } == ["/libraries/library/ops", "/libraries/library/ops", "/devices/mac/heartbeat", "/archive/receipts"])
         #expect(fetched.operations == [remoteOp])
         #expect(fetched.cursor == "cursor-2")
+        #expect(uploaded.accepted == [SyncOpsAcceptedOperation(opID: localOp.opID, globalSeq: 11, status: "committed")])
     }
 
     @Test func controlPlaneHTTPClientPercentEncodesOpaquePathSegmentsAndQueryItems() async throws {
@@ -1462,7 +1504,14 @@ struct SyncLedgerTests {
             #expect(request.value(forHTTPHeaderField: "Accept") == "application/json")
             #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
             #expect(request.value(forHTTPHeaderField: "X-Trace") == "trace-1")
-            return (HTTPURLResponse(url: url, statusCode: 204, httpVersion: nil, headerFields: nil)!, Data())
+            let response = SyncOpsUploadResponse(
+                accepted: [SyncOpsAcceptedOperation(opID: op.opID, globalSeq: 12, status: "committed")],
+                cursor: "12"
+            )
+            return (
+                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!,
+                try makeJSONEncoder().encode(response)
+            )
         }
 
         let client = SyncControlPlaneHTTPClient(
@@ -1504,6 +1553,7 @@ struct SyncLedgerTests {
             createdAt: Date(timeIntervalSince1970: 1_700_000_300)
         )
         try database.appendLedgerEntry(op, uploadStatus: .pending)
+        try database.setSyncCursor(peerID: "control-plane", cursor: "cursor-before-upload")
 
         let client = MockSyncControlPlaneClient()
         client.uploadResponse = { request, libraryID in
@@ -1523,6 +1573,8 @@ struct SyncLedgerTests {
         #expect(client.uploadedRequests == [SyncOpsUploadRequest(operations: [op])])
         #expect(try database.pendingLedgerUploadCount() == 0)
         #expect(try database.ledgerUploadStatus(opID: op.opID) == .acknowledged)
+        #expect(try database.ledgerGlobalSeq(opID: op.opID) == 1)
+        #expect(try database.syncCursor(peerID: "control-plane") == "cursor-before-upload")
     }
 
     @Test func syncServiceClaimsPendingOperationsOnceWhileUploadIsInFlight() async throws {
@@ -1587,6 +1639,8 @@ struct SyncLedgerTests {
         #expect(try database.pendingLedgerUploadCount() == 0)
         #expect(try database.ledgerUploadStatus(opID: firstOp.opID) == .acknowledged)
         #expect(try database.ledgerUploadStatus(opID: secondOp.opID) == .acknowledged)
+        #expect(try database.ledgerGlobalSeq(opID: firstOp.opID) == 1)
+        #expect(try database.ledgerGlobalSeq(opID: secondOp.opID) == 2)
     }
 
     @Test func syncServiceRecoversStaleUploadingClaimsBeforeRetrying() async throws {
@@ -1637,6 +1691,7 @@ struct SyncLedgerTests {
         #expect(client.uploadedRequests == [SyncOpsUploadRequest(operations: [op])])
         #expect(try database.pendingLedgerUploadCount() == 0)
         #expect(try database.ledgerUploadStatus(opID: op.opID) == .acknowledged)
+        #expect(try database.ledgerGlobalSeq(opID: op.opID) == 1)
     }
 
     @Test func syncServiceRestoresClaimedOperationsAfterUploadFailureAndAllowsRetry() async throws {
@@ -1694,6 +1749,75 @@ struct SyncLedgerTests {
         #expect(retriedUploadRequests.count == 2)
         #expect(try database.pendingLedgerUploadCount() == 0)
         #expect(try database.ledgerUploadStatus(opID: op.opID) == .acknowledged)
+        #expect(try database.ledgerGlobalSeq(opID: op.opID) == 1)
+    }
+
+    @Test func syncServiceAcknowledgesPartialAcceptedOperationsFromConflictResponse() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("PhotoAssetManagerTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
+        let firstOp = OperationLedgerEntry.metadataSet(
+            opID: UUID(uuidString: "00000000-0000-0000-0000-0000000000d6")!,
+            libraryID: "library",
+            deviceID: SyncDeviceID("mac"),
+            deviceSequence: 1,
+            time: HybridLogicalTime(wallTimeMilliseconds: 204, counter: 0, nodeID: "mac"),
+            actorID: "user",
+            assetID: UUID(),
+            field: .rating,
+            value: .int(2),
+            createdAt: Date(timeIntervalSince1970: 1_700_000_305)
+        )
+        let secondOp = OperationLedgerEntry.metadataSet(
+            opID: UUID(uuidString: "00000000-0000-0000-0000-0000000000d7")!,
+            libraryID: "library",
+            deviceID: SyncDeviceID("mac"),
+            deviceSequence: 2,
+            time: HybridLogicalTime(wallTimeMilliseconds: 205, counter: 0, nodeID: "mac"),
+            actorID: "user",
+            assetID: UUID(),
+            field: .rating,
+            value: .int(3),
+            createdAt: Date(timeIntervalSince1970: 1_700_000_306)
+        )
+        try database.appendLedgerEntry(firstOp, uploadStatus: .pending)
+        try database.appendLedgerEntry(secondOp, uploadStatus: .pending)
+        try database.setSyncCursor(peerID: "control-plane", cursor: "cursor-before-conflict")
+
+        let client = MockSyncControlPlaneClient()
+        let partialResponse = SyncOpsUploadResponse(
+            accepted: [SyncOpsAcceptedOperation(opID: firstOp.opID, globalSeq: 21, status: "committed")],
+            cursor: "21",
+            conflicts: [SyncOpsConflictOperation(opID: secondOp.opID, conflictType: "duplicate_device_sequence")]
+        )
+        client.uploadResponse = { _, _ in
+            throw SyncControlPlaneHTTPError.conflict(partialResponse)
+        }
+
+        let service = SyncService(
+            libraryID: "library",
+            peerID: "control-plane",
+            database: database,
+            client: client
+        )
+
+        do {
+            try await service.uploadPendingOperations()
+            Issue.record("expected partial conflict")
+        } catch let error as SyncControlPlaneHTTPError {
+            #expect(error == .conflict(partialResponse))
+        }
+
+        #expect(try database.ledgerUploadStatus(opID: firstOp.opID) == .acknowledged)
+        #expect(try database.ledgerGlobalSeq(opID: firstOp.opID) == 21)
+        #expect(try database.ledgerUploadStatus(opID: secondOp.opID) == .pending)
+        #expect(try database.ledgerGlobalSeq(opID: secondOp.opID) == nil)
+        #expect(try database.pendingLedgerUploadCount() == 1)
+        #expect(try database.syncCursor(peerID: "control-plane") == "cursor-before-conflict")
     }
 
     @Test func syncServicePullsRemoteOperationsOnceAndPreservesIdempotency() async throws {
@@ -1704,7 +1828,7 @@ struct SyncLedgerTests {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
-        let remoteOp = OperationLedgerEntry.metadataSet(
+        var remoteOp = OperationLedgerEntry.metadataSet(
             opID: UUID(uuidString: "00000000-0000-0000-0000-0000000000e1")!,
             libraryID: "library",
             deviceID: SyncDeviceID("server"),
@@ -1715,6 +1839,7 @@ struct SyncLedgerTests {
             field: .flagState,
             value: .string(AssetFlagState.picked.rawValue)
         )
+        remoteOp.globalSeq = 44
 
         let client = MockSyncControlPlaneClient()
         client.fetchResponse = { after in
@@ -1738,6 +1863,50 @@ struct SyncLedgerTests {
         #expect(try database.ledgerEntries(libraryID: "library").count == 1)
         #expect(try database.pendingLedgerUploadCount() == 0)
         #expect(try database.syncCursor(peerID: "control-plane") == "cursor-2")
+        #expect(try database.ledgerGlobalSeq(opID: remoteOp.opID) == 44)
+    }
+
+    @Test func syncServiceReconcilesPulledOperationWithLocalPendingOpID() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("PhotoAssetManagerTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
+        var op = OperationLedgerEntry.metadataSet(
+            opID: UUID(uuidString: "00000000-0000-0000-0000-0000000000e3")!,
+            libraryID: "library",
+            deviceID: SyncDeviceID("mac"),
+            deviceSequence: 1,
+            time: HybridLogicalTime(wallTimeMilliseconds: 310, counter: 0, nodeID: "mac"),
+            actorID: "user",
+            assetID: UUID(uuidString: "00000000-0000-0000-0000-0000000000e4")!,
+            field: .rating,
+            value: .int(4)
+        )
+        try database.appendLedgerEntry(op, uploadStatus: .pending)
+        op.globalSeq = 88
+
+        let client = MockSyncControlPlaneClient()
+        client.fetchResponse = { _ in
+            SyncOpsFetchResponse(operations: [op], cursor: "cursor-88")
+        }
+
+        let service = SyncService(
+            libraryID: "library",
+            peerID: "control-plane",
+            database: database,
+            client: client
+        )
+
+        try await service.pullRemoteOperations()
+
+        #expect(try database.ledgerEntries(libraryID: "library").count == 1)
+        #expect(try database.pendingLedgerUploadCount() == 0)
+        #expect(try database.ledgerUploadStatus(opID: op.opID) == .acknowledged)
+        #expect(try database.ledgerGlobalSeq(opID: op.opID) == 88)
+        #expect(try database.syncCursor(peerID: "control-plane") == "cursor-88")
     }
 
     @Test func syncServiceRollsBackRemotePageWhenOneOperationConflicts() async throws {
@@ -2266,9 +2435,15 @@ struct SyncLedgerTests {
         var heartbeatResponse: ((DeviceHeartbeatRequest) throws -> Void)?
         var receiptResponse: ((ArchiveReceiptRequest) throws -> Void)?
 
-        func uploadOperations(_ request: SyncOpsUploadRequest, libraryID: String) async throws {
+        func uploadOperations(_ request: SyncOpsUploadRequest, libraryID: String) async throws -> SyncOpsUploadResponse {
             uploadedRequests.append(request)
             try uploadResponse?(request, libraryID)
+            return SyncOpsUploadResponse(
+                accepted: request.operations.enumerated().map { index, operation in
+                    SyncOpsAcceptedOperation(opID: operation.opID, globalSeq: Int64(index + 1), status: "committed")
+                },
+                cursor: String(request.operations.count)
+            )
         }
 
         func fetchOperations(libraryID: String, after cursor: String?) async throws -> SyncOpsFetchResponse {
@@ -2303,10 +2478,16 @@ struct SyncLedgerTests {
             await state.uploadedRequests
         }
 
-        func uploadOperations(_ request: SyncOpsUploadRequest, libraryID: String) async throws {
+        func uploadOperations(_ request: SyncOpsUploadRequest, libraryID: String) async throws -> SyncOpsUploadResponse {
             await state.recordUpload(request)
             await state.signalUploadStarted()
             await state.waitForRelease()
+            return SyncOpsUploadResponse(
+                accepted: request.operations.enumerated().map { index, operation in
+                    SyncOpsAcceptedOperation(opID: operation.opID, globalSeq: Int64(index + 1), status: "committed")
+                },
+                cursor: String(request.operations.count)
+            )
         }
 
         func fetchOperations(libraryID: String, after cursor: String?) async throws -> SyncOpsFetchResponse {
@@ -2335,7 +2516,9 @@ struct SyncLedgerTests {
     private final class StubDerivativeControlPlane: @unchecked Sendable, SyncControlPlaneClient {
         private(set) var uploadRequests: [DerivativeUploadRequest] = []
 
-        func uploadOperations(_ request: SyncOpsUploadRequest, libraryID: String) async throws {}
+        func uploadOperations(_ request: SyncOpsUploadRequest, libraryID: String) async throws -> SyncOpsUploadResponse {
+            SyncOpsUploadResponse(accepted: [], cursor: "")
+        }
 
         func fetchOperations(libraryID: String, after cursor: String?) async throws -> SyncOpsFetchResponse {
             SyncOpsFetchResponse(operations: [], cursor: cursor ?? "")

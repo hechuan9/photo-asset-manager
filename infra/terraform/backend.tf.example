@@ -1,0 +1,14 @@
+terraform {
+  backend "s3" {
+    bucket         = "photo-asset-manager-dev-123456789012-tfstate"
+    key            = "infra/terraform/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "photo-asset-manager-dev-123456789012-tfstate-lock"
+    encrypt        = true
+  }
+}
+
+# 说明：
+# 1. 这个文件是 bootstrap 示例，不能直接依赖变量。
+# 2. 先用本地 backend 初始化并 apply 这套 Terraform，拿到 state bucket / lock table 名称后，再把它复制成 backend.tf。
+# 3. 不要把真实 .tfstate 提交到仓库。

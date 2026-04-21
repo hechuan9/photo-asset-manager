@@ -1718,10 +1718,10 @@ final class SQLiteDatabase: @unchecked Sendable {
             """
             SELECT op_id, library_id, device_id, device_seq, hybrid_logical_time,
                    actor_id, entity_type, entity_id, op_type, payload_json,
-                   base_version, created_at
+                   base_version, created_at, global_seq
             FROM operation_ledger
             WHERE library_id = ?
-            ORDER BY hybrid_logical_time ASC, device_id ASC, op_id ASC
+            ORDER BY global_seq IS NULL ASC, global_seq ASC, hybrid_logical_time ASC, device_id ASC, op_id ASC
             """,
             [.text(libraryID)]
         ) { statement in
@@ -1742,6 +1742,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             }
             return OperationLedgerEntry(
                 opID: opID,
+                globalSeq: statement.optionalInt64(12),
                 libraryID: statement.text(1),
                 deviceID: SyncDeviceID(statement.text(2)),
                 deviceSequence: statement.int64(3),
@@ -1762,7 +1763,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             """
             SELECT ol.op_id, ol.library_id, ol.device_id, ol.device_seq, ol.hybrid_logical_time,
                    ol.actor_id, ol.entity_type, ol.entity_id, ol.op_type, ol.payload_json,
-                   ol.base_version, ol.created_at
+                   ol.base_version, ol.created_at, ol.global_seq
             FROM sync_upload_queue q
             JOIN operation_ledger ol ON ol.op_id = q.op_id
             WHERE q.status = ?
@@ -1782,7 +1783,7 @@ final class SQLiteDatabase: @unchecked Sendable {
                 """
                 SELECT ol.op_id, ol.library_id, ol.device_id, ol.device_seq, ol.hybrid_logical_time,
                        ol.actor_id, ol.entity_type, ol.entity_id, ol.op_type, ol.payload_json,
-                       ol.base_version, ol.created_at
+                       ol.base_version, ol.created_at, ol.global_seq
                 FROM sync_upload_queue q
                 JOIN operation_ledger ol ON ol.op_id = q.op_id
                 WHERE q.status = ?
@@ -1867,12 +1868,22 @@ final class SQLiteDatabase: @unchecked Sendable {
         return rows.first ?? nil
     }
 
+    func ledgerGlobalSeq(opID: UUID) throws -> Int64? {
+        let rows = try prepare(
+            "SELECT global_seq FROM operation_ledger WHERE op_id = ? LIMIT 1",
+            [.text(opID.uuidString)]
+        ) { statement in
+            statement.optionalInt64(0)
+        }
+        return rows.first ?? nil
+    }
+
     func ledgerEntry(opID: UUID) throws -> OperationLedgerEntry? {
         let rows = try prepare(
             """
             SELECT op_id, library_id, device_id, device_seq, hybrid_logical_time,
                    actor_id, entity_type, entity_id, op_type, payload_json,
-                   base_version, created_at
+                   base_version, created_at, global_seq
             FROM operation_ledger
             WHERE op_id = ?
             LIMIT 1
@@ -1898,6 +1909,27 @@ final class SQLiteDatabase: @unchecked Sendable {
                 "DELETE FROM sync_upload_queue WHERE op_id IN (\(placeholders))",
                 values
             )
+        }
+    }
+
+    func markLedgerEntriesAcknowledged(_ accepted: [SyncOpsAcceptedOperation], cursor: String) throws {
+        try transaction {
+            for acceptedOperation in accepted {
+                try execute(
+                    """
+                    UPDATE operation_ledger
+                    SET upload_status = ?, global_seq = ?, remote_cursor = ?
+                    WHERE op_id = ?
+                    """,
+                    [
+                        .text(LedgerUploadStatus.acknowledged.rawValue),
+                        .int(acceptedOperation.globalSeq),
+                        .text(cursor),
+                        .text(acceptedOperation.opID.uuidString)
+                    ]
+                )
+                try execute("DELETE FROM sync_upload_queue WHERE op_id = ?", [.text(acceptedOperation.opID.uuidString)])
+            }
         }
     }
 
@@ -1958,13 +1990,18 @@ final class SQLiteDatabase: @unchecked Sendable {
                         throw DatabaseError.stepFailed("operation_ledger.op_id 冲突：\(entry.opID.uuidString)")
                     }
                     try execute(
-                        "UPDATE operation_ledger SET upload_status = ? WHERE op_id = ?",
-                        [.text(LedgerUploadStatus.acknowledged.rawValue), .text(entry.opID.uuidString)]
+                        "UPDATE operation_ledger SET upload_status = ?, global_seq = COALESCE(?, global_seq), remote_cursor = ? WHERE op_id = ?",
+                        [
+                            .text(LedgerUploadStatus.acknowledged.rawValue),
+                            .nullableInt(entry.globalSeq),
+                            .text(cursor),
+                            .text(entry.opID.uuidString)
+                        ]
                     )
                     try execute("DELETE FROM sync_upload_queue WHERE op_id = ?", [.text(entry.opID.uuidString)])
                     continue
                 }
-                try appendLedgerEntryBody(entry, uploadStatus: .acknowledged)
+                try appendLedgerEntryBody(entry, uploadStatus: .acknowledged, remoteCursor: cursor)
             }
             try setSyncCursor(peerID: peerID, cursor: cursor)
         }
@@ -2002,6 +2039,7 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
         return OperationLedgerEntry(
             opID: opID,
+            globalSeq: statement.optionalInt64(12),
             libraryID: statement.text(1),
             deviceID: SyncDeviceID(statement.text(2)),
             deviceSequence: statement.int64(3),
@@ -2031,7 +2069,7 @@ final class SQLiteDatabase: @unchecked Sendable {
         return rows.first ?? 1
     }
 
-    private func appendLedgerEntryBody(_ entry: OperationLedgerEntry, uploadStatus: LedgerUploadStatus) throws {
+    private func appendLedgerEntryBody(_ entry: OperationLedgerEntry, uploadStatus: LedgerUploadStatus, remoteCursor: String? = nil) throws {
         let payloadJSON = try LedgerSQLiteCoding.encodePayload(entry.payload)
         let now = DateCoding.encode(Date())
         try execute(
@@ -2039,8 +2077,8 @@ final class SQLiteDatabase: @unchecked Sendable {
             INSERT INTO operation_ledger (
                 op_id, library_id, device_id, device_seq, hybrid_logical_time,
                 actor_id, entity_type, entity_id, op_type, payload_json,
-                base_version, created_at, upload_status, remote_cursor
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                base_version, created_at, upload_status, remote_cursor, global_seq
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 .text(entry.opID.uuidString),
@@ -2055,7 +2093,9 @@ final class SQLiteDatabase: @unchecked Sendable {
                 .text(payloadJSON),
                 .nullableText(entry.baseVersion),
                 .text(DateCoding.encode(entry.createdAt)),
-                .text(uploadStatus.rawValue)
+                .text(uploadStatus.rawValue),
+                .nullableText(remoteCursor),
+                .nullableInt(entry.globalSeq)
             ]
         )
         if uploadStatus == .pending {
@@ -2552,7 +2592,8 @@ final class SQLiteDatabase: @unchecked Sendable {
                 base_version TEXT,
                 created_at TEXT NOT NULL,
                 upload_status TEXT NOT NULL DEFAULT 'pending',
-                remote_cursor TEXT
+                remote_cursor TEXT,
+                global_seq INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS sync_cursors (
@@ -2712,6 +2753,7 @@ final class SQLiteDatabase: @unchecked Sendable {
         )
         try addColumnIfNeeded(table: "assets", column: "color_label", definition: "TEXT")
         try addColumnIfNeeded(table: "assets", column: "flag_state", definition: "TEXT")
+        try addColumnIfNeeded(table: "operation_ledger", column: "global_seq", definition: "INTEGER")
         try execute(
             """
             UPDATE assets
@@ -3132,6 +3174,7 @@ private enum LedgerSQLiteCoding {
 enum SQLiteValue {
     case text(String)
     case nullableText(String?)
+    case nullableInt(Int64?)
     case int(Int64)
 
     func bind(to statement: OpaquePointer?, index: Int32) -> Int32 {
@@ -3141,6 +3184,9 @@ enum SQLiteValue {
         case .nullableText(let value):
             guard let value else { return sqlite3_bind_null(statement, index) }
             return sqlite3_bind_text(statement, index, value, -1, SQLITE_TRANSIENT)
+        case .nullableInt(let value):
+            guard let value else { return sqlite3_bind_null(statement, index) }
+            return sqlite3_bind_int64(statement, index, value)
         case .int(let value):
             return sqlite3_bind_int64(statement, index, value)
         }
@@ -3166,6 +3212,11 @@ struct SQLiteStatement {
 
     func int64(_ index: Int32) -> Int64 {
         sqlite3_column_int64(statement, index)
+    }
+
+    func optionalInt64(_ index: Int32) -> Int64? {
+        guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
+        return int64(index)
     }
 }
 
