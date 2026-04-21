@@ -7,8 +7,14 @@ struct SyncBootstrapper: Sendable {
     var actorID: String
     let database: SQLiteDatabase
     var nowProvider: @Sendable () -> Date = Date.init
+    var progressReporter: (@Sendable (SyncBootstrapProgress) -> Void)?
 
     func bootstrapExistingLibraryToLedger() throws -> SyncBootstrapResult {
+        progressReporter?(.countingSourceFacts)
+        let assetCount = try database.bootstrapAssetSnapshotCount()
+        let fileCount = try database.bootstrapFileInstanceCount()
+
+        progressReporter?(.loadingSnapshots(assetCount: assetCount, fileCount: fileCount))
         let snapshots = try database.bootstrapAssetSnapshots()
         let files = try database.bootstrapFileInstances()
         let fingerprint = Self.sourceDatabaseFingerprint(snapshots: snapshots, files: files)
@@ -19,12 +25,11 @@ struct SyncBootstrapper: Sendable {
             startedAt: startedAt
         )
 
-        let beforeCount = try database.ledgerEntries(libraryID: libraryID).count
         let entries = try buildBootstrapEntries(snapshots: snapshots, files: files, createdAt: startedAt)
-        for entry in entries {
-            try database.appendLedgerEntry(entry, uploadStatus: .pending)
-        }
+        progressReporter?(.writingLedger(totalOperations: entries.count))
+        let insertedCount = try database.appendLedgerEntries(entries, uploadStatus: .pending)
 
+        progressReporter?(.verifyingProjection(totalOperations: entries.count))
         let ledgerEntries = try database.ledgerEntries(libraryID: libraryID)
         let projectionVerified = try verifyBootstrapProjection(snapshots: snapshots, ledgerEntries: ledgerEntries)
         let highWatermark = ledgerEntries.count
@@ -36,7 +41,7 @@ struct SyncBootstrapper: Sendable {
         )
 
         return SyncBootstrapResult(
-            createdOperationCount: highWatermark - beforeCount,
+            createdOperationCount: insertedCount,
             ledgerHighWatermark: highWatermark,
             projectionVerified: projectionVerified
         )
@@ -125,6 +130,13 @@ struct SyncBootstrapper: Sendable {
             bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
         ))
     }
+}
+
+enum SyncBootstrapProgress: Sendable {
+    case countingSourceFacts
+    case loadingSnapshots(assetCount: Int, fileCount: Int)
+    case writingLedger(totalOperations: Int)
+    case verifyingProjection(totalOperations: Int)
 }
 
 protocol DerivativeDataFetching: Sendable {

@@ -419,6 +419,13 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
+    func bootstrapAssetSnapshotCount() throws -> Int {
+        let rows = try prepare("SELECT COUNT(*) FROM assets", []) { statement in
+            Int(statement.int(0))
+        }
+        return rows.first ?? 0
+    }
+
     func bootstrapFileInstances() throws -> [FileInstance] {
         try prepare(
             """
@@ -444,6 +451,13 @@ final class SQLiteDatabase: @unchecked Sendable {
                 availability: Availability(rawValue: statement.text(11)) ?? .missing
             )
         }
+    }
+
+    func bootstrapFileInstanceCount() throws -> Int {
+        let rows = try prepare("SELECT COUNT(*) FROM file_instances", []) { statement in
+            Int(statement.int(0))
+        }
+        return rows.first ?? 0
     }
 
     func syncMigrationState(libraryID: String) throws -> SyncMigrationState? {
@@ -1880,6 +1894,42 @@ final class SQLiteDatabase: @unchecked Sendable {
                 return
             }
             try appendLedgerEntryBody(entry, uploadStatus: uploadStatus)
+        }
+    }
+
+    func appendLedgerEntries(_ entries: [OperationLedgerEntry], uploadStatus: LedgerUploadStatus) throws -> Int {
+        try transaction {
+            var insertedCount = 0
+            for entry in entries {
+                if let existing = try ledgerEntry(opID: entry.opID) {
+                    guard Self.isSameLedgerPayload(existing, entry) else {
+                        throw DatabaseError.stepFailed("operation_ledger.op_id 冲突：\(entry.opID.uuidString)")
+                    }
+                    if uploadStatus == .pending {
+                        try execute(
+                            "UPDATE operation_ledger SET upload_status = ? WHERE op_id = ?",
+                            [.text(uploadStatus.rawValue), .text(entry.opID.uuidString)]
+                        )
+                        try execute(
+                            """
+                            INSERT OR IGNORE INTO sync_upload_queue (op_id, status, attempt_count, last_error, updated_at)
+                            VALUES (?, ?, 0, '', ?)
+                            """,
+                            [.text(entry.opID.uuidString), .text(LedgerUploadStatus.pending.rawValue), .text(DateCoding.encode(Date()))]
+                        )
+                    } else {
+                        try execute(
+                            "UPDATE operation_ledger SET upload_status = ? WHERE op_id = ?",
+                            [.text(uploadStatus.rawValue), .text(entry.opID.uuidString)]
+                        )
+                        try execute("DELETE FROM sync_upload_queue WHERE op_id = ?", [.text(entry.opID.uuidString)])
+                    }
+                    continue
+                }
+                try appendLedgerEntryBody(entry, uploadStatus: uploadStatus)
+                insertedCount += 1
+            }
+            return insertedCount
         }
     }
 

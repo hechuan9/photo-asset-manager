@@ -149,8 +149,8 @@ final class LibraryStore: ObservableObject {
         lastError = nil
         blockingTask = BlockingTaskReport(
             title: "工具",
-            phase: "补齐同步 ledger",
-            message: "正在把当前资料库状态写入 append-only 初始快照。"
+            phase: "统计资料库",
+            message: "正在确认需要补齐的资产和文件位置。"
         )
 
         let database = database
@@ -164,8 +164,12 @@ final class LibraryStore: ObservableObject {
                         database: database,
                         libraryID: libraryID,
                         deviceID: SyncDeviceID(currentDeviceID()),
-                        actorID: migrationActorID
-                    )
+                        actorID: migrationActorID,
+                        progressReporter: { progress in
+                        Task { @MainActor in
+                            self.blockingTask = Self.blockingTaskReport(for: progress)
+                        }
+                    })
                 }.value
 
                 blockingTask = nil
@@ -1973,7 +1977,8 @@ final class LibraryStore: ObservableObject {
         database: SQLiteDatabase,
         libraryID: String,
         deviceID: SyncDeviceID,
-        actorID: String
+        actorID: String,
+        progressReporter: @escaping @Sendable (SyncBootstrapProgress) -> Void
     ) throws -> LedgerBackfillOutcome {
         let migrationState = try database.syncMigrationState(libraryID: libraryID)
         let existingLedgerCount = try database.ledgerEntries(libraryID: libraryID).count
@@ -2011,7 +2016,8 @@ final class LibraryStore: ObservableObject {
             libraryID: libraryID,
             deviceID: deviceID,
             actorID: actorID,
-            database: database
+            database: database,
+            progressReporter: progressReporter
         ).bootstrapExistingLibraryToLedger()
         let pendingThumbnails = try database.thumbnailsNeedingDerivativeUpload().count
         return LedgerBackfillOutcome(
@@ -2064,6 +2070,42 @@ final class LibraryStore: ObservableObject {
             parts.append("待上传 \(pendingThumbnailCount) 张缩略图")
         }
         return parts.joined(separator: " · ")
+    }
+
+    @MainActor
+    private static func blockingTaskReport(for progress: SyncBootstrapProgress) -> BlockingTaskReport {
+        switch progress {
+        case .countingSourceFacts:
+            return BlockingTaskReport(
+                title: "工具",
+                phase: "统计资料库",
+                message: "正在确认需要补齐的资产和文件位置。"
+            )
+        case .loadingSnapshots(let assetCount, let fileCount):
+            return BlockingTaskReport(
+                title: "工具",
+                phase: "生成初始快照",
+                totalItems: assetCount + fileCount,
+                completedItems: 0,
+                message: "准备把 \(assetCount) 个资产和 \(fileCount) 个文件位置写入同步 ledger。"
+            )
+        case .writingLedger(let totalOperations):
+            return BlockingTaskReport(
+                title: "工具",
+                phase: "写入 ledger",
+                totalItems: totalOperations,
+                completedItems: totalOperations,
+                message: "初始快照已写入本地同步 ledger，正在做最终校验。"
+            )
+        case .verifyingProjection(let totalOperations):
+            return BlockingTaskReport(
+                title: "工具",
+                phase: "校验投影",
+                totalItems: totalOperations,
+                completedItems: totalOperations,
+                message: "正在 replay ledger，确认补齐后的投影与当前资料库一致。"
+            )
+        }
     }
 
     private static func applicationSupport() throws -> URL {
