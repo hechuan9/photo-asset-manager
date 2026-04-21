@@ -121,6 +121,12 @@ variable "derivative_bucket_cors_allowed_origins" {
   default     = ["https://app.example.com"]
 }
 
+variable "vpc_id" {
+  description = "Optional existing VPC ID. Leave null to fall back to the account default VPC during bootstrap."
+  type        = string
+  default     = null
+}
+
 variable "lambda_subnet_ids" {
   description = "Optional Lambda VPC subnet IDs. Leave empty to fall back to default VPC subnets during bootstrap."
   type        = list(string)
@@ -130,6 +136,23 @@ variable "lambda_subnet_ids" {
     condition     = length(var.lambda_subnet_ids) == 0 || length(var.lambda_subnet_ids) >= 2
     error_message = "lambda_subnet_ids must be empty or contain at least two subnet IDs."
   }
+}
+
+variable "db_subnet_ids" {
+  description = "Optional Aurora DB subnet IDs. Leave empty to fall back to default VPC subnets during bootstrap."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = length(var.db_subnet_ids) == 0 || length(var.db_subnet_ids) >= 2
+    error_message = "db_subnet_ids must be empty or contain at least two subnet IDs."
+  }
+}
+
+variable "route_table_ids" {
+  description = "Optional VPC route table IDs for the S3 gateway endpoint. Leave empty to fall back to default VPC route tables during bootstrap."
+  type        = list(string)
+  default     = []
 }
 
 variable "log_retention_days" {

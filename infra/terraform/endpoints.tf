@@ -1,14 +1,16 @@
 data "aws_route_tables" "default" {
+  count = var.vpc_id == null && length(var.route_table_ids) == 0 ? 1 : 0
+
   filter {
     name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
+    values = [local.resolved_vpc_id]
   }
 }
 
 resource "aws_security_group" "vpc_endpoints" {
   name_prefix = "${local.naming_prefix}-endpoints-"
   description = "Interface endpoint security group for the control plane runtime."
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = local.resolved_vpc_id
 
   ingress {
     description     = "Allow the Lambda runtime security group to reach interface endpoints on HTTPS."
@@ -28,7 +30,7 @@ resource "aws_security_group" "vpc_endpoints" {
 }
 
 resource "aws_vpc_endpoint" "secretsmanager" {
-  vpc_id              = data.aws_vpc.default.id
+  vpc_id              = local.resolved_vpc_id
   service_name        = "com.amazonaws.${var.aws_region}.secretsmanager"
   vpc_endpoint_type   = "Interface"
   subnet_ids          = local.lambda_subnet_ids
@@ -37,8 +39,8 @@ resource "aws_vpc_endpoint" "secretsmanager" {
 }
 
 resource "aws_vpc_endpoint" "s3" {
-  vpc_id            = data.aws_vpc.default.id
+  vpc_id            = local.resolved_vpc_id
   service_name      = "com.amazonaws.${var.aws_region}.s3"
   vpc_endpoint_type = "Gateway"
-  route_table_ids   = data.aws_route_tables.default.ids
+  route_table_ids   = local.route_table_ids
 }

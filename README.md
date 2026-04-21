@@ -53,7 +53,7 @@ terraform validate
 - 部署实际 control-plane 代码或镜像。
 - 数据库 migration、健康检查和 smoke gate。
 - 第一次本地 `terraform apply` 会把生成的 Aurora 密码和 secret version 写入本地 `tfstate`；切 remote backend 后要确认 state 已迁移，再保护或清理本地 state 文件。
-- 默认实现依赖默认 VPC 的可用子网；生产环境如果使用私网子网，请通过 `lambda_subnet_ids` 显式传入。
+- 默认实现可以回落到 default VPC；如果账号没有 default VPC 或要挂到现有私有网络，请显式传入 `vpc_id`、`lambda_subnet_ids`、`db_subnet_ids` 和 `route_table_ids`。
 - Secrets Manager 通过 interface endpoint、S3 通过 gateway endpoint 访问，因此 Lambda 不需要公网出口来拿 secret 或访问 derivative bucket。
 
 前提：Terraform `>= 1.9.0`，因为这套变量校验用了跨变量 validation 语法。

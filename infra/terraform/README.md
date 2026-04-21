@@ -27,7 +27,7 @@
 - `terraform.tfstate` 只允许本地或远程 backend 管理，不能提交。
 - 第一次本地 `terraform apply` 会把生成的 Aurora 密码和 secret version 写进本地 `tfstate`；切到远程 backend 后要用加密、权限受控的 state 存储，并确认 state 已迁移后再保护或清理本地文件。
 - 删除/重建注意：`deletion_protection=true` 会阻止直接 destroy，Aurora 需要先显式关闭保护才能销毁；`final_snapshot_identifier` 会在销毁时保留最终快照；Secrets Manager 的删除恢复窗口会让同名 secret 在短期内不能立刻重建。
-- 默认实现依赖默认 VPC 的可用子网和对应 route table；如果生产环境使用私网子网，请通过 `lambda_subnet_ids` 显式传入，不要默认假设 default subnet 就是最终部署拓扑。
+- 默认实现可以回落到 default VPC；如果账号没有 default VPC，或生产环境使用现有私网子网，请显式传入 `vpc_id`、`lambda_subnet_ids`、`db_subnet_ids` 和 `route_table_ids`，不要默认假设 default subnet 就是最终部署拓扑。
 - Secrets Manager 走 interface endpoint，S3 走 gateway endpoint，因此 Lambda 不需要公网出口来访问这两个 AWS API。
 
 ## 本地检查
