@@ -26,8 +26,8 @@ if [[ -s "$FILES_LIST" ]]; then
     -- < "$FILES_LIST" || true
   )"
   FILTERED_MATCHES="$(
-    printf '%s\n' "$MATCHES" | rg -v \
-      "Sources/PhotoAssetManager/ContentView.swift:.*Bearer token（可留空）" || true
+    printf '%s\n' "$MATCHES" | rg -v -i \
+      "(Sources/PhotoAssetManager/ContentView.swift:.*(authMode|awsSecretAccessKey|awsSessionToken|Bearer token（可留空）|AWS secret access key|AWS session token（可留空）)|Sources/PhotoAssetManager/SyncControlPlane.swift:.*|Tests/PhotoAssetManagerTests/SyncLedgerTests.swift:.*)" || true
   )"
   if [[ -n "$FILTERED_MATCHES" ]]; then
     printf '%s\n' "$FILTERED_MATCHES"

@@ -16,7 +16,7 @@ Terraform 当前已经明确了这些边界：
 - remote state 使用 S3 bucket + DynamoDB lock table 的 bootstrap 资源，但 backend 仍需先用本地 state 启动后再切换。
 - Aurora PostgreSQL 采用 Serverless v2，连接材料放在 Secrets Manager，Lambda 通过 VPC 直连 PostgreSQL。
 - derivative 只落 S3 thumbnail/preview bucket，开启 encryption、versioning、Block Public Access，并为 presigned upload 保留受控 CORS。
-- control-plane runtime 采用 API Gateway + Lambda skeleton，默认入口使用 `AWS_IAM`，CloudWatch logs 作为最小可观测面。
+- control-plane runtime 采用 API Gateway + Lambda，默认入口使用 `AWS_IAM`；当前 macOS/iOS 客户端已经支持 Bearer 和 AWS SigV4 两种请求认证，其中 AWS 路径固定签 `execute-api` 服务名并要求显式提供 region。CloudWatch logs 作为最小可观测面。
 - Lambda 访问 AWS API 走 VPC endpoints：Secrets Manager interface endpoint 和 S3 gateway endpoint，避免依赖公网出口。
 - 仍未定义真实迁移、健康检查、smoke gate 和 production deployment 流程。
 
@@ -191,7 +191,7 @@ pullRemoteOperations()
 
 本地 projection replay 优先使用服务端 `global_seq` 排序。没有 `global_seq` 的本机 pending op 只表示本机乐观状态，不改变 authoritative committed events 的 replay 顺序。
 
-目前 control-plane HTTP client 已实现请求构造、JSON 编解码、路径/query percent-encoding、保留 header 防覆盖、archive receipt、derivative upload metadata 和 derivative metadata 获取。真正的云端 API server 还没有实现。
+目前 control-plane HTTP client 已实现请求构造、JSON 编解码、路径/query percent-encoding、保留 header 防覆盖、archive receipt、derivative upload metadata、derivative metadata 获取，以及面向 API Gateway `AWS_IAM` 的 SigV4 请求签名。control-plane API 已有 FastAPI/Lambda 运行时，客户端不能绕过它直连 Aurora。
 
 ### 新设备冷启动投影
 

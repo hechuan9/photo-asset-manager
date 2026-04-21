@@ -215,9 +215,19 @@ struct IOSSyncSettingsView: View {
     @AppStorage(SyncPreferenceKey.baseURL) private var baseURL = ""
     @AppStorage(SyncPreferenceKey.libraryID) private var libraryID = "local-library"
     @AppStorage(SyncPreferenceKey.peerID) private var peerID = "control-plane"
+    @AppStorage(SyncPreferenceKey.authMode) private var authModeRawValue = SyncAuthenticationMode.bearer.rawValue
     @AppStorage(SyncPreferenceKey.accessCredential) private var accessCredential = ""
+    @AppStorage(SyncPreferenceKey.awsRegion) private var awsRegion = "us-east-1"
+    @AppStorage(SyncPreferenceKey.awsAccessKeyID) private var awsAccessKeyID = ""
+    @AppStorage(SyncPreferenceKey.awsSecretAccessKey) private var awsSecretAccessKey = ""
+    @AppStorage(SyncPreferenceKey.awsSessionToken) private var awsSessionToken = ""
 
     var didSave: () -> Void
+
+    private var authMode: SyncAuthenticationMode {
+        get { SyncAuthenticationMode(rawValue: authModeRawValue) ?? .bearer }
+        nonmutating set { authModeRawValue = newValue.rawValue }
+    }
 
     var body: some View {
         NavigationStack {
@@ -233,14 +243,38 @@ struct IOSSyncSettingsView: View {
                     TextField("peerID", text: $peerID)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    SecureField("Bearer token（可留空）", text: $accessCredential)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                    Picker("认证方式", selection: Binding(
+                        get: { authMode },
+                        set: { authMode = $0 }
+                    )) {
+                        ForEach(SyncAuthenticationMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    if authMode == .bearer {
+                        SecureField("Bearer token（可留空）", text: $accessCredential)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    } else {
+                        TextField("AWS region", text: $awsRegion)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        TextField("AWS access key ID", text: $awsAccessKeyID)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        SecureField("AWS secret access key", text: $awsSecretAccessKey)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        SecureField("AWS session token（可留空）", text: $awsSessionToken)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
                 }
 
                 Section("说明") {
                     Text("当前 iOS 端只负责同步验证和瀑布流浏览，不会扫描、移动、删除或覆盖任何原片。")
                     Text("前台会自动拉取 ledger。缩略图优先读本地缓存，没有本地缓存时，再通过 derivative metadata 取远端下载链接。")
+                    Text("若 control plane 使用 API Gateway AWS_IAM，请切到 AWS IAM 并填写 region 与临时或长期凭证。")
                 }
             }
             .navigationTitle("同步设置")

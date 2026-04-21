@@ -542,8 +542,18 @@ struct ThumbnailStoragePopover: View {
 struct SyncStatusPopover: View {
     @EnvironmentObject private var library: LibraryStore
     @AppStorage(SyncPreferenceKey.baseURL) private var baseURL = ""
+    @AppStorage(SyncPreferenceKey.authMode) private var authModeRawValue = SyncAuthenticationMode.bearer.rawValue
     @AppStorage(SyncPreferenceKey.accessCredential) private var accessCredential = ""
+    @AppStorage(SyncPreferenceKey.awsRegion) private var awsRegion = "us-east-1"
+    @AppStorage(SyncPreferenceKey.awsAccessKeyID) private var awsAccessKeyID = ""
+    @AppStorage(SyncPreferenceKey.awsSecretAccessKey) private var awsSecretAccessKey = ""
+    @AppStorage(SyncPreferenceKey.awsSessionToken) private var awsSessionToken = ""
     @State private var isPresented = false
+
+    private var authMode: SyncAuthenticationMode {
+        get { SyncAuthenticationMode(rawValue: authModeRawValue) ?? .bearer }
+        nonmutating set { authModeRawValue = newValue.rawValue }
+    }
 
     var body: some View {
         Button {
@@ -564,10 +574,31 @@ struct SyncStatusPopover: View {
 
                 TextField("https://control-plane.example.com", text: $baseURL)
                     .textFieldStyle(.roundedBorder)
-                SecureField("Bearer token（可留空）", text: $accessCredential)
-                    .textFieldStyle(.roundedBorder)
+                Picker("认证方式", selection: Binding(
+                    get: { authMode },
+                    set: { authMode = $0 }
+                )) {
+                    ForEach(SyncAuthenticationMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
 
-                Text("macOS 会自动把 ledger 和缩略图上传到 control plane；不会把原图发给 iOS。")
+                if authMode == .bearer {
+                    SecureField("Bearer token（可留空）", text: $accessCredential)
+                        .textFieldStyle(.roundedBorder)
+                } else {
+                    TextField("AWS region", text: $awsRegion)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("AWS access key ID", text: $awsAccessKeyID)
+                        .textFieldStyle(.roundedBorder)
+                    SecureField("AWS secret access key", text: $awsSecretAccessKey)
+                        .textFieldStyle(.roundedBorder)
+                    SecureField("AWS session token（可留空）", text: $awsSessionToken)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                Text("macOS 会自动把 ledger 和缩略图上传到 control plane；不会把原图发给 iOS。若使用 AWS IAM，当前服务名固定为 execute-api。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

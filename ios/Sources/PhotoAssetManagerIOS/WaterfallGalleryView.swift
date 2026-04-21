@@ -314,7 +314,7 @@ final class IOSImagePreviewLoader: ObservableObject {
         }
         let client = SyncControlPlaneHTTPClient(
             baseURL: baseURL,
-            accessCredential: configuration.accessCredentialValue
+            authentication: configuration.requestAuthentication
         )
         guard let metadata = try? await client.fetchDerivativeMetadata(
             libraryID: configuration.libraryID,

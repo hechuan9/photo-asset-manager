@@ -1797,7 +1797,7 @@ final class LibraryStore: ObservableObject {
         let database = database
         let libraryID = syncLibraryID
         let peerID = configuration.peerID.isEmpty ? syncPeerID : configuration.peerID
-        let accessCredential = configuration.accessCredentialValue
+        let authentication = configuration.requestAuthentication
 
         do {
             let outcome = try await Task.detached(priority: .utility) {
@@ -1807,7 +1807,7 @@ final class LibraryStore: ObservableObject {
 
                 let client = SyncControlPlaneHTTPClient(
                     baseURL: baseURL,
-                    accessCredential: accessCredential
+                    authentication: authentication
                 )
                 let commandLayer = SyncCommandLayer(
                     libraryID: libraryID,

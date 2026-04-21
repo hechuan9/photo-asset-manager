@@ -5,6 +5,7 @@ import Testing
 struct SyncLedgerTests {
     private static let accessCredentialHeaderName = "Author" + "ization"
     private static let accessCredentialScheme = "Bear" + "er"
+    private static let sigV4Scheme = "AWS4-HMAC-SHA256"
 
     @Test func scalarMetadataUsesFieldLevelRegistersForDeterministicOfflineMerge() throws {
         let assetID = UUID()
@@ -1569,6 +1570,43 @@ struct SyncLedgerTests {
         #expect(SyncControlPlaneRoute.trash(libraryID: libraryID).path == "/libraries/lib%2Fary%201/trash")
     }
 
+    @Test func syncClientConfigurationRequiresCompleteAWSIAMCredentialsBeforeTreatingRemoteAsConfigured() {
+        let incomplete = SyncClientConfiguration(
+            baseURLString: "https://zewnw6dncl.execute-api.us-east-1.amazonaws.com",
+            libraryID: "library",
+            peerID: "control-plane",
+            authModeRawValue: SyncAuthenticationMode.awsIAM.rawValue,
+            accessCredential: "",
+            awsRegion: "us-east-1",
+            awsAccessKeyID: "AKIAEXAMPLE",
+            awsSecretAccessKey: "",
+            awsSessionToken: ""
+        )
+        #expect(incomplete.hasRemoteSync == false)
+        #expect(incomplete.requestAuthentication == nil)
+
+        let complete = SyncClientConfiguration(
+            baseURLString: "https://zewnw6dncl.execute-api.us-east-1.amazonaws.com",
+            libraryID: "library",
+            peerID: "control-plane",
+            authModeRawValue: SyncAuthenticationMode.awsIAM.rawValue,
+            accessCredential: "",
+            awsRegion: "us-east-1",
+            awsAccessKeyID: "AKIAEXAMPLE",
+            awsSecretAccessKey: "secret",
+            awsSessionToken: "session"
+        )
+        #expect(complete.hasRemoteSync)
+        #expect(complete.requestAuthentication == .awsIAM(
+            SyncAWSIAMCredentials(
+                region: "us-east-1",
+                accessKeyID: "AKIAEXAMPLE",
+                secretAccessKey: "secret",
+                sessionToken: "session"
+            )
+        ))
+    }
+
     @Test func controlPlaneHTTPClientBuildsExpectedRequestsAndDecodesResponses() async throws {
         let assetID = UUID(uuidString: "00000000-0000-0000-0000-0000000000a1")!
         let localOp = OperationLedgerEntry.metadataSet(
@@ -1643,7 +1681,7 @@ struct SyncLedgerTests {
 
         let client = SyncControlPlaneHTTPClient(
             baseURL: URL(string: "https://control.example.com")!,
-            accessCredential: "cred-123",
+            authentication: .bearer("cred-123"),
             headerProvider: { ["X-Trace": "trace-1", "X-Stub-Key": sessionStub.stubKey] },
             session: sessionStub.session
         )
@@ -1663,7 +1701,7 @@ struct SyncLedgerTests {
             session: errorSession.session
         )
         do {
-            try await errorClient.uploadOperations(SyncOpsUploadRequest(operations: []), libraryID: "library")
+            _ = try await errorClient.uploadOperations(SyncOpsUploadRequest(operations: []), libraryID: "library")
             Issue.record("expected status code error")
         } catch let error as SyncControlPlaneHTTPError {
             #expect(error == .unexpectedStatusCode(503))
@@ -1677,6 +1715,72 @@ struct SyncLedgerTests {
         #expect(fetched.operations == [remoteOp])
         #expect(fetched.cursor == "cursor-2")
         #expect(uploaded.accepted == [SyncOpsAcceptedOperation(opID: localOp.opID, globalSeq: 11, status: "committed")])
+    }
+
+    @Test func controlPlaneHTTPClientSignsAWSIAMRequests() async throws {
+        let assetID = UUID(uuidString: "00000000-0000-0000-0000-0000000000d2")!
+        let op = OperationLedgerEntry.metadataSet(
+            opID: UUID(uuidString: "00000000-0000-0000-0000-0000000000d3")!,
+            libraryID: "library",
+            deviceID: SyncDeviceID("mac"),
+            deviceSequence: 2,
+            time: HybridLogicalTime(wallTimeMilliseconds: 300, counter: 0, nodeID: "mac"),
+            actorID: "user",
+            assetID: assetID,
+            field: .rating,
+            value: .int(1),
+            createdAt: Date(timeIntervalSince1970: 1_700_000_700)
+        )
+
+        let fixedDate = Date(timeIntervalSince1970: 1_713_700_800) // 2024-04-21T12:00:00Z
+        let sessionStub = makeStubSession { request in
+            guard let url = request.url else {
+                throw NSError(domain: "PhotoAssetManagerTests", code: 51, userInfo: [NSLocalizedDescriptionKey: "missing url"])
+            }
+            #expect(request.value(forHTTPHeaderField: "Host") == "zewnw6dncl.execute-api.us-east-1.amazonaws.com")
+            #expect(request.value(forHTTPHeaderField: "X-Amz-Date") == "20240421T120000Z")
+            #expect(request.value(forHTTPHeaderField: "X-Amz-Security-Token") == "session-token")
+            #expect(request.value(forHTTPHeaderField: "X-Amz-Content-Sha256")?.count == 64)
+
+            let authorization = try #require(request.value(forHTTPHeaderField: Self.accessCredentialHeaderName))
+            #expect(authorization.hasPrefix("\(Self.sigV4Scheme) Credential=AKIAIOSFODNN7EXAMPLE/20240421/us-east-1/execute-api/aws4_request, SignedHeaders="))
+            #expect(authorization.contains("accept"))
+            #expect(authorization.contains("content-type"))
+            #expect(authorization.contains("host"))
+            #expect(authorization.contains("x-amz-content-sha256"))
+            #expect(authorization.contains("x-amz-date"))
+            #expect(authorization.contains("x-amz-security-token"))
+            let signature = authorization.split(separator: "=").last.map(String.init) ?? ""
+            #expect(signature.count == 64)
+            #expect(signature.allSatisfy { $0.isHexDigit })
+
+            let response = SyncOpsUploadResponse(
+                accepted: [SyncOpsAcceptedOperation(opID: op.opID, globalSeq: 13, status: "committed")],
+                cursor: "13"
+            )
+            return (
+                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!,
+                try makeJSONEncoder().encode(response)
+            )
+        }
+
+        let client = SyncControlPlaneHTTPClient(
+            baseURL: URL(string: "https://zewnw6dncl.execute-api.us-east-1.amazonaws.com")!,
+            authentication: .awsIAM(
+                SyncAWSIAMCredentials(
+                    region: "us-east-1",
+                    accessKeyID: "AKIAIOSFODNN7EXAMPLE",
+                    secretAccessKey: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+                    sessionToken: "session-token"
+                )
+            ),
+            headerProvider: { ["X-Stub-Key": sessionStub.stubKey] },
+            dateProvider: { fixedDate },
+            session: sessionStub.session
+        )
+
+        let uploaded = try await client.uploadOperations(SyncOpsUploadRequest(operations: [op]), libraryID: "library")
+        #expect(uploaded.cursor == "13")
     }
 
     @Test func controlPlaneHTTPClientPercentEncodesOpaquePathSegmentsAndQueryItems() async throws {
@@ -1750,7 +1854,7 @@ struct SyncLedgerTests {
 
         let client = SyncControlPlaneHTTPClient(
             baseURL: URL(string: "https://control.example.com")!,
-            accessCredential: "good-cred",
+            authentication: .bearer("good-cred"),
             headerProvider: {
                 [
                     Self.accessCredentialHeaderName: "\(Self.accessCredentialScheme) bad-cred",
@@ -1763,7 +1867,72 @@ struct SyncLedgerTests {
             session: sessionStub.session
         )
 
-        try await client.uploadOperations(SyncOpsUploadRequest(operations: [op]), libraryID: "library")
+        _ = try await client.uploadOperations(SyncOpsUploadRequest(operations: [op]), libraryID: "library")
+    }
+
+    @Test func controlPlaneHTTPClientProtectsAWSReservedHeadersWhenHeaderProviderConflicts() async throws {
+        let op = OperationLedgerEntry.metadataSet(
+            opID: UUID(uuidString: "00000000-0000-0000-0000-0000000000ae")!,
+            libraryID: "library",
+            deviceID: SyncDeviceID("mac"),
+            deviceSequence: 1,
+            time: HybridLogicalTime(wallTimeMilliseconds: 220, counter: 0, nodeID: "mac"),
+            actorID: "user",
+            assetID: UUID(uuidString: "00000000-0000-0000-0000-0000000000af")!,
+            field: .rating,
+            value: .int(2),
+            createdAt: Date(timeIntervalSince1970: 1_700_000_800)
+        )
+
+        let sessionStub = makeStubSession { request in
+            guard let url = request.url else {
+                throw NSError(domain: "PhotoAssetManagerTests", code: 52, userInfo: [NSLocalizedDescriptionKey: "missing url"])
+            }
+            #expect(request.value(forHTTPHeaderField: "Host") == "zewnw6dncl.execute-api.us-east-1.amazonaws.com")
+            #expect(request.value(forHTTPHeaderField: "X-Amz-Date") == "20240421T120000Z")
+            #expect(request.value(forHTTPHeaderField: "X-Amz-Content-Sha256")?.count == 64)
+            #expect(request.value(forHTTPHeaderField: "X-Amz-Security-Token") == nil)
+            let authorization = try #require(request.value(forHTTPHeaderField: Self.accessCredentialHeaderName))
+            #expect(authorization.contains("Credential=AKIAEXAMPLE/20240421/us-east-1/execute-api/aws4_request"))
+            #expect(authorization.contains("host"))
+            #expect(authorization.contains("x-amz-content-sha256"))
+            #expect(authorization.contains("x-amz-date"))
+            #expect(request.value(forHTTPHeaderField: "X-Trace") == "trace-1")
+            let response = SyncOpsUploadResponse(
+                accepted: [SyncOpsAcceptedOperation(opID: op.opID, globalSeq: 14, status: "committed")],
+                cursor: "14"
+            )
+            return (
+                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!,
+                try makeJSONEncoder().encode(response)
+            )
+        }
+
+        let client = SyncControlPlaneHTTPClient(
+            baseURL: URL(string: "https://zewnw6dncl.execute-api.us-east-1.amazonaws.com")!,
+            authentication: .awsIAM(
+                SyncAWSIAMCredentials(
+                    region: "us-east-1",
+                    accessKeyID: "AKIAEXAMPLE",
+                    secretAccessKey: "secret"
+                )
+            ),
+            headerProvider: {
+                [
+                    Self.accessCredentialHeaderName: "bad",
+                    "Host": "bad.example.com",
+                    "X-Amz-Date": "20000101T000000Z",
+                    "X-Amz-Content-Sha256": "bad",
+                    "X-Amz-Security-Token": "bad",
+                    "X-Stub-Key": sessionStub.stubKey,
+                    "X-Trace": "trace-1"
+                ]
+            },
+            dateProvider: { Date(timeIntervalSince1970: 1_713_700_800) },
+            session: sessionStub.session
+        )
+
+        _ = try await client.uploadOperations(SyncOpsUploadRequest(operations: [op]), libraryID: "library")
     }
 
     @Test func syncServiceUploadsPendingOperationsAndClearsQueue() async throws {

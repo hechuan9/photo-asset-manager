@@ -86,7 +86,7 @@ final class IOSLibraryStore: ObservableObject {
             let snapshot = try await Task.detached(priority: .userInitiated) {
                 let client = SyncControlPlaneHTTPClient(
                     baseURL: baseURL,
-                    accessCredential: currentConfiguration.accessCredentialValue
+                    authentication: currentConfiguration.requestAuthentication
                 )
                 let service = SyncService(
                     libraryID: currentConfiguration.libraryID,
