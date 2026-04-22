@@ -702,6 +702,15 @@ enum BackgroundQueueTaskKind: String, Identifiable, Sendable {
 
     var id: String { rawValue }
 
+    var priority: Int {
+        switch self {
+        case .availabilityRefresh:
+            return 0
+        case .automaticSync:
+            return 1
+        }
+    }
+
     var queuedDisplayName: String {
         switch self {
         case .automaticSync:

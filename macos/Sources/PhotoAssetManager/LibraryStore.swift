@@ -1933,7 +1933,11 @@ final class LibraryStore: ObservableObject {
 
     private func queueBackgroundTask(_ kind: BackgroundQueueTaskKind) {
         if currentBackgroundQueueTaskKind != kind && !queuedBackgroundTaskKinds.contains(kind) {
-            queuedBackgroundTaskKinds.append(kind)
+            if let insertionIndex = queuedBackgroundTaskKinds.firstIndex(where: { $0.priority > kind.priority }) {
+                queuedBackgroundTaskKinds.insert(kind, at: insertionIndex)
+            } else {
+                queuedBackgroundTaskKinds.append(kind)
+            }
         }
         refreshBackgroundQueueItems()
         runNextBackgroundQueueTaskIfNeeded()
@@ -1976,7 +1980,8 @@ final class LibraryStore: ObservableObject {
         if kind == .availabilityRefresh,
            pendingAvailabilityRefresh,
            !queuedBackgroundTaskKinds.contains(.availabilityRefresh) {
-            queuedBackgroundTaskKinds.append(.availabilityRefresh)
+            queueBackgroundTask(.availabilityRefresh)
+            return
         }
         runNextBackgroundQueueTaskIfNeeded()
     }
