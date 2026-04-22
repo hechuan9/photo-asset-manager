@@ -240,7 +240,7 @@ struct BackgroundTaskBar: View {
         VStack(spacing: 0) {
             Divider()
             HStack(spacing: 10) {
-                if let task = library.syncProgressTask ?? library.backgroundTask {
+                if let task = library.visibleBackgroundTaskReport {
                     if task.isFinished {
                         Image(systemName: "checkmark.circle")
                             .foregroundStyle(.secondary)
@@ -266,6 +266,10 @@ struct BackgroundTaskBar: View {
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
                             .truncationMode(.middle)
+                    }
+                    if library.backgroundQueueItems.count > 1 {
+                        Text("后续 \(library.backgroundQueueItems.count - 1) 项")
+                            .foregroundStyle(.secondary)
                     }
                 } else {
                     Image(systemName: "checkmark.circle")
@@ -572,26 +576,57 @@ struct SyncStatusPopover: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                if let task = library.syncProgressTask {
-                    if task.totalItems > 0 {
-                        ProgressView(value: Double(task.completedItems), total: Double(task.totalItems))
-                        HStack {
-                            Text(task.phase)
-                            Spacer()
-                            Text("\(task.completedItems) / \(task.totalItems)")
+                if !library.backgroundQueueItems.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("后台队列")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        ForEach(Array(library.backgroundQueueItems.enumerated()), id: \.element.id) { index, item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(index == 0 && item.state == .running ? "执行中" : "等待中")
+                                        .font(.caption2)
+                                        .foregroundStyle(index == 0 && item.state == .running ? .primary : .secondary)
+                                    Spacer()
+                                    Text(item.report.title)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                if item.report.totalItems > 0 {
+                                    ProgressView(
+                                        value: Double(item.report.completedItems),
+                                        total: Double(item.report.totalItems)
+                                    )
+                                    HStack {
+                                        Text(item.report.phase)
+                                        Spacer()
+                                        Text("\(item.report.completedItems) / \(item.report.totalItems)")
+                                    }
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                } else {
+                                    if index == 0 && item.state == .running {
+                                        ProgressView()
+                                    }
+                                    Text(item.report.phase)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                if !item.report.message.isEmpty {
+                                    Text(item.report.message)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(.quaternary.opacity(index == 0 ? 0.9 : 0.45))
+                            )
                         }
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    } else {
-                        ProgressView()
-                        Text(task.phase)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    if !task.message.isEmpty {
-                        Text(task.message)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
                     }
                 }
 

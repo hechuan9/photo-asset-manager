@@ -23,6 +23,7 @@ final class LibraryStore: ObservableObject {
     @Published var blockingTask: BlockingTaskReport?
     @Published var backgroundTask: BackgroundTaskReport?
     @Published var syncProgressTask: BackgroundTaskReport?
+    @Published private(set) var backgroundQueueItems: [BackgroundQueueItem] = []
     @Published var hasMoreAssets = false
     @Published var pendingBrowseSelection: BrowseSelection?
     @Published private(set) var isSyncing = false
@@ -40,8 +41,12 @@ final class LibraryStore: ObservableObject {
     private var folderSelectionTask: Task<Void, Never>?
     private var syncDebounceTask: Task<Void, Never>?
     private var activeSyncTask: Task<Void, Never>?
+    private var currentBackgroundQueueTaskKind: BackgroundQueueTaskKind?
+    private var queuedBackgroundTaskKinds: [BackgroundQueueTaskKind] = []
     private var pendingAutomaticSync = false
     private var pendingAutomaticSyncReason = "本地变更"
+    private var pendingAvailabilityRefresh = false
+    private var pendingAvailabilityRefreshForce = false
     private var pendingThumbnailUploads: [UUID: ScannedDerivativeUploadCandidate] = [:]
     private var folderSelectionID: UUID?
     private var assetSelectionAnchorID: UUID?
@@ -128,9 +133,14 @@ final class LibraryStore: ObservableObject {
         syncConfiguration.hasRemoteSync
     }
 
+    var visibleBackgroundTaskReport: BackgroundTaskReport? {
+        backgroundQueueItems.first?.report ?? syncProgressTask ?? backgroundTask
+    }
+
     func reloadSyncConfiguration(scheduleSync: Bool = true) {
         syncConfiguration = SyncClientConfiguration.load()
         syncProgressTask = nil
+        refreshBackgroundQueueItems()
         if syncConfiguration.hasRemoteSync {
             if scheduleSync {
                 scheduleAutomaticSync(reason: "同步配置已更新", immediate: true)
@@ -183,6 +193,7 @@ final class LibraryStore: ObservableObject {
                     message: outcome.message,
                     isFinished: true
                 )
+                refreshBackgroundQueueItems()
                 lastSyncSummary = outcome.syncSummary
 
                 if shouldScheduleSync {
@@ -196,6 +207,7 @@ final class LibraryStore: ObservableObject {
                     message: error.localizedDescription,
                     isFinished: true
                 )
+                refreshBackgroundQueueItems()
                 lastError = error.fullTrace
             }
         }
@@ -734,7 +746,8 @@ final class LibraryStore: ObservableObject {
     }
 
     func startAvailabilityRefreshInBackground(force: Bool = false) {
-        guard availabilityTask == nil else { return }
+        pendingAvailabilityRefresh = true
+        pendingAvailabilityRefreshForce = pendingAvailabilityRefreshForce || force
         guard startupNASMountSucceeded else {
             backgroundTask = BackgroundTaskReport(
                 title: "后台任务",
@@ -742,9 +755,16 @@ final class LibraryStore: ObservableObject {
                 message: "启动挂载完成后再校验文件状态。",
                 isFinished: true
             )
+            refreshBackgroundQueueItems()
             return
         }
+        queueBackgroundTask(.availabilityRefresh)
+    }
+
+    private func beginAvailabilityRefreshInBackground(force: Bool) {
+        guard availabilityTask == nil else { return }
         backgroundTask = BackgroundTaskReport(title: "后台任务", phase: "准备校验文件状态", message: "应用可以继续使用")
+        refreshBackgroundQueueItems()
         availabilityTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -755,7 +775,9 @@ final class LibraryStore: ObservableObject {
                         message: "已跳过本次启动全量校验",
                         isFinished: true
                     )
+                    refreshBackgroundQueueItems()
                     availabilityTask = nil
+                    finishBackgroundQueueTask(.availabilityRefresh)
                     return
                 }
                 refreshCounts()
@@ -766,6 +788,7 @@ final class LibraryStore: ObservableObject {
                     totalItems: targets.count,
                     message: "应用可以继续使用"
                 )
+                refreshBackgroundQueueItems()
 
                 let batchSize = 250
                 var completed = 0
@@ -782,6 +805,7 @@ final class LibraryStore: ObservableObject {
                         completedItems: completed,
                         message: "应用可以继续使用"
                     )
+                    refreshBackgroundQueueItems()
                     await Task.yield()
                 }
 
@@ -796,6 +820,7 @@ final class LibraryStore: ObservableObject {
                     message: "资产状态已更新",
                     isFinished: true
                 )
+                refreshBackgroundQueueItems()
             } catch {
                 lastError = error.fullTrace
                 backgroundTask = BackgroundTaskReport(
@@ -804,8 +829,10 @@ final class LibraryStore: ObservableObject {
                     message: error.localizedDescription,
                     isFinished: true
                 )
+                refreshBackgroundQueueItems()
             }
             availabilityTask = nil
+            finishBackgroundQueueTask(.availabilityRefresh)
         }
     }
 
@@ -1746,7 +1773,6 @@ final class LibraryStore: ObservableObject {
     private func scheduleAutomaticSync(reason: String, immediate: Bool = false) {
         pendingAutomaticSync = true
         pendingAutomaticSyncReason = reason
-        guard activeSyncTask == nil else { return }
 
         syncDebounceTask?.cancel()
         let delay = immediate ? 0 : automaticSyncDebounceNanoseconds
@@ -1755,14 +1781,22 @@ final class LibraryStore: ObservableObject {
             if delay > 0 {
                 try? await Task.sleep(nanoseconds: delay)
             }
-            await self.startAutomaticSyncIfNeeded()
+            await self.enqueueAutomaticSyncIfNeeded()
         }
+        refreshBackgroundQueueItems()
     }
 
-    private func startAutomaticSyncIfNeeded() async {
+    private func enqueueAutomaticSyncIfNeeded() async {
         guard pendingAutomaticSync else { return }
-        guard activeSyncTask == nil else { return }
+        queueBackgroundTask(.automaticSync)
+    }
 
+    private func beginAutomaticSyncIfNeeded() {
+        guard pendingAutomaticSync else {
+            finishBackgroundQueueTask(.automaticSync)
+            return
+        }
+        guard activeSyncTask == nil else { return }
         pendingAutomaticSync = false
         let reason = pendingAutomaticSyncReason
         let queuedThumbnails = Array(pendingThumbnailUploads.values)
@@ -1773,6 +1807,7 @@ final class LibraryStore: ObservableObject {
             await self.performAutomaticSync(reason: reason, queuedThumbnails: queuedThumbnails)
             await MainActor.run {
                 self.activeSyncTask = nil
+                self.finishBackgroundQueueTask(.automaticSync)
                 if self.pendingAutomaticSync {
                     self.scheduleAutomaticSync(reason: self.pendingAutomaticSyncReason, immediate: true)
                 }
@@ -1790,6 +1825,7 @@ final class LibraryStore: ObservableObject {
         guard let baseURL = configuration.baseURL else {
             mergePendingThumbnailUploads(queuedThumbnails)
             syncProgressTask = nil
+            refreshBackgroundQueueItems()
             lastSyncSummary = queuedThumbnails.isEmpty ? "未配置自动同步" : "未配置自动同步，待上传缩略图已保留"
             return
         }
@@ -1801,6 +1837,7 @@ final class LibraryStore: ObservableObject {
             phase: "准备同步",
             message: "正在统计待补传缩略图和 ledger 队列。"
         )
+        refreshBackgroundQueueItems()
 
         let database = database
         let libraryID = syncLibraryID
@@ -1832,6 +1869,7 @@ final class LibraryStore: ObservableObject {
                     progressReporter: { progress in
                         Task { @MainActor in
                             self.syncProgressTask = Self.syncProgressReport(for: progress)
+                            self.refreshBackgroundQueueItems()
                         }
                     }
                 )
@@ -1843,6 +1881,7 @@ final class LibraryStore: ObservableObject {
                     progressReporter: { progress in
                         Task { @MainActor in
                             self.syncProgressTask = Self.syncProgressReport(for: progress)
+                            self.refreshBackgroundQueueItems()
                         }
                     }
                 )
@@ -1867,6 +1906,7 @@ final class LibraryStore: ObservableObject {
                 message: Self.syncSummaryText(reason: reason, outcome: outcome),
                 isFinished: true
             )
+            refreshBackgroundQueueItems()
             lastSyncSummary = Self.syncSummaryText(
                 reason: reason,
                 outcome: outcome
@@ -1877,8 +1917,87 @@ final class LibraryStore: ObservableObject {
             pendingAutomaticSyncReason = reason
             isSyncing = false
             syncProgressTask = nil
+            refreshBackgroundQueueItems()
             lastSyncSummary = "自动同步失败"
             lastError = error.fullTrace
+        }
+    }
+
+    private func queueBackgroundTask(_ kind: BackgroundQueueTaskKind) {
+        if currentBackgroundQueueTaskKind != kind && !queuedBackgroundTaskKinds.contains(kind) {
+            queuedBackgroundTaskKinds.append(kind)
+        }
+        refreshBackgroundQueueItems()
+        runNextBackgroundQueueTaskIfNeeded()
+    }
+
+    private func runNextBackgroundQueueTaskIfNeeded() {
+        guard currentBackgroundQueueTaskKind == nil else {
+            refreshBackgroundQueueItems()
+            return
+        }
+        guard blockingTask == nil, !isScanning else {
+            refreshBackgroundQueueItems()
+            return
+        }
+        guard !queuedBackgroundTaskKinds.isEmpty else {
+            refreshBackgroundQueueItems()
+            return
+        }
+
+        let next = queuedBackgroundTaskKinds.removeFirst()
+        currentBackgroundQueueTaskKind = next
+        refreshBackgroundQueueItems()
+
+        switch next {
+        case .automaticSync:
+            beginAutomaticSyncIfNeeded()
+        case .availabilityRefresh:
+            let force = pendingAvailabilityRefreshForce
+            pendingAvailabilityRefresh = false
+            pendingAvailabilityRefreshForce = false
+            beginAvailabilityRefreshInBackground(force: force)
+        }
+    }
+
+    private func finishBackgroundQueueTask(_ kind: BackgroundQueueTaskKind) {
+        if currentBackgroundQueueTaskKind == kind {
+            currentBackgroundQueueTaskKind = nil
+        }
+        refreshBackgroundQueueItems()
+        if kind == .availabilityRefresh,
+           pendingAvailabilityRefresh,
+           !queuedBackgroundTaskKinds.contains(.availabilityRefresh) {
+            queuedBackgroundTaskKinds.append(.availabilityRefresh)
+        }
+        runNextBackgroundQueueTaskIfNeeded()
+    }
+
+    private func refreshBackgroundQueueItems() {
+        var items: [BackgroundQueueItem] = []
+        if let currentKind = currentBackgroundQueueTaskKind {
+            items.append(
+                BackgroundQueueItem(
+                    kind: currentKind,
+                    state: .running,
+                    report: currentBackgroundQueueReport(for: currentKind)
+                )
+            )
+        }
+        items.append(
+            contentsOf: queuedBackgroundTaskKinds.map {
+                BackgroundQueueItem(kind: $0, state: .queued, report: $0.queuedReport)
+            }
+        )
+        backgroundQueueItems = items
+    }
+
+    private func currentBackgroundQueueReport(for kind: BackgroundQueueTaskKind) -> BackgroundTaskReport {
+        switch kind {
+        case .automaticSync:
+            return syncProgressTask ?? kind.runningFallbackReport
+        case .availabilityRefresh:
+            return backgroundTask ?? kind.runningFallbackReport
         }
     }
 

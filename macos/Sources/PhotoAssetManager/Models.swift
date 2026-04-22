@@ -696,6 +696,71 @@ struct BackgroundTaskReport: Sendable {
     var isFinished = false
 }
 
+enum BackgroundQueueTaskKind: String, Identifiable, Sendable {
+    case automaticSync
+    case availabilityRefresh
+
+    var id: String { rawValue }
+
+    var queuedDisplayName: String {
+        switch self {
+        case .automaticSync:
+            return "等待自动同步"
+        case .availabilityRefresh:
+            return "等待校验文件状态"
+        }
+    }
+
+    var runningFallbackReport: BackgroundTaskReport {
+        switch self {
+        case .automaticSync:
+            return BackgroundTaskReport(
+                title: "自动同步",
+                phase: "准备同步",
+                message: "等待开始执行。"
+            )
+        case .availabilityRefresh:
+            return BackgroundTaskReport(
+                title: "后台任务",
+                phase: "准备校验文件状态",
+                message: "等待开始执行。"
+            )
+        }
+    }
+
+    var queuedReport: BackgroundTaskReport {
+        switch self {
+        case .automaticSync:
+            return BackgroundTaskReport(
+                title: "自动同步",
+                phase: "排队中",
+                message: "等待前序后台任务完成后开始同步。"
+            )
+        case .availabilityRefresh:
+            return BackgroundTaskReport(
+                title: "后台任务",
+                phase: "排队中",
+                message: "等待前序后台任务完成后开始校验文件状态。"
+            )
+        }
+    }
+}
+
+enum BackgroundQueueTaskState: String, Sendable {
+    case running
+    case queued
+}
+
+struct BackgroundQueueItem: Identifiable, Sendable {
+    var kind: BackgroundQueueTaskKind
+    var state: BackgroundQueueTaskState
+    var report: BackgroundTaskReport
+
+    var id: String {
+        "\(kind.rawValue):\(state.rawValue)"
+    }
+}
+
 struct AvailabilityCheckTarget: Sendable {
     let id: UUID
     let path: String

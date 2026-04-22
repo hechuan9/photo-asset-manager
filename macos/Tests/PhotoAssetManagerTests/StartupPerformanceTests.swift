@@ -30,6 +30,27 @@ struct StartupPerformanceTests {
         #expect(!source.contains(".safeAreaInset(edge: .bottom)"))
     }
 
+    @Test func startupBackgroundWorkUsesVisibleSerialQueue() throws {
+        let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
+        let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
+        let content = try sourceFile("Sources/PhotoAssetManager/ContentView.swift")
+
+        #expect(models.contains("enum BackgroundQueueTaskKind"))
+        #expect(models.contains("case automaticSync"))
+        #expect(models.contains("case availabilityRefresh"))
+        #expect(models.contains("struct BackgroundQueueItem"))
+        #expect(store.contains("@Published private(set) var backgroundQueueItems: [BackgroundQueueItem] = []"))
+        #expect(store.contains("private var currentBackgroundQueueTaskKind: BackgroundQueueTaskKind?"))
+        #expect(store.contains("private var queuedBackgroundTaskKinds: [BackgroundQueueTaskKind] = []"))
+        #expect(store.contains("private func queueBackgroundTask(_ kind: BackgroundQueueTaskKind)"))
+        #expect(store.contains("private func runNextBackgroundQueueTaskIfNeeded()"))
+        #expect(store.contains("beginAutomaticSyncIfNeeded()"))
+        #expect(store.contains("beginAvailabilityRefreshInBackground(force: force)"))
+        #expect(content.contains("library.backgroundQueueItems.count > 1"))
+        #expect(content.contains("Text(\"后台队列\")"))
+        #expect(content.contains("ForEach(Array(library.backgroundQueueItems.enumerated())"))
+    }
+
     @Test func startupRefreshUsesPagedAssetLoading() throws {
         let store = try sourceFile("Sources/PhotoAssetManager/LibraryStore.swift")
         let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
@@ -305,8 +326,9 @@ struct StartupPerformanceTests {
 
         #expect(store.contains("private let availabilityRefreshInterval: TimeInterval = 24 * 60 * 60"))
         #expect(store.contains("func startAvailabilityRefreshInBackground(force: Bool = false)"))
-        #expect(functionBody(named: "startAvailabilityRefreshInBackground", in: store).contains("shouldRunAvailabilityRefresh(force: force)"))
-        #expect(functionBody(named: "startAvailabilityRefreshInBackground", in: store).contains("database.markAvailabilityRefreshCompleted(at: Date())"))
+        #expect(functionBody(named: "startAvailabilityRefreshInBackground", in: store).contains("queueBackgroundTask(.availabilityRefresh)"))
+        #expect(functionBody(named: "beginAvailabilityRefreshInBackground", in: store).contains("shouldRunAvailabilityRefresh(force: force)"))
+        #expect(functionBody(named: "beginAvailabilityRefreshInBackground", in: store).contains("database.markAvailabilityRefreshCompleted(at: Date())"))
         #expect(store.contains("func forceAvailabilityRefreshInBackground()"))
         #expect(functionBody(named: "forceAvailabilityRefreshInBackground", in: store).contains("startAvailabilityRefreshInBackground(force: true)"))
         #expect(database.contains("func lastAvailabilityRefreshAt() throws -> Date?"))
