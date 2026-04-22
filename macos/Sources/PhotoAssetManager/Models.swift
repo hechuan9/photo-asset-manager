@@ -678,22 +678,50 @@ struct ScanReport: Sendable {
 
 struct BlockingTaskReport: Sendable {
     var title = ""
+    var ticket = ""
     var phase = ""
     var currentPath = ""
     var totalItems = 0
     var completedItems = 0
     var skippedItems = 0
     var message = ""
+
+    var displayTicket: String {
+        if !ticket.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return ticket
+        }
+        if totalItems > 0 {
+            return "\(title.isEmpty ? "任务" : title)：\(phase.isEmpty ? "进行中" : phase) \(completedItems)/\(totalItems)"
+        }
+        if !phase.isEmpty {
+            return "\(title.isEmpty ? "任务" : title)：\(phase)"
+        }
+        return title.isEmpty ? "任务进行中" : title
+    }
 }
 
 struct BackgroundTaskReport: Sendable {
     var title = ""
+    var ticket = ""
     var phase = ""
     var currentPath = ""
     var totalItems = 0
     var completedItems = 0
     var message = ""
     var isFinished = false
+
+    var displayTicket: String {
+        if !ticket.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return ticket
+        }
+        if totalItems > 0 {
+            return "\(title.isEmpty ? "任务" : title)：\(phase.isEmpty ? "进行中" : phase) \(completedItems)/\(totalItems)"
+        }
+        if !phase.isEmpty {
+            return "\(title.isEmpty ? "任务" : title)：\(phase)"
+        }
+        return title.isEmpty ? "后台任务进行中" : title
+    }
 }
 
 enum BackgroundQueueTaskKind: String, Identifiable, Sendable {
@@ -725,12 +753,14 @@ enum BackgroundQueueTaskKind: String, Identifiable, Sendable {
         case .automaticSync:
             return BackgroundTaskReport(
                 title: "自动同步",
+                ticket: "自动同步正在准备",
                 phase: "准备同步",
                 message: "等待开始执行。"
             )
         case .availabilityRefresh:
             return BackgroundTaskReport(
                 title: "后台任务",
+                ticket: "文件状态校验正在准备",
                 phase: "准备校验文件状态",
                 message: "等待开始执行。"
             )
@@ -742,12 +772,14 @@ enum BackgroundQueueTaskKind: String, Identifiable, Sendable {
         case .automaticSync:
             return BackgroundTaskReport(
                 title: "自动同步",
+                ticket: "自动同步排队中",
                 phase: "排队中",
                 message: "等待前序后台任务完成后开始同步。"
             )
         case .availabilityRefresh:
             return BackgroundTaskReport(
                 title: "后台任务",
+                ticket: "文件状态校验排队中",
                 phase: "排队中",
                 message: "等待前序后台任务完成后开始校验文件状态。"
             )

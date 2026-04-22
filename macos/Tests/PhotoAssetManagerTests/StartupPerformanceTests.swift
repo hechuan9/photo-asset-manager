@@ -35,6 +35,8 @@ struct StartupPerformanceTests {
         let models = try sourceFile("Sources/PhotoAssetManager/Models.swift")
         let content = try sourceFile("Sources/PhotoAssetManager/ContentView.swift")
 
+        #expect(models.contains("var ticket = \"\""))
+        #expect(models.contains("var displayTicket: String"))
         #expect(models.contains("enum BackgroundQueueTaskKind"))
         #expect(models.contains("case automaticSync"))
         #expect(models.contains("case availabilityRefresh"))
@@ -51,9 +53,14 @@ struct StartupPerformanceTests {
         #expect(store.contains("beginAutomaticSyncIfNeeded()"))
         #expect(store.contains("beginAvailabilityRefreshInBackground(force: force)"))
         #expect(store.contains("runningBackgroundQueueItem?.report ?? syncProgressTask ?? backgroundTask"))
+        #expect(store.contains("reloadSyncConfiguration(scheduleSync: !performStartupWork)"))
+        #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("scheduleAutomaticSync(reason: \"启动整理完成\")"))
+        #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("runNextBackgroundQueueTaskIfNeeded()"))
         #expect(content.contains("library.queuedBackgroundQueueItems.count"))
+        #expect(content.contains("Text(task.displayTicket)"))
         #expect(content.contains("Text(\"当前任务\")"))
         #expect(content.contains("Text(\"后续队列\")"))
+        #expect(content.contains("Text(item.report.displayTicket)"))
         #expect(content.contains("BackgroundQueueCard(item: currentItem, label: \"执行中\")"))
         #expect(content.contains("ForEach(Array(library.queuedBackgroundQueueItems.enumerated())"))
     }

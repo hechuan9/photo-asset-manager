@@ -103,7 +103,7 @@ final class LibraryStore: ObservableObject {
             sourceDirectories = try database.sourceDirectories()
             indexedBrowseFolders = try database.browseFolders()
             refresh()
-            reloadSyncConfiguration(scheduleSync: true)
+            reloadSyncConfiguration(scheduleSync: !performStartupWork)
             if performStartupWork {
                 resumeInterruptedFolderMoveIfNeeded()
                 startStartupLibraryOrganizationIfNeeded()
@@ -982,6 +982,7 @@ final class LibraryStore: ObservableObject {
                     blockingTask = nil
                 }
                 startupOrganizationTask = nil
+                runNextBackgroundQueueTaskIfNeeded()
             }
 
             do {
@@ -1003,6 +1004,7 @@ final class LibraryStore: ObservableObject {
                 guard !sources.isEmpty else {
                     refresh()
                     startAvailabilityRefreshInBackground()
+                    scheduleAutomaticSync(reason: "启动整理完成")
                     return
                 }
 

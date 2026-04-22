@@ -248,7 +248,7 @@ struct BackgroundTaskBar: View {
                         ProgressView()
                             .controlSize(.small)
                     }
-                    Text(task.phase)
+                    Text(task.displayTicket)
                         .lineLimit(1)
                     if task.totalItems > 0 {
                         ProgressView(value: Double(task.completedItems), total: Double(task.totalItems))
@@ -311,9 +311,14 @@ struct BlockingTaskProgressView: View {
                     .foregroundStyle(.secondary)
             }
 
+            if !task.displayTicket.isEmpty {
+                Text(task.displayTicket)
+                    .fontWeight(.medium)
+            }
+
             if !task.phase.isEmpty {
                 Text(task.phase)
-                    .fontWeight(.medium)
+                    .foregroundStyle(.secondary)
             }
 
             if !task.currentPath.isEmpty {
@@ -668,6 +673,9 @@ struct BackgroundQueueCard: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+
+            Text(item.report.displayTicket)
+                .font(.caption)
 
             if item.report.totalItems > 0 {
                 ProgressView(
