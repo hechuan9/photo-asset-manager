@@ -133,8 +133,16 @@ final class LibraryStore: ObservableObject {
         syncConfiguration.hasRemoteSync
     }
 
+    var runningBackgroundQueueItem: BackgroundQueueItem? {
+        backgroundQueueItems.first(where: { $0.state == .running })
+    }
+
+    var queuedBackgroundQueueItems: [BackgroundQueueItem] {
+        backgroundQueueItems.filter { $0.state == .queued }
+    }
+
     var visibleBackgroundTaskReport: BackgroundTaskReport? {
-        backgroundQueueItems.first?.report ?? syncProgressTask ?? backgroundTask
+        runningBackgroundQueueItem?.report ?? syncProgressTask ?? backgroundTask
     }
 
     func reloadSyncConfiguration(scheduleSync: Bool = true) {

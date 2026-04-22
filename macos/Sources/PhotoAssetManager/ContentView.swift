@@ -267,8 +267,8 @@ struct BackgroundTaskBar: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
-                    if library.backgroundQueueItems.count > 1 {
-                        Text("后续 \(library.backgroundQueueItems.count - 1) 项")
+                    if !library.queuedBackgroundQueueItems.isEmpty {
+                        Text("后续 \(library.queuedBackgroundQueueItems.count) 项")
                             .foregroundStyle(.secondary)
                     }
                 } else {
@@ -576,56 +576,24 @@ struct SyncStatusPopover: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                if !library.backgroundQueueItems.isEmpty {
+                if let currentItem = library.runningBackgroundQueueItem {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("后台队列")
+                        Text("当前任务")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
-                        ForEach(Array(library.backgroundQueueItems.enumerated()), id: \.element.id) { index, item in
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text(index == 0 && item.state == .running ? "执行中" : "等待中")
-                                        .font(.caption2)
-                                        .foregroundStyle(index == 0 && item.state == .running ? .primary : .secondary)
-                                    Spacer()
-                                    Text(item.report.title)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
+                        BackgroundQueueCard(item: currentItem, label: "执行中")
+                    }
+                }
 
-                                if item.report.totalItems > 0 {
-                                    ProgressView(
-                                        value: Double(item.report.completedItems),
-                                        total: Double(item.report.totalItems)
-                                    )
-                                    HStack {
-                                        Text(item.report.phase)
-                                        Spacer()
-                                        Text("\(item.report.completedItems) / \(item.report.totalItems)")
-                                    }
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                } else {
-                                    if index == 0 && item.state == .running {
-                                        ProgressView()
-                                    }
-                                    Text(item.report.phase)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
+                if !library.queuedBackgroundQueueItems.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("后续队列")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
 
-                                if !item.report.message.isEmpty {
-                                    Text(item.report.message)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .padding(8)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(.quaternary.opacity(index == 0 ? 0.9 : 0.45))
-                            )
+                        ForEach(Array(library.queuedBackgroundQueueItems.enumerated()), id: \.element.id) { index, item in
+                            BackgroundQueueCard(item: item, label: "等待中", order: index + 1)
                         }
                     }
                 }
@@ -681,6 +649,63 @@ struct SyncStatusPopover: View {
             .frame(width: 340, alignment: .leading)
             .padding(14)
         }
+    }
+}
+
+struct BackgroundQueueCard: View {
+    var item: BackgroundQueueItem
+    var label: String
+    var order: Int? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(queueLabel)
+                    .font(.caption2)
+                    .foregroundStyle(order == nil ? .primary : .secondary)
+                Spacer()
+                Text(item.report.title)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if item.report.totalItems > 0 {
+                ProgressView(
+                    value: Double(item.report.completedItems),
+                    total: Double(item.report.totalItems)
+                )
+                HStack {
+                    Text(item.report.phase)
+                    Spacer()
+                    Text("\(item.report.completedItems) / \(item.report.totalItems)")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            } else {
+                if item.state == .running {
+                    ProgressView()
+                }
+                Text(item.report.phase)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !item.report.message.isEmpty {
+                Text(item.report.message)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(.quaternary.opacity(order == nil ? 0.9 : 0.45))
+        )
+    }
+
+    private var queueLabel: String {
+        guard let order else { return label }
+        return "\(label) \(order)"
     }
 }
 

@@ -42,13 +42,18 @@ struct StartupPerformanceTests {
         #expect(store.contains("@Published private(set) var backgroundQueueItems: [BackgroundQueueItem] = []"))
         #expect(store.contains("private var currentBackgroundQueueTaskKind: BackgroundQueueTaskKind?"))
         #expect(store.contains("private var queuedBackgroundTaskKinds: [BackgroundQueueTaskKind] = []"))
+        #expect(store.contains("var runningBackgroundQueueItem: BackgroundQueueItem?"))
+        #expect(store.contains("var queuedBackgroundQueueItems: [BackgroundQueueItem]"))
         #expect(store.contains("private func queueBackgroundTask(_ kind: BackgroundQueueTaskKind)"))
         #expect(store.contains("private func runNextBackgroundQueueTaskIfNeeded()"))
         #expect(store.contains("beginAutomaticSyncIfNeeded()"))
         #expect(store.contains("beginAvailabilityRefreshInBackground(force: force)"))
-        #expect(content.contains("library.backgroundQueueItems.count > 1"))
-        #expect(content.contains("Text(\"后台队列\")"))
-        #expect(content.contains("ForEach(Array(library.backgroundQueueItems.enumerated())"))
+        #expect(store.contains("runningBackgroundQueueItem?.report ?? syncProgressTask ?? backgroundTask"))
+        #expect(content.contains("library.queuedBackgroundQueueItems.count"))
+        #expect(content.contains("Text(\"当前任务\")"))
+        #expect(content.contains("Text(\"后续队列\")"))
+        #expect(content.contains("BackgroundQueueCard(item: currentItem, label: \"执行中\")"))
+        #expect(content.contains("ForEach(Array(library.queuedBackgroundQueueItems.enumerated())"))
     }
 
     @Test func startupRefreshUsesPagedAssetLoading() throws {
