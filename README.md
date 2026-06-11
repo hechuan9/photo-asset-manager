@@ -42,6 +42,8 @@ xcodebuild \
   build
 ```
 
+（注意：以上仅 Simulator 构建，供日常开发调试使用。企业内部发布、IPA 打包及直接部署到设备请参考下文“## iOS 企业内部发布（仅内部 In-House 发行）”章节。）
+
 iOS 端当前是最小只读回放器：
 
 - 首次打开会在 app 自己的 sandbox 里创建本地 `Library.sqlite`。
@@ -54,6 +56,37 @@ macOS 端当前会把可同步的资料库变化自动写入本地 ledger，并�
 - 扫描、导入、元数据回填、评分、旗标、标签、回收站状态等变化都会先写本地 ledger，再由后台自动同步。
 - bootstrap 只补资产快照和原片 placement 快照；缩略图声明必须在本地生成并上传缩略图后再进入 ledger，不会伪造远端 derivative。
 - 当前优先同步缩略图；原图、RAW、sidecar canonical 仍只留在 macOS / NAS 一侧，不会上行到 iOS。
+
+## iOS 企业内部发布（仅内部 In-House 发行）
+
+**前置条件**：
+- 本机已用企业账户登录 Xcode（team 3TZ6RCL8NE）。
+- “Chuan iPhone” 已配对（UDID 036DD950-A8BC-5B88-B477-167F1DFB73E1）。
+- 首次安装需在 iPhone “设置 > 通用 > VPN 与设备管理” 信任企业开发者证书。
+
+**打包企业 IPA**（推荐用于内部分发）：
+```bash
+./ios/scripts/package_app.sh
+# 输出：ios/.build/enterprise/PhotoAssetManagerIOS.ipa
+```
+
+**直接发布到我的 iOS（Chuan iPhone，端到端验证）**：
+```bash
+xcodebuild \
+  -project ios/PhotoAssetManagerIOS.xcodeproj \
+  -scheme PhotoAssetManagerIOS \
+  -destination 'platform=iOS,id=036DD950-A8BC-5B88-B477-167F1DFB73E1' \
+  -configuration Release \
+  build
+
+xcrun devicectl device install app \
+  --device 036DD950-A8BC-5B88-B477-167F1DFB73E1 \
+  $(find ~/Library/Developer/Xcode/DerivedData -path '*PhotoAssetManagerIOS.app' | head -1)
+```
+
+**内部分发说明**：
+- IPA 可通过内部 HTTPS + manifest、MDM、Apple Configurator、邮件等方式分发给授权设备。
+- 保留原有 simulator 命令用于日常开发调试。
 
 ## Infra
 
