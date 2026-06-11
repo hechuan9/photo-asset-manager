@@ -17,6 +17,8 @@
 		A10000080000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001080000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncLedger.swift */; };
 		A10000090000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001090000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift */; };
 		A100000A0000000000000001 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A100010A0000000000000001 /* libsqlite3.tbd */; };
+		A100000B0000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A100010C0000000000000001 /* Assets.xcassets */; };
+		A100000C0000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A100010D0000000000000001 /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -31,6 +33,8 @@
 		A10001090000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift; sourceTree = SOURCE_ROOT; };
 		A100010A0000000000000001 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
 		A100010B0000000000000001 /* PhotoAssetManagerIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhotoAssetManagerIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A100010C0000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = SOURCE_ROOT; };
+		A100010D0000000000000001 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -52,6 +56,8 @@
 				A100001D0000000000000001 /* SharedCore */,
 				A100001E0000000000000001 /* Frameworks */,
 				A100001F0000000000000001 /* Products */,
+				A100010C0000000000000001 /* Assets.xcassets */,
+				A100010D0000000000000001 /* PrivacyInfo.xcprivacy */,
 			);
 			sourceTree = "<group>";
 		};
@@ -152,6 +158,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A100000B0000000000000001 /* Assets.xcassets in Resources */,
+				A100000C0000000000000001 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -219,7 +227,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = 3TZ6RCL8NE;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -230,7 +238,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.hechuan.PhotoAssetManagerIOS;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -245,7 +253,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = 3TZ6RCL8NE;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -256,7 +264,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.hechuan.PhotoAssetManagerIOS;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
