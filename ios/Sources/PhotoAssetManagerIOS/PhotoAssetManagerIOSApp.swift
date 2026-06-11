@@ -125,6 +125,9 @@ struct IOSSyncStatusBar: View {
                     Text(isConfigured ? "iPhone 本地投影" : "本地缓存模式")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.secondary)
+                    Text("企业内部版")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
                     Text(summary)
                         .font(.system(size: 22, weight: .semibold))
                         .foregroundStyle(.white)
@@ -188,6 +191,12 @@ struct IOSGalleryEmptyState: View {
                  ? "应用会在前台自动拉取 macOS 已上传的 ledger，并优先显示缩略图。"
                  : "先填 control plane 地址，随后 iPhone 会自动拉取这个只读图库。")
                 .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 320)
+
+            Text("（本构建为企业内部发行，仅授权设备）")
+                .font(.system(size: 12, weight: .regular))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 320)
@@ -275,6 +284,9 @@ struct IOSSyncSettingsView: View {
                     Text("当前 iOS 端只负责同步验证和瀑布流浏览，不会扫描、移动、删除或覆盖任何原片。")
                     Text("前台会自动拉取 ledger。缩略图优先读本地缓存，没有本地缓存时，再通过 derivative metadata 取远端下载链接。")
                     Text("若 control plane 使用 API Gateway AWS_IAM，请切到 AWS IAM 并填写 region 与临时或长期凭证。")
+                    Text((Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String).map { "企业内部版 \($0)（本构建为企业内部发行，仅授权设备）" } ?? "企业内部版（本构建为企业内部发行，仅授权设备）")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("同步设置")
