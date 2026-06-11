@@ -1,0 +1,8 @@
+  {
+    "method": "enterprise",
+    "teamID": "3TZ6RCL8NE",
+    "signingStyle": "automatic",
+    "stripSwiftSymbols": true,
+    "thinning": "<thin-for-all-variants>",
+    "compileBitcode": false
+  }
