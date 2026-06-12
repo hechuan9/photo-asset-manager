@@ -20,6 +20,21 @@ struct SyncClientConfiguration: Equatable, Sendable {
     var awsSessionToken: String
 
     static func load(defaults: UserDefaults = .standard) -> SyncClientConfiguration {
+#if os(iOS)
+        // 当前阶段固定写死 macOS 端的配置，绕过 UserDefaults / 设置界面
+        // TODO: 后续恢复为从 defaults 读取，或提供 UI 配置
+        return SyncClientConfiguration(
+            baseURLString: "https://zewnw6dncl.execute-api.us-east-1.amazonaws.com",
+            libraryID: "local-library",
+            peerID: "control-plane",
+            authModeRawValue: "aws_iam",
+            accessCredential: "",
+            awsRegion: "us-east-1",
+            awsAccessKeyID: "",  // TODO: 临时绕过 iOS 配置，生产应通过安全方式注入或从 Keychain/UserDefaults 读取
+            awsSecretAccessKey: "",  // 切勿提交真实密钥！当前阶段使用空值，依赖其他 auth 路径或本地测试配置
+            awsSessionToken: ""
+        )
+#else
         SyncClientConfiguration(
             baseURLString: defaults.string(forKey: SyncPreferenceKey.baseURL) ?? "",
             libraryID: defaults.string(forKey: SyncPreferenceKey.libraryID) ?? "local-library",
@@ -31,6 +46,7 @@ struct SyncClientConfiguration: Equatable, Sendable {
             awsSecretAccessKey: defaults.string(forKey: SyncPreferenceKey.awsSecretAccessKey) ?? "",
             awsSessionToken: defaults.string(forKey: SyncPreferenceKey.awsSessionToken) ?? ""
         )
+#endif
     }
 
     var trimmedBaseURLString: String {

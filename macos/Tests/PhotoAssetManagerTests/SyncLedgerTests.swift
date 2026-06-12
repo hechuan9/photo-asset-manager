@@ -502,6 +502,21 @@ struct SyncLedgerTests {
         #expect(candidates.map(\.assetID) == [assetNeedingUpload])
     }
 
+    @Test func thumbnailUploadCandidateDeduplicationPrefersLaterDatabaseCandidateWithoutCrashing() {
+        let assetID = UUID(uuidString: "00000000-0000-0000-0000-00000000bd03")!
+        let staleURL = URL(fileURLWithPath: "/tmp/stale-thumb.jpg")
+        let databaseURL = URL(fileURLWithPath: "/tmp/database-thumb.jpg")
+
+        let deduped = LibraryStore.deduplicateThumbnailUploadCandidates([
+            ScannedDerivativeUploadCandidate(assetID: assetID, role: .thumbnail, fileURL: staleURL),
+            ScannedDerivativeUploadCandidate(assetID: assetID, role: .thumbnail, fileURL: databaseURL)
+        ])
+
+        #expect(deduped.count == 1)
+        #expect(deduped.first?.assetID == assetID)
+        #expect(deduped.first?.fileURL == databaseURL)
+    }
+
     @Test func commandLayerDeclaresS3ThumbnailAndPreviewDerivativesWithoutStoringBytesInLedger() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }

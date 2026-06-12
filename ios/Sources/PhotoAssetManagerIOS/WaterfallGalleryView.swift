@@ -1,3 +1,4 @@
+import CryptoKit
 import SwiftUI
 import UIKit
 
@@ -245,6 +246,35 @@ private final class IOSImagePreviewCache {
     }
 }
 
+// 磁盘缩略图缓存：支持后台全量预取（即便 10万+ 张）。文件放 Caches/Thumbnails/，下次启动可直接命中，不重复下载。
+// 命中检查优先内存 -> 磁盘 -> 网络。prefetchIfNeeded 只填充缓存，不触碰 UI 绑定。
+private enum DiskThumbnailCache {
+    static let directory: URL = {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let dir = caches.appendingPathComponent("Thumbnails", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    static func url(for cacheKey: String) -> URL {
+        let digest = SHA256.hash(data: Data(cacheKey.utf8))
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        return directory.appendingPathComponent("\(hex).jpg")
+    }
+
+    static func load(for cacheKey: String) -> UIImage? {
+        let url = url(for: cacheKey)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return UIImage(data: data)
+    }
+
+    static func save(_ image: UIImage, for cacheKey: String) {
+        let url = url(for: cacheKey)
+        guard let data = image.jpegData(compressionQuality: 0.82) else { return }
+        try? data.write(to: url, options: [.atomic])
+    }
+}
+
 @MainActor
 final class IOSImagePreviewLoader: ObservableObject {
     @Published var image: UIImage?
@@ -255,10 +285,15 @@ final class IOSImagePreviewLoader: ObservableObject {
         loadTask?.cancel()
     }
 
-    func cacheKey(asset: Asset, remoteHint: RemoteDerivativeHint?, configuration: SyncClientConfiguration) -> String {
+    static func cacheKey(asset: Asset, remoteHint: RemoteDerivativeHint?, configuration: SyncClientConfiguration) -> String {
         let localKey = asset.thumbnailPath ?? asset.id.uuidString
         let remoteKey = remoteHint.map { "\($0.role.rawValue):\($0.pixelSize.width)x\($0.pixelSize.height)" } ?? "none"
         return "\(localKey)|\(remoteKey)|\(configuration.trimmedBaseURLString)"
+    }
+
+    // 实例方法保持兼容调用点（.task id 等）
+    func cacheKey(asset: Asset, remoteHint: RemoteDerivativeHint?, configuration: SyncClientConfiguration) -> String {
+        Self.cacheKey(asset: asset, remoteHint: remoteHint, configuration: configuration)
     }
 
     func load(
@@ -279,6 +314,14 @@ final class IOSImagePreviewLoader: ObservableObject {
             return
         }
 
+        // 磁盘命中：后台预取或上次会话保存的缩略图直接使用，跳过网络
+        if let disk = DiskThumbnailCache.load(for: cacheKey) {
+            IOSImagePreviewCache.shared.insert(disk, forKey: cacheKey)
+            image = disk
+            reportAspectRatio(for: disk, onAspectRatioChange: onAspectRatioChange)
+            return
+        }
+
         image = nil
         let task = Task(priority: .utility) {
             let loaded = await Self.loadImage(asset: asset, remoteHint: remoteHint, configuration: configuration)
@@ -287,6 +330,7 @@ final class IOSImagePreviewLoader: ObservableObject {
                 guard self.loadedCacheKey == cacheKey else { return }
                 if let loaded {
                     IOSImagePreviewCache.shared.insert(loaded, forKey: cacheKey)
+                    DiskThumbnailCache.save(loaded, for: cacheKey)
                     self.reportAspectRatio(for: loaded, onAspectRatioChange: onAspectRatioChange)
                 }
                 self.image = loaded
@@ -331,6 +375,53 @@ final class IOSImagePreviewLoader: ObservableObject {
 
     private static func loadLocalImage(path: String) -> UIImage? {
         UIImage(contentsOfFile: path)
+    }
+
+    // 后台预取入口：为 ledger 中所有资产的缩略图（或 preview 作为回退）拉取并落盘。
+    // 由 store 在首次有数据时用 detached task 调用。内部快速跳过已缓存项，只在 miss 时做网络。
+    // 即便资产很多，也只在后台低优先级缓慢进行，不阻塞 UI 或前台同步。
+    static func prefetchIfNeeded(
+        asset: Asset,
+        remoteHint: RemoteDerivativeHint?,
+        configuration: SyncClientConfiguration
+    ) async {
+        let key = Self.cacheKey(asset: asset, remoteHint: remoteHint, configuration: configuration)
+
+        if IOSImagePreviewCache.shared.image(forKey: key) != nil {
+            return
+        }
+        if FileManager.default.fileExists(atPath: DiskThumbnailCache.url(for: key).path) {
+            return
+        }
+
+        print("[Prefetch] miss for \(asset.id), will fetch derivative meta role=\(remoteHint?.role.rawValue ?? "nil")")
+
+        guard let remoteHint, let baseURL = configuration.baseURL else {
+            return
+        }
+
+        let client = SyncControlPlaneHTTPClient(
+            baseURL: baseURL,
+            authentication: configuration.requestAuthentication
+        )
+        guard let metadata = try? await client.fetchDerivativeMetadata(
+            libraryID: configuration.libraryID,
+            assetID: asset.id,
+            role: remoteHint.role
+        ) else {
+            print("[Prefetch] meta fetch failed for \(asset.id)")
+            return
+        }
+        guard let (data, _) = try? await URLSession.shared.data(from: metadata.downloadURL),
+              let ui = UIImage(data: data) else {
+            return
+        }
+
+        DiskThumbnailCache.save(ui, for: key)
+        await MainActor.run {
+            IOSImagePreviewCache.shared.insert(ui, forKey: key)
+        }
+        print("[Prefetch] saved to disk for \(asset.id)")
     }
 }
 

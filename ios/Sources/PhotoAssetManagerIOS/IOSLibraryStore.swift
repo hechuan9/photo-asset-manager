@@ -28,10 +28,11 @@ final class IOSLibraryStore: ObservableObject {
 
     private let databasePath: URL
     private let database: SQLiteDatabase
-    private let assetPageSize = 240
+    private let assetPageSize = 200_000  // 加载所有照片到UI列表（后台慢慢预取缩略图）；LazyVStack 会虚拟化渲染
     private let automaticSyncIntervalNanoseconds: UInt64 = 15_000_000_000
     private var automaticSyncTask: Task<Void, Never>?
     private var automaticSyncActive = false
+    private var thumbnailPrefetchStarted = false
 
     init(databasePath: URL? = nil) {
         do {
@@ -55,16 +56,31 @@ final class IOSLibraryStore: ObservableObject {
         guard !didLoadInitialSnapshot else { return }
         didLoadInitialSnapshot = true
         refreshLocalProjection(statusOverride: "已加载本地缓存")
+        if configuration.hasRemoteSync {
+            Task {
+                await syncNow(statusPrefix: "启动同步")
+            }
+        }
         restartAutomaticSyncLoop(immediate: false)
     }
 
     func reloadConfiguration() {
         configuration = SyncClientConfiguration.load()
+        if configuration.hasRemoteSync {
+            Task {
+                await syncNow(statusPrefix: "配置更新后同步")
+            }
+        }
         restartAutomaticSyncLoop(immediate: automaticSyncActive)
     }
 
     func setAutomaticSyncActive(_ isActive: Bool) {
         automaticSyncActive = isActive
+        if isActive && configuration.hasRemoteSync {
+            Task {
+                await syncNow(statusPrefix: "前台激活同步")
+            }
+        }
         restartAutomaticSyncLoop(immediate: isActive)
     }
 
@@ -133,6 +149,19 @@ final class IOSLibraryStore: ObservableObject {
     private func apply(_ snapshot: AssetGallerySnapshot) {
         assets = snapshot.assets
         derivativeHints = snapshot.derivativeHints
+
+        // 首次获得有数据的投影时，启动后台缩略图全量预取（ledger 已在 sync 的 pullRemoteOperations 里全量拉取）。
+        // 即便照片很多，prefetchIfNeeded 会跳过已落盘的，缓慢串行下载剩余的，存到 Caches/Thumbnails。
+        if configuration.hasRemoteSync && !thumbnailPrefetchStarted && !derivativeHints.isEmpty {
+            thumbnailPrefetchStarted = true
+            let assetsSnap = assets
+            let hintsSnap = derivativeHints
+            let cfgSnap = configuration
+            print("[IOSLibraryStore] starting bg thumbnail prefetch for \(assetsSnap.count) assets (\(hintsSnap.count) hints)")
+            Task.detached(priority: .utility) {
+                await Self.runBackgroundThumbnailPrefetch(assets: assetsSnap, hints: hintsSnap, configuration: cfgSnap)
+            }
+        }
     }
 
     nonisolated private static func loadSnapshot(database: SQLiteDatabase, limit: Int) throws -> AssetGallerySnapshot {
@@ -147,6 +176,33 @@ final class IOSLibraryStore: ObservableObject {
             }
         }
         return AssetGallerySnapshot(assets: assets, derivativeHints: hints)
+    }
+
+    // 后台缓慢处理缩略图拉取。串行 + 小 sleep，优先跳过磁盘缓存。调用方保证在有 remote 配置时触发一次。
+    nonisolated private static func runBackgroundThumbnailPrefetch(
+        assets: [Asset],
+        hints: [UUID: RemoteDerivativeHint],
+        configuration: SyncClientConfiguration
+    ) async {
+        // 遵循“即便很多也拉取，慢慢后台”的要求。每次 sync 后的投影会触发（首次数据到达或重启后本地有数据时）。
+        print("[IOSLibraryStore] runBackgroundThumbnailPrefetch begin, total=\(assets.count)")
+        var processed = 0
+        for asset in assets {
+            if let hint = hints[asset.id] {
+                await IOSImagePreviewLoader.prefetchIfNeeded(
+                    asset: asset,
+                    remoteHint: hint,
+                    configuration: configuration
+                )
+            }
+            processed += 1
+            if processed % 500 == 0 {
+                print("[IOSLibraryStore] prefetch progress: \(processed)/\(assets.count)")
+            }
+            // 节流：命中时几乎瞬间，miss 时网络耗时为主。20ms 间隔让步给系统/电池/网络。
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        print("[IOSLibraryStore] runBackgroundThumbnailPrefetch done for this pass")
     }
 
     private static func defaultDatabasePath() throws -> URL {

@@ -11,6 +11,7 @@ struct PhotoAssetManagerApp: App {
                 .frame(minWidth: 1180, minHeight: 760)
         }
         .commands {
+            ImportCommands(library: library)
             AssetSelectionCommands(library: library)
             FolderScopeCommands(library: library)
             ToolCommands(library: library)
@@ -117,6 +118,20 @@ struct FolderScopeCommands: Commands {
                 library.setBrowseScope(.recursive)
             }
             .disabled(library.filter.browseSelection == nil)
+        }
+    }
+}
+
+struct ImportCommands: Commands {
+    @ObservedObject var library: LibraryStore
+
+    var body: some Commands {
+        CommandGroup(after: .newItem) {
+            Button("导入照片...") {
+                library.beginPhotoImport()
+            }
+            .keyboardShortcut("i", modifiers: [.command, .shift])
+            .disabled(library.isBusy)
         }
     }
 }

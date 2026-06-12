@@ -221,6 +221,55 @@ struct PhotoScanner: @unchecked Sendable {
         return skippedDirectoryNames.contains(url.lastPathComponent.lowercased())
     }
 
+    func persistImportedFile(
+        at url: URL,
+        storageKind: StorageKind,
+        derivativeRoot: URL?,
+        database: SQLiteDatabase,
+        batchID: UUID,
+        ledgerContext: ScannedFileLedgerContext?
+    ) throws -> ScannedFileUpsertResult? {
+        if SupportedFiles.isPhoto(url) {
+            guard let scanned = try scanFile(url, storageKind: storageKind, derivativeRoot: derivativeRoot) else {
+                return nil
+            }
+            return try database.upsertScannedFile(scanned, batchID: batchID, ledgerContext: ledgerContext)
+        }
+        if SupportedFiles.isSidecar(url) {
+            try persistImportedSidecar(at: url, storageKind: storageKind, database: database)
+        }
+        return nil
+    }
+
+    private func persistImportedSidecar(at url: URL, storageKind: StorageKind, database: SQLiteDatabase) throws {
+        let directory = url.deletingLastPathComponent()
+        let baseName = url.deletingPathExtension().lastPathComponent
+        let extensions = SupportedFiles.jpegExtensions.union(SupportedFiles.rawExtensions)
+        for ext in extensions {
+            let photoPath = directory.appendingPathComponent(baseName).appendingPathExtension(ext).path
+            guard let linked = try database.fileInstanceAndAssetID(path: photoPath) else {
+                continue
+            }
+            let fileInstanceID = linked.fileInstanceID
+            let assetID = linked.assetID
+            let values = try url.resourceValues(forKeys: [.fileSizeKey])
+            let authority = storageKind == .nas ? AuthorityRole.canonical : AuthorityRole.workingCopy
+            let syncStatus = storageKind == .nas ? SyncStatus.synced : SyncStatus.needsArchive
+            let sidecar = ScannedSidecar(
+                url: url,
+                deviceID: currentDeviceID(),
+                storageKind: storageKind,
+                authorityRole: authority,
+                syncStatus: syncStatus,
+                sizeBytes: Int64(values.fileSize ?? 0),
+                contentHash: try FileHasher.sha256(url: url)
+            )
+            try database.upsertScannedSidecar(sidecar, assetID: assetID)
+            try database.upsertBrowseFolderMembership(filePath: url.path, fileInstanceID: fileInstanceID, storageKind: storageKind)
+            return
+        }
+    }
+
     private func scanFile(_ url: URL, storageKind: StorageKind, derivativeRoot: URL?) throws -> ScannedFile? {
         guard SupportedFiles.isPhoto(url) else { return nil }
         let values = try url.resourceValues(forKeys: [.fileSizeKey])

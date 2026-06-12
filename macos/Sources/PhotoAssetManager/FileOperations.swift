@@ -11,6 +11,8 @@ enum FileOperationError: LocalizedError {
     case destinationInsideSource(URL)
     case sourceFileMissing(URL)
     case noImportableFiles(URL)
+    case ambiguousRawMatch(String, [String])
+    case invalidImportConfiguration(String)
     case noMovableFiles
     case noDeletableFiles
     case folderContainsFiles(URL)
@@ -28,6 +30,9 @@ enum FileOperationError: LocalizedError {
         case .destinationInsideSource(let url): "不能移动到源文件夹内部：\(url.path)"
         case .sourceFileMissing(let url): "源文件不存在：\(url.path)"
         case .noImportableFiles(let url): "没有找到可导入的照片或 sidecar 文件：\(url.path)"
+        case .ambiguousRawMatch(let photo, let candidates):
+            "无法唯一匹配 RAW：\(photo)\n候选：\(candidates.joined(separator: "\n"))"
+        case .invalidImportConfiguration(let detail): detail
         case .noMovableFiles: "没有可移动的在线照片文件。"
         case .noDeletableFiles: "没有可删除的在线照片文件。"
         case .folderContainsFiles(let url): "文件夹内仍有文件，已阻止彻底删除：\(url.path)"
@@ -132,53 +137,386 @@ struct FileOperations: Sendable {
         return (destination, items.sorted { $0.sourcePath.localizedStandardCompare($1.sourcePath) == .orderedAscending })
     }
 
-    func buildPhotoImportPlan(source: URL, destinationTarget: PhotoImportTarget) throws -> (destination: URL, items: [PhotoImportPlanItem]) {
-        let sourcePath = normalizedDirectoryPath(source.path)
-        let destinationParent = URL(fileURLWithPath: destinationTarget.path, isDirectory: true)
-        let destination = destinationParent.appendingPathComponent(source.lastPathComponent, isDirectory: true)
-        let destinationPath = normalizedDirectoryPath(destination.path)
+    func buildPhotoImportPlan(
+        configuration: PhotoImportConfiguration,
+        progress: ((String, String, Int, Int) -> Void)? = nil
+    ) throws -> PhotoImportPlan {
+        let context = try makePhotoImportContext(configuration: configuration, progress: progress)
+        if !context.ambiguousPhotos.isEmpty {
+            throw FileOperationError.ambiguousRawMatch(
+                context.ambiguousPhotos[0],
+                context.rawMatches[context.ambiguousPhotos[0]].map { match in
+                    if case .ambiguous(let files) = match {
+                        return files.map(\.url.path)
+                    }
+                    return []
+                } ?? []
+            )
+        }
 
+        progress?("整理导入列表", context.mainDestination.path, 0, context.importPhotos.count)
+
+        var items: [PhotoImportPlanItem] = []
+        var rawSidecarSources: Set<String> = []
+
+        var plannedDestinations: Set<String> = []
+        for (index, photo) in context.importPhotos.enumerated() {
+            progress?("整理导入列表", photo.sourcePath, index + 1, context.importPhotos.count)
+            try appendFlattenedImportItem(
+                source: photo.url,
+                destinationRoot: context.mainDestination,
+                routesToHasselbladRaw: false,
+                plannedDestinations: &plannedDestinations,
+                items: &items
+            )
+
+            for sidecar in try sidecarsBesidePhoto(photo.url) where !SupportedFiles.isRaw(sidecar) {
+                try appendFlattenedImportItem(
+                    source: sidecar,
+                    destinationRoot: context.mainDestination,
+                    routesToHasselbladRaw: false,
+                    plannedDestinations: &plannedDestinations,
+                    items: &items
+                )
+            }
+
+            guard let rawDestination = context.rawDestination else { continue }
+            guard case .matched(let rawFile) = context.rawMatches[photo.sourcePath] else { continue }
+
+            try appendFlattenedImportItem(
+                source: rawFile.url,
+                destinationRoot: rawDestination,
+                routesToHasselbladRaw: true,
+                plannedDestinations: &plannedDestinations,
+                items: &items
+            )
+
+            for sidecar in try sidecarsBesidePhoto(rawFile.url) {
+                let sidecarPath = normalizedDirectoryPath(sidecar.path)
+                guard rawSidecarSources.insert(sidecarPath).inserted else { continue }
+                try appendFlattenedImportItem(
+                    source: sidecar,
+                    destinationRoot: rawDestination,
+                    routesToHasselbladRaw: true,
+                    plannedDestinations: &plannedDestinations,
+                    items: &items
+                )
+            }
+        }
+
+        let sortedItems = items.sorted { $0.sourcePath.localizedStandardCompare($1.sourcePath) == .orderedAscending }
+        let matchedRawCount = context.rawMatches.values.reduce(into: 0) { count, match in
+            if case .matched = match { count += 1 }
+        }
+        return PhotoImportPlan(
+            mainDestination: context.mainDestination,
+            hasselbladRawDestination: sortedItems.contains(where: \.routesToHasselbladRaw) ? context.rawDestination : nil,
+            items: sortedItems,
+            stats: PhotoImportStats(
+                photoCount: context.importPhotos.count,
+                matchedRawCount: matchedRawCount,
+                unmatchedPhotoCount: context.unmatchedPhotos.count
+            )
+        )
+    }
+
+    private struct ImportPhotoCandidate {
+        var url: URL
+        var sourcePath: String
+        var relativePath: String
+        var metadata: ImageMetadata
+        var fingerprint: String
+    }
+
+    private struct IndexedRawFile {
+        var url: URL
+        var sourcePath: String
+        var normalizedBaseName: String
+        var metadata: ImageMetadata
+        var fingerprint: String
+    }
+
+    private enum RawMatchResult {
+        case matched(IndexedRawFile)
+        case unmatched
+        case ambiguous([IndexedRawFile])
+    }
+
+    private struct PhotoImportContext {
+        var mainDestination: URL
+        var rawDestination: URL?
+        var importPhotos: [ImportPhotoCandidate]
+        var rawIndex: [IndexedRawFile]
+        var rawMatches: [String: RawMatchResult]
+        var unmatchedPhotos: [String]
+        var ambiguousPhotos: [String]
+    }
+
+    private func makePhotoImportContext(
+        configuration: PhotoImportConfiguration,
+        progress: ((String, String, Int, Int) -> Void)? = nil
+    ) throws -> PhotoImportContext {
+        let importSource = configuration.importSource.resolvingSymlinksInPath()
+        let importSourcePath = normalizedDirectoryPath(importSource.path)
+        let destinationParent = URL(fileURLWithPath: configuration.target.path, isDirectory: true)
+        let mainDestination = destinationParent
+        let mainDestinationPath = normalizedDirectoryPath(mainDestination.path)
+        let rawDestination = configuration.targetRawRoot
+        let rawDestinationPath = rawDestination.map { normalizedDirectoryPath($0.path) }
+
+        try validateImportDirectories(
+            importSource: importSource,
+            importSourcePath: importSourcePath,
+            rawSource: configuration.rawSource,
+            destinationParent: destinationParent,
+            mainDestination: mainDestination,
+            mainDestinationPath: mainDestinationPath,
+            rawDestination: rawDestination,
+            rawDestinationPath: rawDestinationPath
+        )
+
+        let importPhotos = try collectImportPhotos(from: importSource, rootPath: importSourcePath, progress: progress)
+        guard !importPhotos.isEmpty else {
+            throw FileOperationError.noImportableFiles(importSource)
+        }
+        progress?("扫描照片", importSourcePath, importPhotos.count, importPhotos.count)
+
+        let rawIndex: [IndexedRawFile]
+        if let rawSource = configuration.rawSource {
+            rawIndex = try indexRawFiles(in: rawSource, progress: progress)
+        } else {
+            rawIndex = []
+        }
+        var rawMatches: [String: RawMatchResult] = [:]
+        var unmatchedPhotos: [String] = []
+        var ambiguousPhotos: [String] = []
+
+        if configuration.rawSource != nil {
+            for (index, photo) in importPhotos.enumerated() {
+                progress?("匹配 RAW", photo.sourcePath, index + 1, importPhotos.count)
+                let match = matchRawFile(
+                    normalizedBaseName: ImportFileMatcher.normalizedBaseName(photo.url.deletingPathExtension().lastPathComponent),
+                    metadata: photo.metadata,
+                    fingerprint: photo.fingerprint,
+                    candidates: rawIndex
+                )
+                rawMatches[photo.sourcePath] = match
+                switch match {
+                case .unmatched:
+                    unmatchedPhotos.append(photo.url.lastPathComponent)
+                case .ambiguous:
+                    ambiguousPhotos.append(photo.url.lastPathComponent)
+                case .matched:
+                    break
+                }
+            }
+            progress?("匹配 RAW", importSourcePath, importPhotos.count, importPhotos.count)
+        }
+
+        return PhotoImportContext(
+            mainDestination: mainDestination,
+            rawDestination: rawDestination,
+            importPhotos: importPhotos,
+            rawIndex: rawIndex,
+            rawMatches: rawMatches,
+            unmatchedPhotos: unmatchedPhotos.sorted(),
+            ambiguousPhotos: ambiguousPhotos.sorted()
+        )
+    }
+
+    private func validateImportDirectories(
+        importSource: URL,
+        importSourcePath: String,
+        rawSource: URL?,
+        destinationParent: URL,
+        mainDestination: URL,
+        mainDestinationPath: String,
+        rawDestination: URL?,
+        rawDestinationPath: String?
+    ) throws {
         var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: sourcePath, isDirectory: &isDirectory), isDirectory.boolValue else {
-            throw FileOperationError.sourceFolderMissing(source)
+        guard fileManager.fileExists(atPath: importSourcePath, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw FileOperationError.sourceFolderMissing(importSource)
         }
         guard directoryWritable(destinationParent) else {
             throw FileOperationError.cannotWrite(destinationParent)
         }
-        if destinationPath == sourcePath || destinationPath.hasPrefix(sourcePath + "/") {
-            throw FileOperationError.destinationInsideSource(destination)
+        if let rawSource {
+            let rawSourcePath = normalizedDirectoryPath(rawSource.resolvingSymlinksInPath().path)
+            guard fileManager.fileExists(atPath: rawSourcePath, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw FileOperationError.sourceFolderMissing(rawSource)
+            }
+            guard let rawDestination else {
+                throw FileOperationError.invalidImportConfiguration("已选择 RAW 文件夹时，必须同时选择目标 RAW 文件夹。")
+            }
+            guard directoryWritable(rawDestination) else {
+                throw FileOperationError.cannotWrite(rawDestination)
+            }
         }
-        if fileManager.fileExists(atPath: destinationPath) {
+        if mainDestinationPath == importSourcePath || mainDestinationPath.hasPrefix(importSourcePath + "/") {
+            throw FileOperationError.destinationInsideSource(mainDestination)
+        }
+        if let rawDestinationPath,
+           let rawSource,
+           rawDestinationPath == normalizedDirectoryPath(rawSource.path) || rawDestinationPath.hasPrefix(normalizedDirectoryPath(rawSource.path) + "/") {
+            throw FileOperationError.destinationInsideSource(rawDestination!)
+        }
+    }
+
+    private func appendFlattenedImportItem(
+        source: URL,
+        destinationRoot: URL,
+        routesToHasselbladRaw: Bool,
+        plannedDestinations: inout Set<String>,
+        items: inout [PhotoImportPlanItem]
+    ) throws {
+        let destination = destinationRoot.appendingPathComponent(source.lastPathComponent, isDirectory: false)
+        let destinationPath = normalizedDirectoryPath(destination.path)
+        if fileManager.fileExists(atPath: destinationPath) || !plannedDestinations.insert(destinationPath).inserted {
             throw FileOperationError.destinationExists(destination)
         }
+        items.append(PhotoImportPlanItem(
+            sourcePath: normalizedDirectoryPath(source.path),
+            destinationPath: destinationPath,
+            contentHash: "",
+            routesToHasselbladRaw: routesToHasselbladRaw
+        ))
+    }
 
+    private func collectImportPhotos(
+        from root: URL,
+        rootPath: String,
+        progress: ((String, String, Int, Int) -> Void)? = nil
+    ) throws -> [ImportPhotoCandidate] {
         guard let enumerator = fileManager.enumerator(
-            at: source,
-            includingPropertiesForKeys: [.isRegularFileKey],
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else {
-            throw FileOperationError.sourceFolderMissing(source)
+            throw FileOperationError.sourceFolderMissing(root)
         }
 
-        var items: [PhotoImportPlanItem] = []
+        var photos: [ImportPhotoCandidate] = []
+        var discovered = 0
         while let url = enumerator.nextObject() as? URL {
-            let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
             guard values.isRegularFile == true else { continue }
-            guard SupportedFiles.isPhoto(url) || SupportedFiles.isSidecar(url) else { continue }
+            guard SupportedFiles.isPhoto(url), !SupportedFiles.isRaw(url) else { continue }
             let sourceFilePath = normalizedDirectoryPath(url.path)
-            let relativePath = relativeFilePath(sourceFilePath, under: sourcePath)
-            let destinationFile = destination.appendingPathComponent(relativePath, isDirectory: false)
-            items.append(PhotoImportPlanItem(
+            let metadata = ImageMetadata.read(url: url)
+            let sizeBytes = Int64(values.fileSize ?? 0)
+            photos.append(ImportPhotoCandidate(
+                url: url,
                 sourcePath: sourceFilePath,
-                destinationPath: destinationFile.path,
-                contentHash: try FileHasher.sha256(url: url)
+                relativePath: relativeFilePath(sourceFilePath, under: rootPath),
+                metadata: metadata,
+                fingerprint: metadata.fingerprint(filename: url.lastPathComponent, sizeBytes: sizeBytes)
             ))
+            discovered += 1
+            if discovered == 1 || discovered % 20 == 0 {
+                progress?("扫描照片", sourceFilePath, discovered, 0)
+            }
+        }
+        return photos.sorted { $0.sourcePath.localizedStandardCompare($1.sourcePath) == .orderedAscending }
+    }
+
+    private func indexRawFiles(
+        in root: URL,
+        progress: ((String, String, Int, Int) -> Void)? = nil
+    ) throws -> [IndexedRawFile] {
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            throw FileOperationError.sourceFolderMissing(root)
         }
 
-        guard !items.isEmpty else {
-            throw FileOperationError.noImportableFiles(source)
+        var indexed: [IndexedRawFile] = []
+        var discovered = 0
+        while let url = enumerator.nextObject() as? URL {
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard values.isRegularFile == true else { continue }
+            guard SupportedFiles.isRaw(url) else { continue }
+            let metadata = ImageMetadata.read(url: url)
+            let sizeBytes = Int64(values.fileSize ?? 0)
+            let sourcePath = normalizedDirectoryPath(url.path)
+            indexed.append(IndexedRawFile(
+                url: url,
+                sourcePath: sourcePath,
+                normalizedBaseName: ImportFileMatcher.normalizedBaseName(url.deletingPathExtension().lastPathComponent),
+                metadata: metadata,
+                fingerprint: metadata.fingerprint(filename: url.lastPathComponent, sizeBytes: sizeBytes)
+            ))
+            discovered += 1
+            if discovered == 1 || discovered % 20 == 0 {
+                progress?("索引 RAW", sourcePath, discovered, 0)
+            }
         }
-        return (destination, items.sorted { $0.sourcePath.localizedStandardCompare($1.sourcePath) == .orderedAscending })
+        progress?("索引 RAW", root.path, indexed.count, indexed.count)
+        return indexed
+    }
+
+    private func sidecarsBesidePhoto(_ photo: URL) throws -> [URL] {
+        let directory = photo.deletingLastPathComponent()
+        let baseName = photo.deletingPathExtension().lastPathComponent
+        return SupportedFiles.sidecarExtensions
+            .map { directory.appendingPathComponent(baseName).appendingPathExtension($0) }
+            .filter { fileManager.fileExists(atPath: $0.path) }
+    }
+
+    private func matchRawFile(
+        normalizedBaseName: String,
+        metadata: ImageMetadata,
+        fingerprint: String,
+        candidates: [IndexedRawFile]
+    ) -> RawMatchResult {
+        let basenameMatches = candidates.filter { $0.normalizedBaseName == normalizedBaseName }
+        switch basenameMatches.count {
+        case 0:
+            return .unmatched
+        case 1:
+            return .matched(basenameMatches[0])
+        default:
+            let fingerprintMatches = basenameMatches.filter { $0.fingerprint == fingerprint }
+            if fingerprintMatches.count == 1 {
+                return .matched(fingerprintMatches[0])
+            }
+            if fingerprintMatches.count > 1 {
+                return .ambiguous(fingerprintMatches)
+            }
+
+            let scored = basenameMatches.map { candidate in
+                (candidate, metadataCompatibilityScore(photo: metadata, raw: candidate.metadata))
+            }
+            let bestScore = scored.map(\.1).max() ?? 0
+            guard bestScore >= 4 else {
+                return .ambiguous(basenameMatches)
+            }
+            let winners = scored.filter { $0.1 == bestScore }.map(\.0)
+            if winners.count == 1 {
+                return .matched(winners[0])
+            }
+            return .ambiguous(winners)
+        }
+    }
+
+    private func metadataCompatibilityScore(photo: ImageMetadata, raw: ImageMetadata) -> Int {
+        var score = 0
+        if let photoTime = photo.captureTime, let rawTime = raw.captureTime,
+           abs(photoTime.timeIntervalSince(rawTime)) <= 2 {
+            score += 4
+        }
+        if !photo.cameraMake.isEmpty, photo.cameraMake == raw.cameraMake {
+            score += 1
+        }
+        if !photo.cameraModel.isEmpty, photo.cameraModel == raw.cameraModel {
+            score += 2
+        }
+        if !photo.lensModel.isEmpty, photo.lensModel == raw.lensModel {
+            score += 1
+        }
+        return score
     }
 
     func buildAssetFileMovePlan(assetIDs: [UUID], destinationTarget: FolderMoveTarget, database: SQLiteDatabase) throws -> [AssetFileMovePlanItem] {
@@ -230,23 +568,79 @@ struct FileOperations: Sendable {
         try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
         for (index, item) in items.enumerated() {
             try await progress(item, index)
-            let source = URL(fileURLWithPath: item.sourcePath)
+            try copyImportedItem(item)
+        }
+    }
+
+    func runPhotoImportJob(
+        job: PhotoImportJob,
+        database: SQLiteDatabase,
+        scanner: PhotoScanner,
+        derivativeRoot: URL?,
+        batchID: UUID,
+        ledgerContext: ScannedFileLedgerContext?,
+        progress: (PhotoImportJob, PhotoImportItem) async throws -> Void,
+        didPersist: (ScannedFileUpsertResult) -> Void
+    ) async throws {
+        let mainDestination = URL(fileURLWithPath: job.targetPath, isDirectory: true)
+        try fileManager.createDirectory(at: mainDestination, withIntermediateDirectories: true)
+        if let rawRootPath = job.targetRawRootPath {
+            try fileManager.createDirectory(at: URL(fileURLWithPath: rawRootPath, isDirectory: true), withIntermediateDirectories: true)
+        }
+        try database.markPhotoImportJobRunning(id: job.id)
+
+        for item in try database.pendingPhotoImportItems(jobID: job.id) {
+            try await progress(job, item)
             let destination = URL(fileURLWithPath: item.destinationPath)
-            let parent = destination.deletingLastPathComponent()
-            try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
             if fileManager.fileExists(atPath: destination.path) {
-                throw FileOperationError.destinationExists(destination)
+                if !item.contentHash.isEmpty {
+                    let destinationHash = try FileHasher.sha256(url: destination)
+                    if destinationHash != item.contentHash {
+                        throw FileOperationError.destinationExists(destination)
+                    }
+                }
+            } else {
+                try copyImportedItem(PhotoImportPlanItem(
+                    sourcePath: item.sourcePath,
+                    destinationPath: item.destinationPath,
+                    contentHash: item.contentHash,
+                    routesToHasselbladRaw: item.routesToHasselbladRaw
+                ))
             }
-            let sourceHash = try FileHasher.sha256(url: source)
+            if let result = try scanner.persistImportedFile(
+                at: destination,
+                storageKind: job.storageKind,
+                derivativeRoot: derivativeRoot,
+                database: database,
+                batchID: batchID,
+                ledgerContext: ledgerContext
+            ) {
+                didPersist(result)
+            }
+            try database.completePhotoImportItem(item)
+        }
+        try database.completePhotoImportJob(job)
+    }
+
+    private func copyImportedItem(_ item: PhotoImportPlanItem) throws {
+        let source = URL(fileURLWithPath: item.sourcePath)
+        let destination = URL(fileURLWithPath: item.destinationPath)
+        let parent = destination.deletingLastPathComponent()
+        try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+        if fileManager.fileExists(atPath: destination.path) {
+            throw FileOperationError.destinationExists(destination)
+        }
+        let sourceHash = try FileHasher.sha256(url: source)
+        if !item.contentHash.isEmpty {
             guard sourceHash == item.contentHash else {
                 throw FileOperationError.hashMismatch(source: item.contentHash, destination: sourceHash)
             }
-            try fileManager.copyItem(at: source, to: destination)
-            let destinationHash = try FileHasher.sha256(url: destination)
-            guard sourceHash == destinationHash else {
-                try? fileManager.removeItem(at: destination)
-                throw FileOperationError.hashMismatch(source: sourceHash, destination: destinationHash)
-            }
+        }
+        try fileManager.copyItem(at: source, to: destination)
+        let destinationHash = try FileHasher.sha256(url: destination)
+        guard sourceHash == destinationHash else {
+            try? fileManager.removeItem(at: destination)
+            throw FileOperationError.hashMismatch(source: sourceHash, destination: destinationHash)
         }
     }
 
@@ -469,9 +863,15 @@ struct FileOperations: Sendable {
     }
 
     private func relativeFilePath(_ path: String, under root: String) -> String {
-        let prefix = root == "/" ? "/" : root + "/"
-        guard path.hasPrefix(prefix) else { return URL(fileURLWithPath: path).lastPathComponent }
-        return String(path.dropFirst(prefix.count))
+        let fileURL = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        let rootURL = URL(fileURLWithPath: root, isDirectory: true).resolvingSymlinksInPath()
+        let rootPath = normalizedDirectoryPath(rootURL.path)
+        let filePath = normalizedDirectoryPath(fileURL.path)
+        let prefix = rootPath == "/" ? "/" : rootPath + "/"
+        guard filePath.hasPrefix(prefix) else {
+            return fileURL.lastPathComponent
+        }
+        return String(filePath.dropFirst(prefix.count))
     }
 
     private func normalizedDirectoryPath(_ path: String) -> String {
@@ -506,5 +906,13 @@ struct FileOperations: Sendable {
             return false
         }
         return fileManager.isWritableFile(atPath: url.path)
+    }
+}
+
+enum ImportFileMatcher {
+    static func normalizedBaseName(_ name: String) -> String {
+        name
+            .replacingOccurrences(of: #"(?i)\s*\(\d+\)$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)[-_ ]?(edit|edited|export|copy|副本|已编辑)$"#, with: "", options: .regularExpression)
     }
 }

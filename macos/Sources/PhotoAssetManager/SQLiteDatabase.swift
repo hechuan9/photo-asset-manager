@@ -1161,6 +1161,53 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
+    func hasselbladRawRootPath() throws -> String? {
+        try prepare("SELECT value FROM app_settings WHERE key = 'hasselblad_raw_root_path'", []) { statement in
+            statement.text(0)
+        }.first ?? nil
+    }
+
+    func setHasselbladRawRootPath(_ path: String?) throws {
+        if let path, !path.isEmpty {
+            try execute(
+                """
+                INSERT INTO app_settings (key, value)
+                VALUES ('hasselblad_raw_root_path', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                [.text(path)]
+            )
+        } else {
+            try execute("DELETE FROM app_settings WHERE key = 'hasselblad_raw_root_path'", [])
+        }
+    }
+
+    func photoImportPreferences() throws -> PhotoImportPreferences {
+        guard let value = try prepare("SELECT value FROM app_settings WHERE key = 'photo_import_preferences'", []) { statement in
+            statement.text(0)
+        }.first,
+              let data = value.data(using: .utf8),
+              let preferences = try? JSONDecoder().decode(PhotoImportPreferences.self, from: data) else {
+            return PhotoImportPreferences()
+        }
+        return preferences
+    }
+
+    func setPhotoImportPreferences(_ preferences: PhotoImportPreferences) throws {
+        let data = try JSONEncoder().encode(preferences)
+        guard let value = String(data: data, encoding: .utf8) else {
+            throw DatabaseError.bindFailed("无法编码导入路径偏好")
+        }
+        try execute(
+            """
+            INSERT INTO app_settings (key, value)
+            VALUES ('photo_import_preferences', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            [.text(value)]
+        )
+    }
+
     func lastAvailabilityRefreshAt() throws -> Date? {
         let value = try prepare("SELECT value FROM app_settings WHERE key = 'last_availability_refresh_at'", []) { statement in
             statement.text(0)
@@ -1635,6 +1682,223 @@ final class SQLiteDatabase: @unchecked Sendable {
             "UPDATE folder_move_jobs SET status = 'failed', error_detail = ?, updated_at = ? WHERE id = ?",
             [.text(detail), .text(DateCoding.encode(Date())), .text(id.uuidString)]
         )
+    }
+
+    func createPhotoImportJob(configuration: PhotoImportConfiguration, plan: PhotoImportPlan) throws -> PhotoImportJob {
+        let jobID = UUID()
+        let now = DateCoding.encode(Date())
+        let importSourcePath = Self.normalizedDirectoryPath(configuration.importSource.path)
+        let rawSourcePath = configuration.rawSource.map { Self.normalizedDirectoryPath($0.path) }
+        let targetPath = Self.normalizedDirectoryPath(configuration.target.path)
+        let targetRawRootPath = configuration.targetRawRoot.map { Self.normalizedDirectoryPath($0.path) }
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try execute(
+                """
+                INSERT INTO photo_import_jobs (
+                    id, import_source_path, raw_source_path, target_path, target_raw_root_path,
+                    storage_kind, status, photo_count, matched_raw_count, unmatched_photo_count,
+                    total_files, completed_files, created_at, updated_at, error_detail
+                ) VALUES (?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?, 0, ?, ?, '')
+                """,
+                [
+                    .text(jobID.uuidString),
+                    .text(importSourcePath),
+                    .nullableText(rawSourcePath),
+                    .text(targetPath),
+                    .nullableText(targetRawRootPath),
+                    .text(configuration.target.storageKind.rawValue),
+                    .int(Int64(plan.stats.photoCount)),
+                    .int(Int64(plan.stats.matchedRawCount)),
+                    .int(Int64(plan.stats.unmatchedPhotoCount)),
+                    .int(Int64(plan.items.count)),
+                    .text(now),
+                    .text(now)
+                ]
+            )
+            for item in plan.items {
+                try execute(
+                    """
+                    INSERT INTO photo_import_items (
+                        id, job_id, source_path, destination_path, content_hash,
+                        routes_to_hasselblad_raw, status, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+                    """,
+                    [
+                        .text(UUID().uuidString),
+                        .text(jobID.uuidString),
+                        .text(item.sourcePath),
+                        .text(item.destinationPath),
+                        .text(item.contentHash),
+                        .int(item.routesToHasselbladRaw ? 1 : 0),
+                        .text(now)
+                    ]
+                )
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+        return try photoImportJob(id: jobID)
+    }
+
+    func unfinishedPhotoImportJob() throws -> PhotoImportJob? {
+        try prepare(
+            """
+            SELECT id, import_source_path, raw_source_path, target_path, target_raw_root_path,
+                   storage_kind, status, photo_count, matched_raw_count, unmatched_photo_count,
+                   total_files, completed_files
+            FROM photo_import_jobs
+            WHERE status IN ('ready', 'running', 'interrupted')
+            ORDER BY created_at ASC
+            LIMIT 1
+            """,
+            []
+        ) { statement in
+            PhotoImportJob(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                importSourcePath: statement.text(1),
+                rawSourcePath: statement.optionalText(2),
+                targetPath: statement.text(3),
+                targetRawRootPath: statement.optionalText(4),
+                storageKind: StorageKind(rawValue: statement.text(5)) ?? .local,
+                status: statement.text(6),
+                photoCount: Int(statement.int(7)),
+                matchedRawCount: Int(statement.int(8)),
+                unmatchedPhotoCount: Int(statement.int(9)),
+                totalFiles: Int(statement.int(10)),
+                completedFiles: Int(statement.int(11))
+            )
+        }.first
+    }
+
+    func pendingPhotoImportItems(jobID: UUID) throws -> [PhotoImportItem] {
+        try prepare(
+            """
+            SELECT id, job_id, source_path, destination_path, content_hash, routes_to_hasselblad_raw, status
+            FROM photo_import_items
+            WHERE job_id = ? AND status <> 'completed'
+            ORDER BY source_path
+            """,
+            [.text(jobID.uuidString)]
+        ) { statement in
+            PhotoImportItem(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                jobID: UUID(uuidString: statement.text(1)) ?? jobID,
+                sourcePath: statement.text(2),
+                destinationPath: statement.text(3),
+                contentHash: statement.text(4),
+                routesToHasselbladRaw: statement.int(5) != 0,
+                status: statement.text(6)
+            )
+        }
+    }
+
+    func markPhotoImportJobRunning(id: UUID) throws {
+        try execute(
+            "UPDATE photo_import_jobs SET status = 'running', updated_at = ? WHERE id = ?",
+            [.text(DateCoding.encode(Date())), .text(id.uuidString)]
+        )
+    }
+
+    func markInterruptedPhotoImportJobs() throws {
+        try execute(
+            "UPDATE photo_import_jobs SET status = 'interrupted', updated_at = ? WHERE status = 'running'",
+            [.text(DateCoding.encode(Date()))]
+        )
+    }
+
+    func completePhotoImportItem(_ item: PhotoImportItem) throws {
+        let now = DateCoding.encode(Date())
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try execute(
+                "UPDATE photo_import_items SET status = 'completed', updated_at = ? WHERE id = ?",
+                [.text(now), .text(item.id.uuidString)]
+            )
+            try execute(
+                "UPDATE photo_import_jobs SET completed_files = completed_files + 1, updated_at = ? WHERE id = ?",
+                [.text(now), .text(item.jobID.uuidString)]
+            )
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    func completePhotoImportJob(_ job: PhotoImportJob) throws {
+        let now = DateCoding.encode(Date())
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            try execute(
+                "UPDATE photo_import_jobs SET status = 'completed', completed_files = total_files, updated_at = ? WHERE id = ?",
+                [.text(now), .text(job.id.uuidString)]
+            )
+            try execute(
+                """
+                INSERT INTO operation_logs (id, action, source_path, destination_path, status, detail, created_at)
+                VALUES (?, 'import_photos', ?, ?, 'success', ?, ?)
+                """,
+                [
+                    .text(UUID().uuidString),
+                    .text(job.importSourcePath),
+                    .text(job.targetPath),
+                    .text("photos=\(job.photoCount); raw=\(job.matchedRawCount); files=\(job.totalFiles)"),
+                    .text(now)
+                ]
+            )
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    func failPhotoImportJob(id: UUID, error: Error) throws {
+        #if os(macOS)
+        let detail = error.fullTrace
+        #else
+        let detail = String(reflecting: error)
+        #endif
+        try execute(
+            "UPDATE photo_import_jobs SET status = 'failed', error_detail = ?, updated_at = ? WHERE id = ?",
+            [.text(detail), .text(DateCoding.encode(Date())), .text(id.uuidString)]
+        )
+    }
+
+    private func photoImportJob(id: UUID) throws -> PhotoImportJob {
+        let rows = try prepare(
+            """
+            SELECT id, import_source_path, raw_source_path, target_path, target_raw_root_path,
+                   storage_kind, status, photo_count, matched_raw_count, unmatched_photo_count,
+                   total_files, completed_files
+            FROM photo_import_jobs
+            WHERE id = ?
+            LIMIT 1
+            """,
+            [.text(id.uuidString)]
+        ) { statement in
+            PhotoImportJob(
+                id: UUID(uuidString: statement.text(0)) ?? id,
+                importSourcePath: statement.text(1),
+                rawSourcePath: statement.optionalText(2),
+                targetPath: statement.text(3),
+                targetRawRootPath: statement.optionalText(4),
+                storageKind: StorageKind(rawValue: statement.text(5)) ?? .local,
+                status: statement.text(6),
+                photoCount: Int(statement.int(7)),
+                matchedRawCount: Int(statement.int(8)),
+                unmatchedPhotoCount: Int(statement.int(9)),
+                totalFiles: Int(statement.int(10)),
+                completedFiles: Int(statement.int(11))
+            )
+        }
+        guard let job = rows.first else {
+            throw DatabaseError.stepFailed("照片导入任务不存在：\(id.uuidString)")
+        }
+        return job
     }
 
     func markSourceDirectoryScanned(path: String) throws {
@@ -3137,6 +3401,38 @@ final class SQLiteDatabase: @unchecked Sendable {
             CREATE INDEX IF NOT EXISTS idx_browse_file_instances_file ON browse_file_instances(file_instance_id);
             CREATE INDEX IF NOT EXISTS idx_folder_move_jobs_status ON folder_move_jobs(status, created_at);
             CREATE INDEX IF NOT EXISTS idx_folder_move_items_job_status ON folder_move_items(job_id, status);
+
+            CREATE TABLE IF NOT EXISTS photo_import_jobs (
+                id TEXT PRIMARY KEY,
+                import_source_path TEXT NOT NULL,
+                raw_source_path TEXT,
+                target_path TEXT NOT NULL,
+                target_raw_root_path TEXT,
+                storage_kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                photo_count INTEGER NOT NULL,
+                matched_raw_count INTEGER NOT NULL,
+                unmatched_photo_count INTEGER NOT NULL,
+                total_files INTEGER NOT NULL,
+                completed_files INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                error_detail TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS photo_import_items (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES photo_import_jobs(id) ON DELETE CASCADE,
+                source_path TEXT NOT NULL,
+                destination_path TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                routes_to_hasselblad_raw INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_photo_import_jobs_status ON photo_import_jobs(status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_photo_import_items_job_status ON photo_import_items(job_id, status);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_ledger_device_seq ON operation_ledger(library_id, device_id, device_seq);
             CREATE INDEX IF NOT EXISTS idx_operation_ledger_entity ON operation_ledger(entity_type, entity_id, hybrid_logical_time);
             CREATE INDEX IF NOT EXISTS idx_operation_ledger_upload ON operation_ledger(upload_status, created_at);
@@ -3377,6 +3673,14 @@ final class SQLiteDatabase: @unchecked Sendable {
             throw DatabaseError.stepFailed("浏览节点不存在：\(kind.rawValue) \(canonicalKey)")
         }
         return node
+    }
+
+    func fileInstanceAndAssetID(path: String) throws -> (fileInstanceID: UUID, assetID: UUID)? {
+        guard let fileInstanceID = try fileInstanceID(path: path),
+              let assetID = try assetID(fileInstanceID: fileInstanceID) else {
+            return nil
+        }
+        return (fileInstanceID, assetID)
     }
 
     private func fileInstanceID(path: String) throws -> UUID? {

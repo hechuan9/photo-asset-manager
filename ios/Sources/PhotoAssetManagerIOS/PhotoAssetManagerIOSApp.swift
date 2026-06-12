@@ -102,6 +102,9 @@ struct IOSRootView: View {
             }
             .task {
                 library.loadIfNeeded()
+                if !library.hasRemoteSyncConfiguration {
+                    showingSettings = true
+                }
             }
             .onChange(of: scenePhase, initial: true) { _, newPhase in
                 library.loadIfNeeded()

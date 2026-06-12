@@ -368,10 +368,75 @@ struct FolderMovePlanItem: Hashable, Sendable {
     var contentHash: String
 }
 
+struct PhotoImportJob: Identifiable, Hashable, Sendable {
+    let id: UUID
+    var importSourcePath: String
+    var rawSourcePath: String?
+    var targetPath: String
+    var targetRawRootPath: String?
+    var storageKind: StorageKind
+    var status: String
+    var photoCount: Int
+    var matchedRawCount: Int
+    var unmatchedPhotoCount: Int
+    var totalFiles: Int
+    var completedFiles: Int
+}
+
+struct PhotoImportItem: Identifiable, Hashable, Sendable {
+    let id: UUID
+    var jobID: UUID
+    var sourcePath: String
+    var destinationPath: String
+    var contentHash: String
+    var routesToHasselbladRaw: Bool
+    var status: String
+}
+
 struct PhotoImportPlanItem: Hashable, Sendable {
     var sourcePath: String
     var destinationPath: String
     var contentHash: String
+    var routesToHasselbladRaw: Bool
+}
+
+struct PhotoImportPlan: Hashable, Sendable {
+    var mainDestination: URL
+    var hasselbladRawDestination: URL?
+    var items: [PhotoImportPlanItem]
+    var stats: PhotoImportStats
+}
+
+struct PhotoImportStats: Hashable, Sendable {
+    var photoCount: Int
+    var matchedRawCount: Int
+    var unmatchedPhotoCount: Int
+}
+
+struct PhotoImportConfiguration: Hashable, Sendable {
+    var importSource: URL
+    var rawSource: URL?
+    var target: PhotoImportTarget
+    var targetRawRoot: URL?
+}
+
+struct PhotoImportPreferences: Codable, Hashable, Sendable {
+    var importSourcePath: String?
+    var rawSourcePath: String?
+    var targetPath: String?
+    var targetRawPath: String?
+}
+
+struct PhotoImportProgressReport: Sendable {
+    var majorPhase = ""
+    var phase = ""
+    var currentPath = ""
+    var totalItems = 0
+    var completedItems = 0
+    var photoCount = 0
+    var matchedRawCount = 0
+    var unmatchedPhotoCount = 0
+    var message = ""
 }
 
 struct AssetFileMoveRequest: Identifiable, Hashable, Sendable {

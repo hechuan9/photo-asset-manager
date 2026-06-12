@@ -19,13 +19,17 @@ final class LibraryStore: ObservableObject {
     @Published var sourceDirectories: [SourceDirectory] = []
     @Published var indexedBrowseFolders: [BrowseNode] = []
     @Published var derivativeStorageURL: URL?
+    @Published var hasselbladRawRootURL: URL?
     @Published var migrationReport: String?
     @Published var blockingTask: BlockingTaskReport?
+    @Published var photoImportProgress: PhotoImportProgressReport?
     @Published var backgroundTask: BackgroundTaskReport?
     @Published var syncProgressTask: BackgroundTaskReport?
     @Published private(set) var backgroundQueueItems: [BackgroundQueueItem] = []
     @Published var hasMoreAssets = false
     @Published var pendingBrowseSelection: BrowseSelection?
+    @Published var isPhotoImportDialogPresented = false
+    @Published var photoImportPreferences = PhotoImportPreferences()
     @Published private(set) var isSyncing = false
     @Published private(set) var lastSyncSummary = "未配置自动同步"
     @Published private(set) var syncConfiguration = SyncClientConfiguration.load()
@@ -98,14 +102,18 @@ final class LibraryStore: ObservableObject {
         do {
             try database.markInterruptedImportBatches()
             try database.markInterruptedFolderMoveJobs()
+            try database.markInterruptedPhotoImportJobs()
             interruptedScanPath = try database.latestInterruptedScanPath()
             derivativeStorageURL = try database.derivativeStoragePath().map { URL(fileURLWithPath: $0, isDirectory: true) }
+            hasselbladRawRootURL = try database.hasselbladRawRootPath().map { URL(fileURLWithPath: $0, isDirectory: true) }
+            photoImportPreferences = try database.photoImportPreferences()
             sourceDirectories = try database.sourceDirectories()
             indexedBrowseFolders = try database.browseFolders()
             refresh()
             reloadSyncConfiguration(scheduleSync: !performStartupWork)
             if performStartupWork {
                 resumeInterruptedFolderMoveIfNeeded()
+                resumeInterruptedPhotoImportIfNeeded()
                 startStartupLibraryOrganizationIfNeeded()
             }
         } catch {
@@ -126,7 +134,7 @@ final class LibraryStore: ObservableObject {
     }
 
     var isBusy: Bool {
-        isScanning || blockingTask != nil
+        isScanning || blockingTask != nil || photoImportProgress != nil
     }
 
     var hasRemoteSyncConfiguration: Bool {
@@ -233,14 +241,55 @@ final class LibraryStore: ObservableObject {
         }
     }
 
-    func choosePhotoImportSource() -> URL? {
+    func chooseImportDirectory(message: String) -> URL? {
         guard !isBusy else { return nil }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.message = "选择要导入的库外照片文件夹"
+        panel.message = message
         return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    func beginPhotoImport() {
+        isPhotoImportDialogPresented = true
+    }
+
+    func closePhotoImportDialog() {
+        isPhotoImportDialogPresented = false
+    }
+
+    func rememberPhotoImportConfiguration(_ configuration: PhotoImportConfiguration) {
+        do {
+            let preferences = PhotoImportPreferences(
+                importSourcePath: Self.normalizedDirectoryPath(configuration.importSource.path),
+                rawSourcePath: configuration.rawSource.map { Self.normalizedDirectoryPath($0.path) },
+                targetPath: Self.normalizedDirectoryPath(configuration.target.path),
+                targetRawPath: configuration.targetRawRoot.map { Self.normalizedDirectoryPath($0.path) }
+            )
+            try database.setPhotoImportPreferences(preferences)
+            photoImportPreferences = preferences
+        } catch {
+            lastError = error.fullTrace
+        }
+    }
+
+    func restoredPhotoImportURL(for path: String?) -> URL? {
+        guard let path, !path.isEmpty else { return nil }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return nil
+        }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    func photoImportTarget(for path: String) -> PhotoImportTarget {
+        let normalized = Self.normalizedDirectoryPath(path)
+        return PhotoImportTarget(
+            path: normalized,
+            displayName: URL(fileURLWithPath: normalized, isDirectory: true).lastPathComponent,
+            storageKind: storageKind(for: URL(fileURLWithPath: normalized, isDirectory: true))
+        )
     }
 
     func addSourceDirectories(_ urls: [URL], scanImmediately: Bool) {
@@ -383,109 +432,183 @@ final class LibraryStore: ObservableObject {
         return targetsByPath.values.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
 
-    func importPhotoFolder(_ source: URL, to target: PhotoImportTarget) {
+    func importPhotoFolder(configuration: PhotoImportConfiguration) {
         guard !isBusy else { return }
-        let sourcePath = Self.normalizedDirectoryPath(source.path)
+        let sourcePath = Self.normalizedDirectoryPath(configuration.importSource.path)
         guard !isLibraryPath(sourcePath) else {
             lastError = "导入来源已经在资料库中：\(sourcePath)"
             return
         }
+        rememberPhotoImportConfiguration(configuration)
+        closePhotoImportDialog()
+        beginPhotoImportPlanning(configuration: configuration, resuming: false)
+    }
+
+    func resumeInterruptedPhotoImportIfNeeded() {
+        guard blockingTask == nil, photoImportProgress == nil else { return }
+        do {
+            guard let job = try database.unfinishedPhotoImportJob() else { return }
+            continuePhotoImport(job)
+        } catch {
+            lastError = error.fullTrace
+        }
+    }
+
+    private func beginPhotoImportPlanning(configuration: PhotoImportConfiguration, resuming: Bool) {
+        let sourcePath = Self.normalizedDirectoryPath(configuration.importSource.path)
         availabilityTask?.cancel()
         availabilityTask = nil
         backgroundTask = nil
-        blockingTask = BlockingTaskReport(
-            title: "导入照片",
-            phase: "准备导入",
+        photoImportProgress = PhotoImportProgressReport(
+            majorPhase: "导入规划",
+            phase: resuming ? "恢复导入规划" : "扫描照片",
             currentPath: sourcePath,
-            message: "\(sourcePath) -> \(target.path)"
+            message: resuming ? "正在恢复未完成的导入任务" : Self.photoImportPlanningMessage(phase: "扫描照片", completed: 0, total: 0)
         )
-        scanReport = ScanReport()
         lastError = nil
 
+        let database = database
+        Task.detached(priority: .userInitiated) {
+            do {
+                let plan = try FileOperations().buildPhotoImportPlan(configuration: configuration) { phase, path, completed, total in
+                    Task { @MainActor in
+                        let photoCount = phase == "扫描照片" && total > 0
+                            ? total
+                            : self.photoImportProgress?.photoCount ?? 0
+                        self.photoImportProgress = PhotoImportProgressReport(
+                            majorPhase: "导入规划",
+                            phase: phase,
+                            currentPath: path,
+                            totalItems: total,
+                            completedItems: completed,
+                            photoCount: photoCount,
+                            matchedRawCount: self.photoImportProgress?.matchedRawCount ?? 0,
+                            message: Self.photoImportPlanningMessage(phase: phase, completed: completed, total: total)
+                        )
+                    }
+                }
+                await MainActor.run {
+                    self.photoImportProgress = PhotoImportProgressReport(
+                        majorPhase: "导入规划",
+                        phase: "规划完成",
+                        currentPath: sourcePath,
+                        totalItems: plan.items.count,
+                        completedItems: plan.items.count,
+                        photoCount: plan.stats.photoCount,
+                        matchedRawCount: plan.stats.matchedRawCount,
+                        unmatchedPhotoCount: plan.stats.unmatchedPhotoCount,
+                        message: "将导入照片 \(plan.stats.photoCount) 张，匹配 RAW \(plan.stats.matchedRawCount) 张，共 \(plan.items.count) 个文件"
+                    )
+                }
+                let job = try database.createPhotoImportJob(configuration: configuration, plan: plan)
+                await MainActor.run {
+                    self.executePhotoImport(job)
+                }
+            } catch {
+                await MainActor.run {
+                    self.photoImportProgress = nil
+                    self.lastError = error.fullTrace
+                }
+            }
+        }
+    }
+
+    private func continuePhotoImport(_ job: PhotoImportJob) {
+        availabilityTask?.cancel()
+        availabilityTask = nil
+        backgroundTask = nil
+        photoImportProgress = PhotoImportProgressReport(
+            majorPhase: "执行导入",
+            phase: "恢复未完成导入",
+            currentPath: job.importSourcePath,
+            totalItems: job.totalFiles,
+            completedItems: job.completedFiles,
+            photoCount: job.photoCount,
+            matchedRawCount: job.matchedRawCount,
+            unmatchedPhotoCount: job.unmatchedPhotoCount,
+            message: "从第 \(job.completedFiles + 1) 个文件继续，共 \(job.totalFiles) 个"
+        )
+        lastError = nil
+        executePhotoImport(job)
+    }
+
+    private func executePhotoImport(_ job: PhotoImportJob) {
         let database = database
         let scanner = scanner
         let derivativeStorageURL = derivativeStorageURL
         let ledgerContext = makeScanLedgerContext()
         Task.detached(priority: .userInitiated) {
+            var batchID: UUID?
             do {
-                let plan = try FileOperations().buildPhotoImportPlan(source: source, destinationTarget: target)
-                await MainActor.run {
-                    self.blockingTask = BlockingTaskReport(
-                        title: "导入照片",
-                        phase: "复制并校验",
-                        currentPath: sourcePath,
-                        totalItems: plan.items.count,
-                        message: "\(sourcePath) -> \(plan.destination.path)"
-                    )
-                }
-
-                try await FileOperations().copyImportedFolder(destination: plan.destination, items: plan.items) { item, index in
-                    await MainActor.run {
-                        self.blockingTask = BlockingTaskReport(
-                            title: "导入照片",
-                            phase: "复制并校验",
-                            currentPath: item.sourcePath,
-                            totalItems: plan.items.count,
-                            completedItems: index,
-                            message: "\(item.sourcePath) -> \(item.destinationPath)"
-                        )
-                    }
-                }
-
-                await MainActor.run {
-                    self.isScanning = true
-                    self.blockingTask = BlockingTaskReport(
-                        title: "导入照片",
-                        phase: "扫描导入结果",
-                        currentPath: plan.destination.path,
-                        totalItems: plan.items.count,
-                        completedItems: plan.items.count,
-                        message: "正在把复制后的文件写入资料库。"
-                    )
-                }
-                let report = await scanner.scanDirectory(
-                    plan.destination,
-                    storageKind: target.storageKind,
-                    derivativeRoot: derivativeStorageURL,
+                let createdBatchID = try database.createImportBatch(sourcePath: job.targetPath, deviceID: currentDeviceID())
+                batchID = createdBatchID
+                var importedAssets = 0
+                var newLocations = 0
+                try await FileOperations().runPhotoImportJob(
+                    job: job,
                     database: database,
-                    ledgerContext: ledgerContext
-                ) { report in
-                    self.scanReport = report
-                    self.blockingTask = BlockingTaskReport(
-                        title: "导入照片",
-                        phase: report.phase.isEmpty ? "扫描导入结果" : report.phase,
-                        currentPath: report.currentPath.isEmpty ? plan.destination.path : report.currentPath,
-                        totalItems: report.totalFiles > 0 ? report.totalFiles : plan.items.count,
-                        completedItems: report.scannedFiles,
-                        skippedItems: report.skippedFiles,
-                        message: "新增 \(report.importedAssets)，位置更新 \(report.newLocations)"
-                    )
-                } didPersist: { result in
-                    self.enqueueDerivativeCandidates(result.derivativeCandidates)
-                }
+                    scanner: scanner,
+                    derivativeRoot: derivativeStorageURL,
+                    batchID: createdBatchID,
+                    ledgerContext: ledgerContext,
+                    progress: { job, item in
+                        let pending = (try? database.pendingPhotoImportItems(jobID: job.id).count) ?? 0
+                        let completed = max(0, job.totalFiles - pending)
+                        await MainActor.run {
+                            self.photoImportProgress = PhotoImportProgressReport(
+                                majorPhase: "执行导入",
+                                phase: "复制并写入资料库",
+                                currentPath: item.sourcePath,
+                                totalItems: job.totalFiles,
+                                completedItems: min(completed, job.totalFiles),
+                                photoCount: job.photoCount,
+                                matchedRawCount: job.matchedRawCount,
+                                unmatchedPhotoCount: job.unmatchedPhotoCount,
+                                message: "照片 \(job.photoCount) 张，已匹配 RAW \(job.matchedRawCount) 张"
+                            )
+                        }
+                    },
+                    didPersist: { result in
+                        if result.insertedAsset {
+                            importedAssets += 1
+                        } else if result.insertedLocation {
+                            newLocations += 1
+                        }
+                        Task { @MainActor in
+                            self.enqueueDerivativeCandidates(result.derivativeCandidates)
+                        }
+                    }
+                )
 
-                try database.markSourceDirectoryScanned(path: target.path)
+                try database.markSourceDirectoryScanned(path: job.targetPath)
+                if let rawRootPath = job.targetRawRootPath {
+                    try database.upsertSourceDirectory(path: rawRootPath, storageKind: job.storageKind)
+                }
+                if let batchID {
+                    try database.finishImportBatch(batchID, status: "finished")
+                }
                 let sourceDirectories = try database.sourceDirectories()
                 let indexedBrowseFolders = try database.browseFolders()
                 let interruptedScanPath = try database.latestInterruptedScanPath()
                 await MainActor.run {
-                    self.scanReport = report
-                    self.isScanning = false
                     self.sourceDirectories = sourceDirectories
                     self.indexedBrowseFolders = indexedBrowseFolders
                     self.interruptedScanPath = interruptedScanPath
-                    self.blockingTask = nil
-                    if !report.errors.isEmpty {
-                        self.lastError = report.errors.joined(separator: "\n\n")
+                    self.photoImportProgress = nil
+                    if importedAssets > 0 || newLocations > 0 {
+                        self.scanReport = ScanReport(importedAssets: importedAssets, newLocations: newLocations)
                     }
                     self.refresh()
                     self.startAvailabilityRefreshInBackground()
                     self.scheduleAutomaticSync(reason: "导入完成")
                 }
             } catch {
+                try? database.failPhotoImportJob(id: job.id, error: error)
+                if let batchID {
+                    try? database.finishImportBatch(batchID, status: "failed")
+                }
                 await MainActor.run {
-                    self.isScanning = false
-                    self.blockingTask = nil
+                    self.photoImportProgress = nil
                     self.lastError = error.fullTrace
                 }
             }
@@ -1660,6 +1783,73 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    private func setHasselbladRawRootURL(_ url: URL?) {
+        do {
+            if let url {
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                    throw FileOperationError.sourceFolderMissing(url)
+                }
+            }
+            try database.setHasselbladRawRootPath(url?.path)
+            hasselbladRawRootURL = url
+        } catch {
+            lastError = error.fullTrace
+        }
+    }
+
+    nonisolated private static func photoImportPlanningMessage(phase: String, completed: Int, total: Int) -> String {
+        switch phase {
+        case "扫描照片":
+            if total > 0 {
+                return "已发现 \(total) 张可导入照片（读取元数据中）"
+            }
+            if completed > 0 {
+                return "正在扫描导入文件夹，已发现 \(completed) 张照片"
+            }
+            return "正在扫描导入文件夹，统计可导入照片"
+        case "索引 RAW":
+            if total > 0 {
+                return "已索引 \(total) 个 RAW 文件"
+            }
+            if completed > 0 {
+                return "正在读取 RAW 元数据，已索引 \(completed) 个"
+            }
+            return "正在索引 RAW 文件夹，读取元数据"
+        case "匹配 RAW":
+            if total > 0 {
+                return "正在匹配 RAW：\(completed) / \(total)"
+            }
+            return "正在按文件名和拍摄信息匹配 RAW"
+        case "整理导入列表":
+            if total > 0 {
+                return "正在整理导入列表：\(completed) / \(total)"
+            }
+            return "正在整理导入列表，检查目标路径冲突"
+        default:
+            return ""
+        }
+    }
+
+    nonisolated private static func mergeScanReports(_ lhs: ScanReport, _ rhs: ScanReport) -> ScanReport {
+        var merged = lhs
+        merged.totalFiles += rhs.totalFiles
+        merged.discoveredFiles += rhs.discoveredFiles
+        merged.scannedFiles += rhs.scannedFiles
+        merged.skippedFiles += rhs.skippedFiles
+        merged.skippedExistingFiles += rhs.skippedExistingFiles
+        merged.importedAssets += rhs.importedAssets
+        merged.newLocations += rhs.newLocations
+        merged.errors.append(contentsOf: rhs.errors)
+        if !rhs.phase.isEmpty {
+            merged.phase = rhs.phase
+        }
+        if !rhs.currentPath.isEmpty {
+            merged.currentPath = rhs.currentPath
+        }
+        return merged
+    }
+
     private func migrateDerivativeStorage(to destinationRoot: URL) {
         blockingTask = BlockingTaskReport(title: "迁移缩略图", phase: "准备迁移", currentPath: destinationRoot.path)
         migrationReport = nil
@@ -2055,7 +2245,7 @@ final class LibraryStore: ObservableObject {
         commandLayer: SyncCommandLayer,
         progressReporter: @escaping @Sendable (AutomaticSyncProgress) -> Void
     ) async throws -> ThumbnailUploadOutcome {
-        let deduped = Dictionary(uniqueKeysWithValues: candidates.map { ($0.assetID, $0) })
+        let deduped = deduplicateThumbnailUploadCandidates(candidates)
         let service = DerivativeUploadService(
             libraryID: libraryID,
             commandLayer: commandLayer,
@@ -2065,7 +2255,7 @@ final class LibraryStore: ObservableObject {
 
         var uploadedCount = 0
         var failedCandidates: [ScannedDerivativeUploadCandidate] = []
-        let sortedCandidates = deduped.values.sorted(by: { $0.assetID.uuidString < $1.assetID.uuidString })
+        let sortedCandidates = deduped.sorted(by: { $0.assetID.uuidString < $1.assetID.uuidString })
         let totalCandidates = sortedCandidates.count
         progressReporter(
             AutomaticSyncProgress(
@@ -2143,6 +2333,18 @@ final class LibraryStore: ObservableObject {
             uploadedCount: uploadedCount,
             failedCandidates: failedCandidates
         )
+    }
+
+    nonisolated static func deduplicateThumbnailUploadCandidates(
+        _ candidates: [ScannedDerivativeUploadCandidate]
+    ) -> [ScannedDerivativeUploadCandidate] {
+        var merged: [UUID: ScannedDerivativeUploadCandidate] = [:]
+        merged.reserveCapacity(candidates.count)
+        for candidate in candidates where candidate.role == .thumbnail {
+            // 待补传列表来自内存队列和数据库投影，后者出现时应覆盖前者，避免重复 key 触发断言。
+            merged[candidate.assetID] = candidate
+        }
+        return Array(merged.values)
     }
 
     nonisolated private static func pixelSize(for fileURL: URL) throws -> PixelSize {
