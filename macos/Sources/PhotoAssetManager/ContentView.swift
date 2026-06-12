@@ -22,10 +22,11 @@ private enum BackgroundTaskBarMetrics {
 
 struct ContentView: View {
     @EnvironmentObject private var library: LibraryStore
-    @State private var pendingImportSource: URL?
 
     var body: some View {
         VStack(spacing: 0) {
+            AppTopToolbar()
+            Divider()
             NavigationSplitView {
                 SidebarView()
                     .navigationSplitViewColumnWidth(min: 220, ideal: 250)
@@ -41,43 +42,23 @@ struct ContentView: View {
             BackgroundTaskBar()
                 .frame(height: BackgroundTaskBarMetrics.height)
         }
-        .toolbar {
-            ToolbarItemGroup {
-                Button("导入照片", systemImage: "square.and.arrow.down") {
-                    pendingImportSource = library.choosePhotoImportSource()
+        .sheet(isPresented: Binding(
+            get: { library.isPhotoImportDialogPresented },
+            set: { library.isPhotoImportDialogPresented = $0 }
+        )) {
+            PhotoImportDialog(
+                close: {
+                    library.closePhotoImportDialog()
                 }
-                .disabled(library.isBusy)
-                Button("添加文件夹", systemImage: "plus") {
-                    library.chooseAndAddFolders(scanImmediately: false)
-                }
-                .disabled(library.isBusy)
-                Button("校验文件状态") {
-                    library.forceAvailabilityRefreshInBackground()
-                }
-                .disabled(library.isBusy)
-            }
-            ToolbarItemGroup {
-                Button("归档到 NAS") {
-                    library.archiveSelected()
-                }
-                .disabled(library.selectedAsset == nil || library.isBusy)
-                Button("同步变更") {
-                    library.syncSelected()
-                }
-                .disabled(library.selectedAsset == nil || library.isBusy)
-            }
+            )
         }
         .sheet(isPresented: Binding(
-            get: { pendingImportSource != nil },
-            set: { if !$0 { pendingImportSource = nil } }
+            get: { library.photoImportProgress != nil },
+            set: { _ in }
         )) {
-            if let source = pendingImportSource {
-                PhotoImportTargetDialog(
-                    source: source,
-                    close: {
-                        pendingImportSource = nil
-                    }
-                )
+            if let progress = library.photoImportProgress {
+                PhotoImportProgressDialog(progress: progress)
+                    .interactiveDismissDisabled(true)
             }
         }
         .sheet(isPresented: Binding(
@@ -100,136 +81,257 @@ struct ContentView: View {
     }
 }
 
-struct PhotoImportTargetDialog: View {
+struct AppTopToolbar: View {
     @EnvironmentObject private var library: LibraryStore
-    var source: URL
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button {
+                library.beginPhotoImport()
+            } label: {
+                Label("导入照片", systemImage: "square.and.arrow.down")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(library.isBusy)
+
+            Button {
+                library.chooseAndAddFolders(scanImmediately: false)
+            } label: {
+                Label("添加文件夹", systemImage: "plus")
+            }
+            .disabled(library.isBusy)
+
+            Button {
+                library.forceAvailabilityRefreshInBackground()
+            } label: {
+                Label("校验文件状态", systemImage: "checkmark.shield")
+            }
+            .disabled(library.isBusy)
+
+            Divider()
+                .frame(height: 18)
+
+            Button("归档到 NAS") {
+                library.archiveSelected()
+            }
+            .disabled(library.selectedAsset == nil || library.isBusy)
+
+            Button("同步变更") {
+                library.syncSelected()
+            }
+            .disabled(library.selectedAsset == nil || library.isBusy)
+
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .background(.bar)
+    }
+}
+
+struct PhotoImportDialog: View {
+    @EnvironmentObject private var library: LibraryStore
     var close: () -> Void
-    @State private var currentPath: String?
+
+    @State private var importSourceURL: URL?
+    @State private var rawSourceURL: URL?
+    @State private var targetPath = ""
+    @State private var targetRawPath = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("导入照片")
                 .font(.headline)
-            Text(source.path)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
 
-            Divider()
-
-            HStack(spacing: 8) {
-                Button("上一级") {
-                    currentPath = parentPath(of: currentPath ?? "")
+            PhotoImportFolderRow(
+                title: "导入文件夹",
+                path: importSourceURL?.path,
+                isDisabled: library.isBusy,
+                choose: {
+                    importSourceURL = library.chooseImportDirectory(message: "选择要导入的照片文件夹")
                 }
-                .disabled(currentPath == nil)
+            )
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("目标位置")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(currentPath ?? "目标根目录")
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+            PhotoImportFolderRow(
+                title: "RAW 文件夹",
+                path: rawSourceURL?.path,
+                placeholder: "可选；导入时按文件名和元数据自动匹配",
+                isDisabled: library.isBusy,
+                choose: {
+                    rawSourceURL = library.chooseImportDirectory(message: "选择 RAW 文件所在文件夹")
                 }
+            )
 
-                Spacer()
-            }
-
-            if let currentTarget {
-                Button("导入到这里") {
-                    library.importPhotoFolder(source, to: currentTarget)
-                    close()
-                }
-                .disabled(library.isBusy)
-            }
-
-            if childTargets.isEmpty {
-                Text("没有可用的资料库目标。请先添加或刷新照片文件夹。")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 160, alignment: .center)
-            } else {
-                List(childTargets) { target in
-                    HStack(spacing: 10) {
-                        Image(systemName: "folder")
-                            .foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(displayName(for: target.path))
-                                .lineLimit(1)
-                            Text(target.path)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                        Spacer()
-                        Button("导入到这里") {
-                            library.importPhotoFolder(source, to: target)
-                            close()
-                        }
-                        .disabled(library.isBusy)
-                        Button("进入") {
-                            currentPath = target.path
-                        }
-                        .disabled(immediateChildren(of: target.path).isEmpty)
+            PhotoImportFolderRow(
+                title: "目标文件夹",
+                path: targetPath.isEmpty ? nil : targetPath,
+                isDisabled: library.isBusy,
+                choose: {
+                    if let url = library.chooseImportDirectory(message: "选择导入目标文件夹") {
+                        targetPath = url.path
                     }
                 }
-                .frame(minHeight: 260)
-            }
+            )
+
+            PhotoImportFolderRow(
+                title: "目标 RAW 文件夹",
+                path: targetRawPath.isEmpty ? nil : targetRawPath,
+                placeholder: "选择 RAW 文件夹后必填",
+                isDisabled: library.isBusy || rawSourceURL == nil,
+                choose: {
+                    if let url = library.chooseImportDirectory(message: "选择 RAW 导入目标文件夹") {
+                        targetRawPath = url.path
+                    }
+                }
+            )
 
             HStack {
                 Spacer()
                 Button("取消", role: .cancel) {
                     close()
                 }
+                Button("开始导入") {
+                    guard let configuration = currentConfiguration else { return }
+                    library.importPhotoFolder(configuration: configuration)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canStartImport)
             }
         }
-        .frame(width: 560, height: 420, alignment: .leading)
+        .frame(width: 620, height: 380, alignment: .leading)
         .padding(18)
-    }
-
-    private var targets: [PhotoImportTarget] {
-        library.availablePhotoImportTargets()
-    }
-
-    private var currentTarget: PhotoImportTarget? {
-        guard let currentPath else { return nil }
-        return targets.first { normalizedPath($0.path) == normalizedPath(currentPath) }
-    }
-
-    private var childTargets: [PhotoImportTarget] {
-        immediateChildren(of: currentPath)
-    }
-
-    private func immediateChildren(of parent: String?) -> [PhotoImportTarget] {
-        let targetPaths = Set(targets.map { normalizedPath($0.path) })
-        return targets.filter { target in
-            let path = normalizedPath(target.path)
-            let targetParent = parentPath(of: path)
-            if let parent {
-                return targetParent == normalizedPath(parent)
-            }
-            guard let targetParent else { return true }
-            return !targetPaths.contains(targetParent)
+        .onAppear {
+            restoreSavedPathsIfNeeded()
         }
-        .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        .onChange(of: rawSourceURL) { _, newValue in
+            if newValue == nil {
+                targetRawPath = ""
+            }
+        }
     }
 
-    private func parentPath(of path: String) -> String? {
-        let normalized = normalizedPath(path)
-        guard !normalized.isEmpty, normalized != "/" else { return nil }
-        let parent = URL(fileURLWithPath: normalized, isDirectory: true).deletingLastPathComponent().path
-        return normalizedPath(parent)
+    private var canStartImport: Bool {
+        guard !library.isBusy, importSourceURL != nil, !targetPath.isEmpty else { return false }
+        if rawSourceURL != nil && targetRawPath.isEmpty { return false }
+        return true
     }
 
-    private func displayName(for path: String) -> String {
-        let normalized = normalizedPath(path)
-        return normalized == "/" ? "/" : URL(fileURLWithPath: normalized, isDirectory: true).lastPathComponent
+    private func restoreSavedPathsIfNeeded() {
+        let preferences = library.photoImportPreferences
+        if importSourceURL == nil {
+            importSourceURL = library.restoredPhotoImportURL(for: preferences.importSourcePath)
+        }
+        if rawSourceURL == nil {
+            rawSourceURL = library.restoredPhotoImportURL(for: preferences.rawSourcePath)
+        }
+        if targetPath.isEmpty, let path = preferences.targetPath,
+           library.restoredPhotoImportURL(for: path) != nil {
+            targetPath = path
+        }
+        if targetRawPath.isEmpty {
+            if let path = preferences.targetRawPath,
+               library.restoredPhotoImportURL(for: path) != nil {
+                targetRawPath = path
+            } else if let defaultRawRoot = library.hasselbladRawRootURL?.path {
+                targetRawPath = defaultRawRoot
+            }
+        }
     }
 
-    private func normalizedPath(_ path: String) -> String {
-        guard path.count > 1 else { return path }
-        return path.hasSuffix("/") ? String(path.dropLast()) : path
+    private var currentConfiguration: PhotoImportConfiguration? {
+        guard let importSourceURL, !targetPath.isEmpty else { return nil }
+        if rawSourceURL != nil && targetRawPath.isEmpty { return nil }
+        return PhotoImportConfiguration(
+            importSource: importSourceURL,
+            rawSource: rawSourceURL,
+            target: library.photoImportTarget(for: targetPath),
+            targetRawRoot: targetRawPath.isEmpty ? nil : URL(fileURLWithPath: targetRawPath, isDirectory: true)
+        )
+    }
+}
+
+struct PhotoImportFolderRow: View {
+    var title: String
+    var path: String?
+    var placeholder: String = "未选择"
+    var isDisabled: Bool
+    var choose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Text(path ?? placeholder)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .foregroundStyle(path == nil ? .secondary : .primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button("选择...") {
+                    choose()
+                }
+                .disabled(isDisabled)
+            }
+        }
+    }
+}
+
+struct PhotoImportProgressDialog: View {
+    var progress: PhotoImportProgressReport
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("导入照片")
+                .font(.title3)
+                .fontWeight(.semibold)
+
+            if !progress.majorPhase.isEmpty {
+                Text(progress.majorPhase)
+                    .font(.headline)
+            }
+
+            if progress.totalItems > 0 {
+                ProgressView(value: Double(progress.completedItems), total: Double(progress.totalItems))
+                Text("\(progress.completedItems) / \(progress.totalItems)")
+                    .foregroundStyle(.secondary)
+            } else {
+                ProgressView()
+            }
+
+            Text(progress.phase)
+                .fontWeight(.medium)
+
+            if progress.photoCount > 0 {
+                Text("照片 \(progress.photoCount) 张，已匹配 RAW \(progress.matchedRawCount) 张")
+                if progress.unmatchedPhotoCount > 0 {
+                    Text("未匹配 RAW \(progress.unmatchedPhotoCount) 张")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if !progress.message.isEmpty {
+                Text(progress.message)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !progress.currentPath.isEmpty {
+                Text(progress.currentPath)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(3)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+
+            Text("导入进行中，请保持应用打开。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 480)
+        .padding(24)
     }
 }
 
@@ -722,6 +824,7 @@ struct SourceDirectoryRow: View {
     var source: SourceDirectory?
     var path: String
     var displayName: String
+    var isTopLevel: Bool = false
     var interruptedScanPath: String?
     var showsMenu = true
     var openRemovalDialog: ((FolderMoveSource) -> Void)?
@@ -731,6 +834,14 @@ struct SourceDirectoryRow: View {
             Text(displayName)
                 .lineLimit(1)
                 .foregroundStyle(AppPalette.folderText)
+            if isTopLevel {
+                Text(path)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.leading, 4)
+            }
             Spacer(minLength: 4)
             if showsMenu, let source {
                 Menu {
@@ -808,6 +919,7 @@ struct SourceDirectoryNodeRow: View {
                     source: node.source,
                     path: node.path,
                     displayName: node.displayName,
+                    isTopLevel: node.depth == 0,
                     interruptedScanPath: interruptedScanPath,
                     showsMenu: false
                 )
