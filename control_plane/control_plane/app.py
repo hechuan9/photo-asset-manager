@@ -50,7 +50,7 @@ def create_app(
     derivative_bucket = derivative_bucket or os.getenv("DERIVATIVE_BUCKET_NAME")
     if derivative_bucket is None:
         if os.getenv("CONTROL_PLANE_ALLOW_SQLITE_DEV") == "1":
-            derivative_bucket = "photo-asset-manager-dev-derivatives"
+            derivative_bucket = "keeps-dev-derivatives"
         else:
             raise RuntimeError("DERIVATIVE_BUCKET_NAME is required")
 
@@ -70,7 +70,7 @@ def create_app(
         yield
 
     app = FastAPI(
-        title="Photo Asset Manager Control Plane",
+        title="Keeps Control Plane",
         version="0.1.0",
         description="Aurora PostgreSQL authoritative event store control-plane API.",
         lifespan=lifespan,

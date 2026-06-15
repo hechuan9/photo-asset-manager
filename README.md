@@ -1,4 +1,4 @@
-# Photo Asset Manager
+# Keeps
 
 本仓库包含 macOS / iOS 照片资产管理器客户端，以及后续 AWS control plane / S3 衍生图层的基础设施定义。
 
@@ -18,7 +18,7 @@ swift test
 swift build
 ./scripts/pre_merge_gate.sh
 ./scripts/package_app.sh
-open .build/app/PhotoAssetManager.app
+open .build/app/Keeps.app
 ```
 
 根目录保留兼容入口：
@@ -26,17 +26,17 @@ open .build/app/PhotoAssetManager.app
 ```bash
 ./scripts/pre_merge_gate.sh
 ./scripts/package_app.sh
-open macos/.build/app/PhotoAssetManager.app
+open macos/.build/app/Keeps.app
 ```
 
 ## iOS app
 
 ```bash
-open ios/PhotoAssetManagerIOS.xcodeproj
+open ios/KeepsIOS.xcodeproj
 
 xcodebuild \
-  -project ios/PhotoAssetManagerIOS.xcodeproj \
-  -scheme PhotoAssetManagerIOS \
+  -project ios/KeepsIOS.xcodeproj \
+  -scheme KeepsIOS \
   -destination 'generic/platform=iOS Simulator' \
   CODE_SIGNING_ALLOWED=NO \
   build
@@ -67,21 +67,21 @@ macOS 端当前会把可同步的资料库变化自动写入本地 ledger，并�
 **打包企业 IPA**（推荐用于内部分发）：
 ```bash
 ./ios/scripts/package_app.sh
-# 输出：ios/.build/enterprise/PhotoAssetManagerIOS.ipa
+# 输出：ios/.build/enterprise/KeepsIOS.ipa
 ```
 
 **直接发布到我的 iOS（Chuan iPhone，端到端验证）**：
 ```bash
 xcodebuild \
-  -project ios/PhotoAssetManagerIOS.xcodeproj \
-  -scheme PhotoAssetManagerIOS \
+  -project ios/KeepsIOS.xcodeproj \
+  -scheme KeepsIOS \
   -destination 'platform=iOS,id=036DD950-A8BC-5B88-B477-167F1DFB73E1' \
   -configuration Release \
   build
 
 xcrun devicectl device install app \
   --device 036DD950-A8BC-5B88-B477-167F1DFB73E1 \
-  $(find ~/Library/Developer/Xcode/DerivedData -path '*PhotoAssetManagerIOS.app' | head -1)
+  $(find ~/Library/Developer/Xcode/DerivedData -path '*Keeps.app' | head -1)
 ```
 
 **内部分发说明**：
@@ -135,7 +135,7 @@ uv run pytest
 docker buildx build \
   --platform linux/arm64 \
   -f control_plane/Dockerfile \
-  -t photo-asset-manager-control-plane:local \
+  -t keeps-control-plane:local \
   .
 ```
 

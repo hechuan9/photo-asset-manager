@@ -5,13 +5,13 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
     <key>CFBundleExecutable</key>
-    <string>PhotoAssetManager</string>
+    <string>Keeps</string>
     <key>CFBundleIdentifier</key>
-    <string>local.photo-asset-manager</string>
+    <string>local.keeps</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Photo Asset Manager</string>
+    <string>Keeps</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>

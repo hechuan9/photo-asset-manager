@@ -1,4 +1,4 @@
-# Photo Asset Manager
+# Keeps
 
 本地优先的 macOS 照片资产管理器原型。
 
@@ -36,13 +36,13 @@ swift build
 
 ```bash
 ./scripts/package_app.sh
-open .build/app/PhotoAssetManager.app
+open .build/app/Keeps.app
 ```
 
 应用数据库默认存放在：
 
 ```text
-~/Library/Application Support/PhotoAssetManager
+~/Library/Application Support/Keeps
 ```
 
 ## 使用建议
@@ -52,7 +52,7 @@ open .build/app/PhotoAssetManager.app
 启动后应用会在后台尝试挂载已登记的 NAS 卷根目录，例如已有来源 `/Volumes/photo/照片` 时会尝试挂载 `smb://chuan_nas.local/photo`。如果 NAS 主机名不同，可设置：
 
 ```bash
-defaults write PhotoAssetManager nasSMBHost "your-nas-host.local"
+defaults write Keeps nasSMBHost "your-nas-host.local"
 ```
 
 NAS 挂载未完成时，后台文件状态校验会跳过这一轮，避免把离线 NAS 上的原片误标成缺失。文件状态全量校验有 24 小时启动节流；旧库首次升级会先建立校验水位，避免第一次打开就遍历全库。工具栏里的“校验文件状态”可手动强制刷新。

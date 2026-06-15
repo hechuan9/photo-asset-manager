@@ -1,4 +1,4 @@
-# Photo Asset Manager Infra
+# Keeps Infra
 
 这里是 AWS control plane 和 S3 衍生图层的 Terraform 入口。
 
@@ -37,7 +37,7 @@
 terraform init
 terraform fmt -check
 terraform validate
-terraform plan -var='runtime_image_uri=<account>.dkr.ecr.<region>.amazonaws.com/photo-asset-manager-control-plane:<tag>'
+terraform plan -var='runtime_image_uri=<account>.dkr.ecr.<region>.amazonaws.com/keeps-control-plane:<tag>'
 ```
 
 前提：Terraform `>= 1.9.0`，因为这里用了跨变量 validation 约束。

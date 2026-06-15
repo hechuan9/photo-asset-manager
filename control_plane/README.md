@@ -16,7 +16,7 @@ uv run pytest
 ```bash
 cd control_plane
 export CONTROL_PLANE_DATABASE_URL='postgresql+psycopg://user:pass@host/dbname'
-export DERIVATIVE_BUCKET_NAME='photo-asset-manager-dev-123456789012-derivatives'
+export DERIVATIVE_BUCKET_NAME='keeps-dev-123456789012-derivatives'
 uv run uvicorn control_plane.app:app --reload
 ```
 
@@ -30,6 +30,6 @@ Lambda image 入口是 `control_plane.lambda_handler.handler`。在 AWS runtime 
 docker buildx build \
   --platform linux/arm64 \
   -f control_plane/Dockerfile \
-  -t photo-asset-manager-control-plane:local \
+  -t keeps-control-plane:local \
   .
 ```

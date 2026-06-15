@@ -212,7 +212,7 @@ final class IOSLibraryStore: ObservableObject {
             appropriateFor: nil,
             create: true
         )
-        let directory = support.appendingPathComponent("PhotoAssetManagerIOS", isDirectory: true)
+        let directory = support.appendingPathComponent("Keeps", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory.appendingPathComponent("Library.sqlite")
     }

@@ -7,13 +7,13 @@ cd "$ROOT_DIR"
 DIST_DIR="ios/.build/enterprise"
 mkdir -p "$DIST_DIR"
 
-ARCHIVE_PATH="$DIST_DIR/PhotoAssetManagerIOS.xcarchive"
-IPA_PATH="$DIST_DIR/PhotoAssetManagerIOS.ipa"
+ARCHIVE_PATH="$DIST_DIR/KeepsIOS.xcarchive"
+IPA_PATH="$DIST_DIR/KeepsIOS.ipa"
 
-echo ">>> Archiving PhotoAssetManagerIOS for enterprise (generic iOS, Release)..."
+echo ">>> Archiving Keeps for enterprise (generic iOS, Release)..."
 xcodebuild \
-  -project ios/PhotoAssetManagerIOS.xcodeproj \
-  -scheme PhotoAssetManagerIOS \
+  -project ios/KeepsIOS.xcodeproj \
+  -scheme KeepsIOS \
   -destination 'generic/platform=iOS' \
   -configuration Release \
   -archivePath "$ARCHIVE_PATH" \
@@ -26,5 +26,5 @@ xcodebuild \
   -exportPath "$DIST_DIR" \
   -exportOptionsPlist ios/scripts/exportOptions-enterprise.plist
 
-echo ">>> Enterprise IPA ready: $IPA_PATH"
+echo ">>> Keeps enterprise IPA ready: $IPA_PATH"
 ls -lh "$IPA_PATH"

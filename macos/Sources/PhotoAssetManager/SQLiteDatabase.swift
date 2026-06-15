@@ -3936,9 +3936,14 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 func currentDeviceID() -> String {
     #if os(iOS)
     let defaults = UserDefaults.standard
-    let key = "photo_asset_manager.installation_device_id"
+    let key = "keeps.installation_device_id"
+    let legacyKey = "photo_asset_manager.installation_device_id"
     if let stored = defaults.string(forKey: key), !stored.isEmpty {
         return stored
+    }
+    if let legacy = defaults.string(forKey: legacyKey), !legacy.isEmpty {
+        defaults.set(legacy, forKey: key)
+        return legacy
     }
     let generated = "ios-\(UUID().uuidString)"
     defaults.set(generated, forKey: key)

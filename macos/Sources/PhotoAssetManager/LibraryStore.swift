@@ -2456,7 +2456,7 @@ final class LibraryStore: ObservableObject {
 
         if migrationState == nil, existingLedgerCount > 0 {
             throw NSError(
-                domain: "PhotoAssetManager",
+                domain: "Keeps",
                 code: 2001,
                 userInfo: [
                     NSLocalizedDescriptionKey: "当前资料库已经存在 \(existingLedgerCount) 条 ledger 记录，不能再做初始 backfill。请直接继续自动同步，或先人工检查 migration 状态。"
@@ -2561,10 +2561,17 @@ final class LibraryStore: ObservableObject {
     }
 
     private static func applicationSupport() throws -> URL {
-        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("PhotoAssetManager", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        return root
+        let supportRoot = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let keepsRoot = supportRoot.appendingPathComponent("Keeps", isDirectory: true)
+        let legacyRoot = supportRoot.appendingPathComponent("PhotoAssetManager", isDirectory: true)
+
+        if !FileManager.default.fileExists(atPath: keepsRoot.path),
+           FileManager.default.fileExists(atPath: legacyRoot.appendingPathComponent("Library.sqlite").path) {
+            return legacyRoot
+        }
+
+        try FileManager.default.createDirectory(at: keepsRoot, withIntermediateDirectories: true)
+        return keepsRoot
     }
 
     private static func normalizedDirectoryPath(_ path: String) -> String {

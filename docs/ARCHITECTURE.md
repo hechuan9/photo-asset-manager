@@ -1,4 +1,4 @@
-# Photo Asset Manager 架构
+# Keeps 架构
 
 ## 范围
 
@@ -43,10 +43,10 @@ Terraform 当前已经明确了这些边界：
 - `macos/Sources/PhotoAssetManager/ContentView.swift`
 - `macos/scripts/pre_merge_gate.sh`
 - `macos/scripts/package_app.sh`
-- `ios/PhotoAssetManagerIOS.xcodeproj`
-- `ios/Sources/PhotoAssetManagerIOS/PhotoAssetManagerIOSApp.swift`
-- `ios/Sources/PhotoAssetManagerIOS/IOSLibraryStore.swift`
-- `ios/Sources/PhotoAssetManagerIOS/WaterfallGalleryView.swift`
+- `ios/KeepsIOS.xcodeproj`
+- `ios/Sources/KeepsIOS/KeepsIOSApp.swift`
+- `ios/Sources/KeepsIOS/IOSLibraryStore.swift`
+- `ios/Sources/KeepsIOS/WaterfallGalleryView.swift`
 
 根目录 `scripts/` 只是兼容 wrapper，会转发到 `macos/scripts/`。
 
@@ -336,10 +336,10 @@ Terraform state 不提交。实际 AWS 资源是否已创建，以后续 apply �
     "macos/scripts/package_app.sh"
   ],
   "ios_entrypoints": [
-    "ios/PhotoAssetManagerIOS.xcodeproj",
-    "ios/Sources/PhotoAssetManagerIOS/PhotoAssetManagerIOSApp.swift",
-    "ios/Sources/PhotoAssetManagerIOS/IOSLibraryStore.swift",
-    "ios/Sources/PhotoAssetManagerIOS/WaterfallGalleryView.swift"
+    "ios/KeepsIOS.xcodeproj",
+    "ios/Sources/KeepsIOS/KeepsIOSApp.swift",
+    "ios/Sources/KeepsIOS/IOSLibraryStore.swift",
+    "ios/Sources/KeepsIOS/WaterfallGalleryView.swift"
   ],
   "ledger_core_files": [
     "macos/Sources/PhotoAssetManager/SyncLedger.swift",

@@ -2,7 +2,7 @@ import Foundation
 import OSLog
 
 enum PerformanceLog {
-    private static let logger = Logger(subsystem: "PhotoAssetManager", category: "Performance")
+    private static let logger = Logger(subsystem: "Keeps", category: "Performance")
 
     @discardableResult
     static func measure<T>(_ label: String, _ work: () throws -> T) rethrows -> T {

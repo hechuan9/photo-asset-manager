@@ -15,9 +15,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "A10000200000000000000001"
-               BuildableName = "PhotoAssetManagerIOS.app"
-               BlueprintName = "PhotoAssetManagerIOS"
-               ReferencedContainer = "container:PhotoAssetManagerIOS.xcodeproj">
+               BuildableName = "Keeps.app"
+               BlueprintName = "KeepsIOS"
+               ReferencedContainer = "container:KeepsIOS.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -43,9 +43,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A10000200000000000000001"
-            BuildableName = "PhotoAssetManagerIOS.app"
-            BlueprintName = "PhotoAssetManagerIOS"
-            ReferencedContainer = "container:PhotoAssetManagerIOS.xcodeproj">
+            BuildableName = "Keeps.app"
+            BlueprintName = "KeepsIOS"
+            ReferencedContainer = "container:KeepsIOS.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -60,9 +60,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A10000200000000000000001"
-            BuildableName = "PhotoAssetManagerIOS.app"
-            BlueprintName = "PhotoAssetManagerIOS"
-            ReferencedContainer = "container:PhotoAssetManagerIOS.xcodeproj">
+            BuildableName = "Keeps.app"
+            BlueprintName = "KeepsIOS"
+            ReferencedContainer = "container:KeepsIOS.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

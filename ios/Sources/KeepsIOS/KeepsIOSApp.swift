@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct PhotoAssetManagerIOSApp: App {
+struct KeepsIOSApp: App {
     @StateObject private var library = IOSLibraryStore()
 
     var body: some Scene {

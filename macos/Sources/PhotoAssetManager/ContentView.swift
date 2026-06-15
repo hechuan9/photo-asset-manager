@@ -1069,7 +1069,7 @@ struct FolderRemovalConfirmationDialog: View {
 }
 
 private enum AssetDragPayload {
-    private static let prefix = "photo-asset-manager.assets"
+    private static let prefix = "keeps.assets"
 
     static func string(assetIDs: [UUID]) -> String {
         ([prefix] + assetIDs.map(\.uuidString)).joined(separator: "\n")
