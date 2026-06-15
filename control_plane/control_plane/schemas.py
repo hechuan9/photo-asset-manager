@@ -166,7 +166,7 @@ class PixelSize(CamelModel):
     height: int
 
 
-class S3ObjectRef(CamelModel):
+class DerivativeObjectRef(CamelModel):
     bucket: str
     key: str
     eTag: str | None = None
@@ -176,7 +176,7 @@ class DerivativeObject(CamelModel):
     assetID: UUID
     role: DerivativeRole
     fileObject: FileObjectID
-    s3Object: S3ObjectRef
+    objectRef: DerivativeObjectRef
     pixelSize: PixelSize
 
 
@@ -392,7 +392,7 @@ class DerivativeUploadResponse(CamelModel):
     assetID: UUID
     role: DerivativeRole
     fileObject: FileObjectID
-    s3Object: S3ObjectRef
+    objectRef: DerivativeObjectRef
     uploadURL: str
 
 

@@ -108,6 +108,8 @@ struct AppTopToolbar: View {
             }
             .disabled(library.isBusy)
 
+            PreviewStoragePopover()
+
             Divider()
                 .frame(height: 18)
 
@@ -515,7 +517,6 @@ struct SidebarView: View {
                     Text("文件夹")
                     Spacer()
                     SyncStatusPopover()
-                    ThumbnailStoragePopover()
                     Button {
                         library.scanTrackedSources()
                     } label: {
@@ -599,7 +600,7 @@ struct SidebarView: View {
     }
 }
 
-struct ThumbnailStoragePopover: View {
+struct PreviewStoragePopover: View {
     @EnvironmentObject private var library: LibraryStore
     @State private var isPresented = false
 
@@ -607,23 +608,29 @@ struct ThumbnailStoragePopover: View {
         Button {
             isPresented.toggle()
         } label: {
-            Image(systemName: "rectangle.stack")
+            Label("预览维护", systemImage: "rectangle.stack")
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bordered)
         .disabled(library.isBusy)
-        .help("缩略图维护")
+        .help("预览图维护")
         .popover(isPresented: $isPresented) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("缩略图存储")
+                Text("预览图存储")
                     .font(.headline)
 
-                Text(library.derivativeStorageURL?.path ?? "未设置，不生成新缩略图")
+                Text(library.derivativeStorageURL?.path ?? "未设置，不生成新预览图")
                     .lineLimit(3)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
 
                 if let migrationReport = library.migrationReport {
                     Text(migrationReport)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let rebuildReport = library.previewRebuildReport {
+                    Text(rebuildReport)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -643,6 +650,15 @@ struct ThumbnailStoragePopover: View {
                         .disabled(library.isBusy)
                     }
                 }
+
+                if library.derivativeStorageURL != nil {
+                    Button("重建全部预览 (1200px，一次性)") {
+                        library.rebuildAllPreviews()
+                        isPresented = false
+                    }
+                    .disabled(library.isBusy)
+                    .help("为库中所有可访问原片强制重建 1200px 预览图。会更新本地 DB、清理旧衍生图记录、清理 NAS 端旧对象，并排队上传新版本。大量照片需较长时间，进度条会显示。完成后建议重启应用。")
+                }
             }
             .frame(width: 320, alignment: .leading)
             .padding(14)
@@ -655,10 +671,6 @@ struct SyncStatusPopover: View {
     @AppStorage(SyncPreferenceKey.baseURL) private var baseURL = ""
     @AppStorage(SyncPreferenceKey.authMode) private var authModeRawValue = SyncAuthenticationMode.bearer.rawValue
     @AppStorage(SyncPreferenceKey.accessCredential) private var accessCredential = ""
-    @AppStorage(SyncPreferenceKey.awsRegion) private var awsRegion = "us-east-1"
-    @AppStorage(SyncPreferenceKey.awsAccessKeyID) private var awsAccessKeyID = ""
-    @AppStorage(SyncPreferenceKey.awsSecretAccessKey) private var awsSecretAccessKey = ""
-    @AppStorage(SyncPreferenceKey.awsSessionToken) private var awsSessionToken = ""
     @State private var isPresented = false
 
     private var authMode: SyncAuthenticationMode {
@@ -717,21 +729,10 @@ struct SyncStatusPopover: View {
                 }
                 .pickerStyle(.segmented)
 
-                if authMode == .bearer {
-                    SecureField("Bearer token（可留空）", text: $accessCredential)
-                        .textFieldStyle(.roundedBorder)
-                } else {
-                    TextField("AWS region", text: $awsRegion)
-                        .textFieldStyle(.roundedBorder)
-                    TextField("AWS access key ID", text: $awsAccessKeyID)
-                        .textFieldStyle(.roundedBorder)
-                    SecureField("AWS secret access key", text: $awsSecretAccessKey)
-                        .textFieldStyle(.roundedBorder)
-                    SecureField("AWS session token（可留空）", text: $awsSessionToken)
-                        .textFieldStyle(.roundedBorder)
-                }
+                SecureField("Bearer token（可留空）", text: $accessCredential)
+                    .textFieldStyle(.roundedBorder)
 
-                Text("macOS 会自动把 ledger 和缩略图上传到 control plane；不会把原图发给 iOS。若使用 AWS IAM，当前服务名固定为 execute-api。")
+                Text("macOS 会自动把 ledger 和预览图上传到 NAS control plane；不会把原图发给 iOS。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -835,12 +836,14 @@ struct SourceDirectoryRow: View {
                 .lineLimit(1)
                 .foregroundStyle(AppPalette.folderText)
             if isTopLevel {
+                Spacer()
                 Text(path)
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .truncationMode(.middle)
+                    .truncationMode(.tail)
                     .padding(.leading, 4)
+                    .help(path)
             }
             Spacer(minLength: 4)
             if showsMenu, let source {
@@ -2105,12 +2108,12 @@ struct AssetPreviewImage: View {
             }
         }
         .task(id: cacheKey) {
-            await loader.load(thumbnailPath: asset.thumbnailPath, primaryPath: asset.primaryPath, cacheKey: cacheKey)
+            await loader.load(previewPath: asset.previewPath, primaryPath: asset.primaryPath, cacheKey: cacheKey)
         }
     }
 
     private var cacheKey: String {
-        asset.thumbnailPath ?? asset.primaryPath ?? asset.id.uuidString
+        asset.previewPath ?? asset.primaryPath ?? asset.id.uuidString
     }
 
     private func reportAspectRatio(_ size: NSSize) {
@@ -2148,7 +2151,7 @@ final class ImagePreviewLoader: ObservableObject {
         decodeTask?.cancel()
     }
 
-    func load(thumbnailPath: String?, primaryPath: String?, cacheKey: String) async {
+    func load(previewPath: String?, primaryPath: String?, cacheKey: String) async {
         guard loadedCacheKey != cacheKey else { return }
         decodeTask?.cancel()
         loadedCacheKey = cacheKey
@@ -2162,7 +2165,7 @@ final class ImagePreviewLoader: ObservableObject {
         let task = Task.detached(priority: .utility) { () -> NSImage? in
             PerformanceLog.measure("image-preview-decode") {
                 guard !Task.isCancelled else { return nil }
-                if let thumbnailPath, let image = NSImage(contentsOfFile: thumbnailPath) {
+                if let previewPath, let image = NSImage(contentsOfFile: previewPath) {
                     return image
                 }
                 guard !Task.isCancelled else { return nil }

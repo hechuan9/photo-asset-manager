@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-import boto3
 from sqlalchemy import BigInteger, DateTime, Index, JSON, String, UniqueConstraint, Uuid, create_engine, func, select
 from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 from sqlalchemy.engine import Engine
@@ -37,7 +38,7 @@ from .schemas import (
     OperationLedgerEntry,
     OperationPayload,
     OriginalArchiveReceiptRecordedPayload,
-    S3ObjectRef,
+    DerivativeObjectRef,
     OperationSemanticError,
     SyncOpsFetchResponse,
     SyncOpsUploadRequest,
@@ -112,9 +113,9 @@ class DerivativeObjectRecord(Base):
     asset_id: Mapped[str] = mapped_column(_uuid_type(), primary_key=True)
     role: Mapped[str] = mapped_column(String, primary_key=True)
     file_object: Mapped[dict[str, Any]] = mapped_column(_json_type(), nullable=False)
-    s3_bucket: Mapped[str] = mapped_column(String, nullable=False)
-    s3_key: Mapped[str] = mapped_column(String, nullable=False)
-    s3_etag: Mapped[str | None] = mapped_column(String, nullable=True)
+    object_bucket: Mapped[str] = mapped_column(String, nullable=False)
+    object_key: Mapped[str] = mapped_column(String, nullable=False)
+    object_etag: Mapped[str | None] = mapped_column(String, nullable=True)
     pixel_width: Mapped[int] = mapped_column(BigInteger, nullable=False)
     pixel_height: Mapped[int] = mapped_column(BigInteger, nullable=False)
     declared_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -172,6 +173,9 @@ def create_engine_for_url(database_url: str) -> Engine:
     connect_args: dict[str, Any] = {}
     if database_url.startswith("sqlite"):
         connect_args["check_same_thread"] = False
+        if database_url.startswith("sqlite+pysqlite:///"):
+            sqlite_path = Path(database_url.removeprefix("sqlite+pysqlite:///"))
+            sqlite_path.parent.mkdir(parents=True, exist_ok=True)
     return create_engine(database_url, future=True, connect_args=connect_args)
 
 
@@ -191,37 +195,86 @@ class DerivativePresigner:
         raise NotImplementedError
 
 
-class Boto3DerivativePresigner(DerivativePresigner):
-    def __init__(self, expires_in_seconds: int = 900) -> None:
-        self._client = boto3.client("s3")
-        self._expires_in_seconds = expires_in_seconds
+class DerivativeDeleter:
+    def delete_object(self, bucket: str, key: str) -> None:
+        raise NotImplementedError
+
+
+class FilesystemDerivativeStorage(DerivativePresigner, DerivativeDeleter):
+    bucket = "keeps-previews"
+    required_directories = ("db", "ledger", "previews", "cache", "ingest", "exports", "backups", "logs", "tmp")
+
+    def __init__(self, keeps_root: Path | str, public_base_url: str, original_root: Path | str | None = None) -> None:
+        self.keeps_root = Path(keeps_root).expanduser().resolve(strict=False)
+        self.previews_root = self.keeps_root / "previews"
+        self.public_base_url = public_base_url.rstrip("/")
+        if original_root is not None:
+            self._validate_original_root(Path(original_root).expanduser().resolve(strict=False))
+        self.ensure_layout()
 
     def presign_upload(self, bucket: str, key: str) -> str:
-        return self._client.generate_presigned_url(
-            "put_object",
-            Params={"Bucket": bucket, "Key": key},
-            ExpiresIn=self._expires_in_seconds,
-        )
+        return f"{self.public_base_url}/derivatives/local-upload/{self._encode_token(bucket, key)}"
 
     def presign_download(self, bucket: str, key: str) -> str:
-        return self._client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": bucket, "Key": key},
-            ExpiresIn=self._expires_in_seconds,
-        )
+        return f"{self.public_base_url}/derivatives/local-download/{self._encode_token(bucket, key)}"
+
+    def delete_object(self, bucket: str, key: str) -> None:
+        path = self.resolve_object_path(bucket, key)
+        path.unlink(missing_ok=True)
+
+    def write_object(self, bucket: str, key: str, content: bytes) -> None:
+        path = self.resolve_object_path(bucket, key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    def read_object(self, bucket: str, key: str) -> bytes:
+        return self.resolve_object_path(bucket, key).read_bytes()
+
+    def ensure_layout(self) -> None:
+        for dirname in self.required_directories:
+            (self.keeps_root / dirname).mkdir(parents=True, exist_ok=True)
+
+    def decode_token(self, token: str) -> tuple[str, str]:
+        try:
+            payload = json.loads(urlsafe_b64decode(token.encode("ascii")).decode("utf-8"))
+        except Exception as exc:
+            raise ValueError("invalid derivative storage token") from exc
+        bucket = payload.get("bucket")
+        key = payload.get("key")
+        if not isinstance(bucket, str) or not isinstance(key, str):
+            raise ValueError("invalid derivative storage token")
+        return bucket, key
+
+    def resolve_object_path(self, bucket: str, key: str) -> Path:
+        if bucket != self.bucket:
+            raise ValueError("invalid derivative bucket for filesystem storage")
+        key_path = Path(key)
+        if key_path.is_absolute() or any(part in {"", ".", ".."} for part in key_path.parts):
+            raise ValueError("invalid derivative key")
+        candidate = (self.previews_root / key_path).resolve(strict=False)
+        previews_root = self.previews_root.resolve(strict=False)
+        if candidate != previews_root and previews_root not in candidate.parents:
+            raise ValueError("derivative key escapes keeps preview root")
+        return candidate
+
+    def _encode_token(self, bucket: str, key: str) -> str:
+        payload = json.dumps({"bucket": bucket, "key": key}, separators=(",", ":")).encode("utf-8")
+        return urlsafe_b64encode(payload).decode("ascii")
+
+    def _validate_original_root(self, original_root: Path) -> None:
+        if original_root == self.keeps_root or self.keeps_root in original_root.parents:
+            raise ValueError("original_root must not be inside keeps_root")
 
 
 class ControlPlaneStore:
     def __init__(
         self,
         session_factory: sessionmaker[Session],
-        derivative_bucket: str,
-        derivative_presigner: DerivativePresigner | None = None,
+        derivative_storage: FilesystemDerivativeStorage,
         trusted_device_ids: set[str] | None = None,
     ) -> None:
         self._session_factory = session_factory
-        self._derivative_bucket = derivative_bucket
-        self._derivative_presigner = derivative_presigner or Boto3DerivativePresigner()
+        self._derivative_storage = derivative_storage
         self._trusted_device_ids = trusted_device_ids or set()
 
     def append_operations(self, library_id: str, request: SyncOpsUploadRequest) -> UploadOutcome:
@@ -304,15 +357,17 @@ class ControlPlaneStore:
             )
 
     def create_derivative_upload(self, request: DerivativeUploadRequest) -> DerivativeUploadResponse:
-        key = f"libraries/{request.libraryID}/assets/{request.assetID}/derivatives/{request.role.value}/{uuid4().hex}"
-        s3_object = S3ObjectRef(bucket=self._derivative_bucket, key=key, eTag=None)
+        if request.role != DerivativeRole.preview:
+            raise ValueError("only preview derivatives can be uploaded")
+        key = f"libraries/{request.libraryID}/assets/{request.assetID}/derivatives/{request.role.value}/{uuid4().hex}.heic"
+        object_ref = DerivativeObjectRef(bucket=self._derivative_storage.bucket, key=key, eTag=None)
         return DerivativeUploadResponse(
             libraryID=request.libraryID,
             assetID=request.assetID,
             role=request.role,
             fileObject=request.fileObject,
-            s3Object=s3_object,
-            uploadURL=self._derivative_presigner.presign_upload(self._derivative_bucket, key),
+            objectRef=object_ref,
+            uploadURL=self._derivative_storage.presign_upload(self._derivative_storage.bucket, key),
         )
 
     def get_derivative_metadata(self, library_id: str | None, asset_id: UUID, role: DerivativeRole) -> DerivativeMetadataResponse:
@@ -336,14 +391,26 @@ class ControlPlaneStore:
                 "assetID": row.asset_id,
                 "role": row.role,
                 "fileObject": row.file_object,
-                "s3Object": {"bucket": row.s3_bucket, "key": row.s3_key, "eTag": row.s3_etag},
+                "objectRef": {"bucket": row.object_bucket, "key": row.object_key, "eTag": row.object_etag},
                 "pixelSize": {"width": row.pixel_width, "height": row.pixel_height},
             }
         )
         return DerivativeMetadataResponse(
             derivative=derivative,
-            downloadURL=self._derivative_presigner.presign_download(row.s3_bucket, row.s3_key),
+            downloadURL=self._derivative_storage.presign_download(row.object_bucket, row.object_key),
         )
+
+    def delete_derivative(self, library_id: str, asset_id: UUID, role: DerivativeRole) -> None:
+        object_ref: DerivativeObjectRef | None = None
+        with self._session_factory() as session, session.begin():
+            row = session.get(DerivativeObjectRecord, {"library_id": library_id, "asset_id": str(asset_id), "role": role.value})
+            if row is None:
+                return
+            object_ref = DerivativeObjectRef(bucket=row.object_bucket, key=row.object_key, eTag=row.object_etag)
+            session.delete(row)
+
+        if object_ref is not None:
+            self._derivative_storage.delete_object(object_ref.bucket, object_ref.key)
 
     def record_archive_receipt(self, request: ArchiveReceiptRequest) -> ArchiveReceiptResponse:
         self.validate_operation_semantics(request.operation)
@@ -600,9 +667,9 @@ class ControlPlaneStore:
                     asset_id=str(payload.assetID),
                     role=derivative.role.value,
                     file_object=derivative.fileObject.model_dump(mode="json", by_alias=True),
-                    s3_bucket=derivative.s3Object.bucket,
-                    s3_key=derivative.s3Object.key,
-                    s3_etag=derivative.s3Object.eTag,
+                    object_bucket=derivative.objectRef.bucket,
+                    object_key=derivative.objectRef.key,
+                    object_etag=derivative.objectRef.eTag,
                     pixel_width=derivative.pixelSize.width,
                     pixel_height=derivative.pixelSize.height,
                     declared_event_seq=global_seq,

@@ -42,11 +42,15 @@ struct SidebarUXTests {
         #expect(rowBody.contains("FolderActionMenuItems("))
     }
 
-    @Test func thumbnailMaintenanceIsCollapsedInsideSidebar() throws {
+    @Test func previewMaintenanceIsCollapsedInsideSidebar() throws {
         let source = try contentViewSource()
+        let toolbarBody = structBody(named: "AppTopToolbar", in: source)
+        let sidebarBody = structBody(named: "SidebarView", in: source)
 
-        #expect(!source.contains("Section(\"缩略图存储\")"))
-        #expect(source.contains("ThumbnailStoragePopover()"))
+        #expect(!source.contains("Section(\"预览图存储\")"))
+        #expect(toolbarBody.contains("PreviewStoragePopover()"))
+        #expect(!sidebarBody.contains("PreviewStoragePopover()"))
+        #expect(source.contains("Label(\"预览维护\", systemImage: \"rectangle.stack\")"))
     }
 
     @Test func sidebarDoesNotShowWorkflowStatusShortcuts() throws {

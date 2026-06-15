@@ -164,9 +164,9 @@ final class SQLiteDatabase: @unchecked Sendable {
                 COUNT(fi.id) AS file_count,
                 MIN(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') THEN fi.path ELSE NULL END) AS primary_path,
                 COALESCE(
-                    MIN(CASE WHEN fi.file_role = 'thumbnail' THEN fi.path ELSE NULL END),
+                    MIN(CASE WHEN fi.file_role = 'preview' THEN fi.path ELSE NULL END),
                     MIN(CASE WHEN fi.file_role = 'jpeg_original' THEN fi.path ELSE NULL END)
-                ) AS thumbnail_path,
+                ) AS preview_path,
                 MAX(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') AND fi.availability = 'online' THEN 1 ELSE 0 END) AS has_online_original,
                 MAX(CASE WHEN fi.sync_status = 'needs_sync' THEN 1 ELSE 0 END) AS has_needs_sync,
                 MAX(CASE WHEN fi.sync_status = 'needs_archive' THEN 1 ELSE 0 END) AS has_needs_archive,
@@ -201,9 +201,9 @@ final class SQLiteDatabase: @unchecked Sendable {
                 COUNT(fi.id) AS file_count,
                 MIN(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') THEN fi.path ELSE NULL END) AS primary_path,
                 COALESCE(
-                    MIN(CASE WHEN fi.file_role = 'thumbnail' THEN fi.path ELSE NULL END),
+                    MIN(CASE WHEN fi.file_role = 'preview' THEN fi.path ELSE NULL END),
                     MIN(CASE WHEN fi.file_role = 'jpeg_original' THEN fi.path ELSE NULL END)
-                ) AS thumbnail_path,
+                ) AS preview_path,
                 MAX(CASE WHEN fi.file_role IN ('raw_original','jpeg_original') AND fi.availability = 'online' THEN 1 ELSE 0 END) AS has_online_original,
                 MAX(CASE WHEN fi.sync_status = 'needs_sync' THEN 1 ELSE 0 END) AS has_needs_sync,
                 MAX(CASE WHEN fi.sync_status = 'needs_archive' THEN 1 ELSE 0 END) AS has_needs_archive,
@@ -244,7 +244,7 @@ final class SQLiteDatabase: @unchecked Sendable {
                 ),
                 fileCount: Int(statement.int(14)),
                 primaryPath: statement.optionalText(15),
-                thumbnailPath: statement.optionalText(16)
+                previewPath: statement.optionalText(16)
             )
             return asset
         }
@@ -343,7 +343,7 @@ final class SQLiteDatabase: @unchecked Sendable {
         try prepare(
             """
             SELECT d.role, d.file_object_id, fo.content_hash, fo.size_bytes, fo.file_role,
-                   d.s3_bucket, d.s3_key, d.s3_etag, d.pixel_width, d.pixel_height
+                   d.object_bucket, d.object_key, d.object_etag, d.pixel_width, d.pixel_height
             FROM derivative_objects d
             JOIN file_objects fo ON fo.id = d.file_object_id
             WHERE d.asset_id = ?
@@ -369,7 +369,7 @@ final class SQLiteDatabase: @unchecked Sendable {
                 assetID: assetID,
                 role: role,
                 fileObject: fileObject,
-                s3Object: S3ObjectRef(
+                objectRef: DerivativeObjectRef(
                     bucket: statement.text(5),
                     key: statement.text(6),
                     eTag: statement.optionalText(7)
@@ -953,9 +953,6 @@ final class SQLiteDatabase: @unchecked Sendable {
             )
             try upsertBrowseFolderMembership(filePath: scanned.url.path, fileInstanceID: fileID, storageKind: scanned.storageKind)
 
-            if let thumbnailURL = scanned.thumbnailURL {
-                try upsertAssetThumbnail(assetID: assetID, url: thumbnailURL, hash: scanned.thumbnailHash ?? "", sizeBytes: scanned.thumbnailSize)
-            }
             if let previewURL = scanned.previewURL {
                 try upsertAssetDerivative(assetID: assetID, role: .preview, url: previewURL, hash: scanned.previewHash ?? "", sizeBytes: scanned.previewSize)
             }
@@ -968,8 +965,8 @@ final class SQLiteDatabase: @unchecked Sendable {
                 try appendScannedSnapshotAndPlacement(assetID: assetID, scanned: scanned, ledgerContext: ledgerContext)
             }
 
-            let derivativeCandidates = scanned.thumbnailURL.map {
-                [ScannedDerivativeUploadCandidate(assetID: assetID, role: .thumbnail, fileURL: $0)]
+            let derivativeCandidates = scanned.previewURL.map {
+                [ScannedDerivativeUploadCandidate(assetID: assetID, role: .preview, fileURL: $0)]
             } ?? []
             return ScannedFileUpsertResult(
                 assetID: assetID,
@@ -2056,7 +2053,33 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
-    func thumbnailsNeedingDerivativeUpload() throws -> [FileInstance] {
+    func previewFileInstances() throws -> [FileInstance] {
+        let sql = """
+        SELECT id, asset_id, path, device_id, storage_kind, file_role, authority_role,
+               sync_status, size_bytes, content_hash, last_seen_at, availability
+        FROM file_instances
+        WHERE file_role = 'preview'
+        ORDER BY path
+        """
+        return try prepare(sql, []) { statement in
+            FileInstance(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                assetID: UUID(uuidString: statement.text(1)) ?? UUID(),
+                path: statement.text(2),
+                deviceID: statement.text(3),
+                storageKind: StorageKind(rawValue: statement.text(4)) ?? .local,
+                fileRole: FileRole(rawValue: statement.text(5)) ?? .preview,
+                authorityRole: AuthorityRole(rawValue: statement.text(6)) ?? .cache,
+                syncStatus: SyncStatus(rawValue: statement.text(7)) ?? .cacheOnly,
+                sizeBytes: statement.int64(8),
+                contentHash: statement.text(9),
+                lastSeenAt: DateCoding.decode(statement.text(10)) ?? Date(),
+                availability: Availability(rawValue: statement.text(11)) ?? .missing
+            )
+        }
+    }
+
+    func previewsNeedingDerivativeUpload() throws -> [FileInstance] {
         let sql = """
         SELECT file_instances.id, file_instances.asset_id, file_instances.path, file_instances.device_id,
                file_instances.storage_kind, file_instances.file_role, file_instances.authority_role,
@@ -2065,10 +2088,10 @@ final class SQLiteDatabase: @unchecked Sendable {
         FROM file_instances
         LEFT JOIN derivative_objects d
           ON d.asset_id = file_instances.asset_id
-         AND d.role = 'thumbnail'
+         AND d.role = 'preview'
         LEFT JOIN file_objects fo
           ON fo.id = d.file_object_id
-        WHERE file_instances.file_role = 'thumbnail'
+        WHERE file_instances.file_role = 'preview'
           AND (
             d.asset_id IS NULL
             OR fo.content_hash IS NULL
@@ -2085,7 +2108,7 @@ final class SQLiteDatabase: @unchecked Sendable {
                 path: statement.text(2),
                 deviceID: statement.text(3),
                 storageKind: StorageKind(rawValue: statement.text(4)) ?? .local,
-                fileRole: FileRole(rawValue: statement.text(5)) ?? .thumbnail,
+                fileRole: FileRole(rawValue: statement.text(5)) ?? .preview,
                 authorityRole: AuthorityRole(rawValue: statement.text(6)) ?? .cache,
                 syncStatus: SyncStatus(rawValue: statement.text(7)) ?? .cacheOnly,
                 sizeBytes: statement.int64(8),
@@ -2093,6 +2116,58 @@ final class SQLiteDatabase: @unchecked Sendable {
                 lastSeenAt: DateCoding.decode(statement.text(10)) ?? Date(),
                 availability: Availability(rawValue: statement.text(11)) ?? .missing
             )
+        }
+    }
+
+    func originalFileInstances() throws -> [FileInstance] {
+        let sql = """
+        SELECT id, asset_id, path, device_id, storage_kind, file_role, authority_role,
+               sync_status, size_bytes, content_hash, last_seen_at, availability
+        FROM file_instances
+        WHERE file_role IN ('raw_original', 'jpeg_original')
+        ORDER BY asset_id, path
+        """
+        return try prepare(sql, []) { statement in
+            FileInstance(
+                id: UUID(uuidString: statement.text(0)) ?? UUID(),
+                assetID: UUID(uuidString: statement.text(1)) ?? UUID(),
+                path: statement.text(2),
+                deviceID: statement.text(3),
+                storageKind: StorageKind(rawValue: statement.text(4)) ?? .local,
+                fileRole: FileRole(rawValue: statement.text(5)) ?? .rawOriginal,
+                authorityRole: AuthorityRole(rawValue: statement.text(6)) ?? .canonical,
+                syncStatus: SyncStatus(rawValue: statement.text(7)) ?? .synced,
+                sizeBytes: statement.int64(8),
+                contentHash: statement.text(9),
+                lastSeenAt: DateCoding.decode(statement.text(10)) ?? Date(),
+                availability: Availability(rawValue: statement.text(11)) ?? .missing
+            )
+        }
+    }
+
+    func clearDerivatives(for assetID: UUID) throws {
+        try execute(
+            "DELETE FROM derivative_objects WHERE asset_id = ?",
+            [.text(assetID.uuidString)]
+        )
+    }
+
+    func removeFileInstances(for assetID: UUID, role: FileRole) throws {
+        try execute(
+            "DELETE FROM file_instances WHERE asset_id = ? AND file_role = ?",
+            [.text(assetID.uuidString), .text(role.rawValue)]
+        )
+    }
+
+    func replaceAssetPreview(assetID: UUID, url: URL, hash: String, sizeBytes: Int64) throws -> [RemovedDerivativeObject] {
+        try transaction {
+            let removed = try derivatives(assetID: assetID).map {
+                RemovedDerivativeObject(assetID: assetID, role: $0.role, objectRef: $0.objectRef)
+            }
+            try upsertAssetDerivative(assetID: assetID, role: .preview, url: url, hash: hash, sizeBytes: sizeBytes)
+            try clearDerivatives(for: assetID)
+            try removeFileInstances(for: assetID, role: .thumbnail)
+            return removed
         }
     }
 
@@ -2813,7 +2888,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             try upsertFilePlacement(
                 FilePlacement(
                     fileObjectID: derivative.fileObject,
-                    holderID: derivative.s3Object.bucket,
+                    holderID: derivative.objectRef.bucket,
                     storageKind: .cloudPreview,
                     authorityRole: .canonical,
                     availability: .online
@@ -2872,14 +2947,14 @@ final class SQLiteDatabase: @unchecked Sendable {
         try execute(
             """
             INSERT INTO derivative_objects (
-                asset_id, role, file_object_id, s3_bucket, s3_key, s3_etag,
+                asset_id, role, file_object_id, object_bucket, object_key, object_etag,
                 pixel_width, pixel_height, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(asset_id, role) DO UPDATE SET
                 file_object_id = excluded.file_object_id,
-                s3_bucket = excluded.s3_bucket,
-                s3_key = excluded.s3_key,
-                s3_etag = excluded.s3_etag,
+                object_bucket = excluded.object_bucket,
+                object_key = excluded.object_key,
+                object_etag = excluded.object_etag,
                 pixel_width = excluded.pixel_width,
                 pixel_height = excluded.pixel_height,
                 updated_at = excluded.updated_at
@@ -2888,9 +2963,9 @@ final class SQLiteDatabase: @unchecked Sendable {
                 .text(derivative.assetID.uuidString),
                 .text(derivative.role.rawValue),
                 .text(derivative.fileObject.stableKey),
-                .text(derivative.s3Object.bucket),
-                .text(derivative.s3Object.key),
-                .nullableText(derivative.s3Object.eTag),
+                .text(derivative.objectRef.bucket),
+                .text(derivative.objectRef.key),
+                .nullableText(derivative.objectRef.eTag),
                 .int(Int64(derivative.pixelSize.width)),
                 .int(Int64(derivative.pixelSize.height)),
                 .text(now)
@@ -3312,9 +3387,9 @@ final class SQLiteDatabase: @unchecked Sendable {
                 asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
                 role TEXT NOT NULL,
                 file_object_id TEXT NOT NULL REFERENCES file_objects(id) ON DELETE CASCADE,
-                s3_bucket TEXT NOT NULL,
-                s3_key TEXT NOT NULL,
-                s3_etag TEXT,
+                object_bucket TEXT NOT NULL,
+                object_key TEXT NOT NULL,
+                object_etag TEXT,
                 pixel_width INTEGER NOT NULL,
                 pixel_height INTEGER NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -3465,26 +3540,38 @@ final class SQLiteDatabase: @unchecked Sendable {
             """
         )
 
-        try execute(
-            """
-            INSERT OR IGNORE INTO source_directories (id, path, storage_kind, is_tracked, created_at, last_scanned_at)
-            SELECT
-                id,
-                source_path,
-                CASE WHEN source_path LIKE '/Volumes/%' THEN 'nas' ELSE 'local' END,
-                1,
-                imported_at,
-                imported_at
-            FROM import_batches
-            WHERE status IN ('finished', 'finished_with_errors', 'resumed')
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM source_directories ancestor
-                  WHERE ancestor.is_tracked = 1
-                    AND source_path LIKE ancestor.path || '/%'
-              )
-            """
-        )
+        // 从历史 import_batches 向 source_directories 的兼容播种只做一次（用 app_settings 标记）。
+        // 目的：让用户“移除文件夹”(DELETE source 记录) 持久生效，即使 count 掉到 0，重启 migrate 也不复活。
+        // 旧的无条件 INSERT OR IGNORE + 仅 count==0 守卫无法阻止“删完最后一个后重启回来”的情况。
+        let alreadySeeded: Bool = try prepare(
+            "SELECT 1 FROM app_settings WHERE key = 'import_batch_sources_seeded' LIMIT 1",
+            []
+        ) { _ in true }.first ?? false
+        if !alreadySeeded {
+            try execute(
+                """
+                INSERT OR IGNORE INTO source_directories (id, path, storage_kind, is_tracked, created_at, last_scanned_at)
+                SELECT
+                    id,
+                    source_path,
+                    CASE WHEN source_path LIKE '/Volumes/%' THEN 'nas' ELSE 'local' END,
+                    1,
+                    imported_at,
+                    imported_at
+                FROM import_batches
+                WHERE status IN ('finished', 'finished_with_errors', 'resumed')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM source_directories ancestor
+                      WHERE ancestor.is_tracked = 1
+                        AND source_path LIKE ancestor.path || '/%'
+                  )
+                """
+            )
+            try execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('import_batch_sources_seeded', '1')"
+            )
+        }
         try pruneNestedImportBatchSourceDirectories()
         try deduplicateAssetThumbnails()
         try execute(
@@ -3601,6 +3688,30 @@ final class SQLiteDatabase: @unchecked Sendable {
         try backfillBrowseGraphFromFileInstances()
     }
 
+    /// 用于外部移动文件夹后批量更新 source 和 fi 的路径前缀，并重建 browse 索引以消除 stale 路径。
+    /// 例如：将 /Volumes/home/Photos/xxx 下的记录前缀替换为 /Volumes/myphoto/和川专属/xxx
+    func bulkUpdatePathsForMovedFolder(oldPrefix: String, newPrefix: String) throws {
+        let now = DateCoding.encode(Date())
+        try execute(
+            """
+            UPDATE source_directories 
+            SET path = replace(path, ?, ?), last_scanned_at = NULL
+            WHERE path = ? OR path LIKE ? || '/%'
+            """,
+            [.text(oldPrefix), .text(newPrefix), .text(oldPrefix), .text(oldPrefix)]
+        )
+        try execute(
+            """
+            UPDATE file_instances 
+            SET path = replace(path, ?, ?), last_seen_at = ?
+            WHERE path = ? OR path LIKE ? || '/%'
+            """,
+            [.text(oldPrefix), .text(newPrefix), .text(now), .text(oldPrefix), .text(oldPrefix)]
+        )
+        // 重建 browse 以清理旧路径的节点，只保留当前 fi 对应的
+        try rebuildBrowseGraph()
+    }
+
     private func assetID(contentHash: String, metadataFingerprint: String) throws -> UUID? {
         let sql = "SELECT id FROM assets WHERE content_fingerprint = ? OR metadata_fingerprint = ? LIMIT 1"
         return try prepare(sql, [.text(contentHash), .text(metadataFingerprint)]) { statement in
@@ -3690,12 +3801,8 @@ final class SQLiteDatabase: @unchecked Sendable {
         }.first ?? nil
     }
 
-    private func upsertAssetThumbnail(assetID: UUID, url: URL, hash: String, sizeBytes: Int64) throws {
-        try upsertAssetDerivative(assetID: assetID, role: .thumbnail, url: url, hash: hash, sizeBytes: sizeBytes)
-    }
-
-    private func upsertAssetDerivative(assetID: UUID, role: FileRole, url: URL, hash: String, sizeBytes: Int64) throws {
-        precondition(role == .thumbnail || role == .preview)
+    func upsertAssetDerivative(assetID: UUID, role: FileRole, url: URL, hash: String, sizeBytes: Int64) throws {
+        precondition(role == .preview)
         try execute(
             """
             DELETE FROM file_instances
@@ -3834,6 +3941,12 @@ final class SQLiteDatabase: @unchecked Sendable {
         guard !columns.contains(column) else { return }
         try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)", [])
     }
+}
+
+struct RemovedDerivativeObject: Hashable, Sendable {
+    var assetID: UUID
+    var role: DerivativeRole
+    var objectRef: DerivativeObjectRef
 }
 
 private enum LedgerSQLiteCoding {

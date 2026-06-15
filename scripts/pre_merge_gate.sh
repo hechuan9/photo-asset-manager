@@ -28,15 +28,11 @@ if [[ -s "$FILES_LIST" ]]; then
   )"
   FILTERED_MATCHES="$(
     printf '%s\n' "$MATCHES" | rg -v -i \
-      "(README.md:.*(Secrets Manager|secret version|tfstate|Aurora secret|connection secret|VPC endpoints|interface endpoint|gateway endpoint|可选 access token)|docs/ARCHITECTURE.md:.*(Secrets Manager|secret ARN|connection secret|VPC endpoints|interface endpoint|gateway endpoint|AWS_IAM|SigV4)|docs/superpowers/.*(SUB-SKILL|task-by-task|verification-before-completion)|control_plane/README.md:.*(DATABASE_CONNECTION_SECRET_ARN|connection secret)|control_plane/control_plane/app.py:.*(DATABASE_CONNECTION_SECRET_ARN|_database_url_from_connection_secret|boto3\\.client\\(\"secretsmanager\"\\)|SecretString|secret_string|payload\\['password'\\]|\"password\"|Aurora connection secret missing fields)|control_plane/tests/test_api.py:.*(_database_url_from_connection_secret|test_database_url_can_be_built_from_aurora_connection_secret|FakeSecretsManager|get_secret_value|SecretId|SecretString|p@ss word|p@ss/word|secretsmanager:secret|service_name == \"secretsmanager\")|infra/terraform/README.md:.*(Secrets Manager|secret version|secret recovery|tfstate|connection secret|VPC endpoints|interface endpoint|gateway endpoint)|infra/terraform/.*\\.tf:.*(Secrets Manager secret|Secrets Manager ARN|aws_secretsmanager_|aurora_connection_secret|AuroraConnectionSecret|secretsmanager:DescribeSecret|secretsmanager:GetSecretValue|service_name.*secretsmanager|resource \"aws_vpc_endpoint\" \"secretsmanager\"|secret_string = jsonencode|resource \"random_password\" \"aurora_master_password\"|random_password\\.aurora_master_password|master_password.*random_password|DATABASE_CONNECTION_SECRET_ARN|authorization_type = \"AWS_IAM\"|allowed_headers = .*Authorization)|macos/Sources/PhotoAssetManager/ContentView.swift:.*|ios/Sources/KeepsIOS/KeepsIOSApp.swift:.*|macos/Sources/PhotoAssetManager/SyncControlPlane.swift:.*|macos/Tests/PhotoAssetManagerTests/SyncLedgerTests.swift:.*)" || true
+      "(README.md:.*可选 access token|docs/ARCHITECTURE.md:.*可选 Bearer token|deploy/nas/docker-compose.yml:.*POSTGRES_PASSWORD|control_plane/control_plane/app.py:.*(local-upload|local-download|decode_token|invalid_derivative_storage_token|token: str)|control_plane/control_plane/db.py:.*(local-upload|local-download|decode_token|invalid derivative storage token|_encode_token|token.encode)|docs/superpowers/.*(SUB-SKILL|task-by-task|verification-before-completion)|macos/Sources/PhotoAssetManager/ContentView.swift:.*|ios/Sources/KeepsIOS/KeepsIOSApp.swift:.*|macos/Sources/PhotoAssetManager/SyncControlPlane.swift:.*|macos/Tests/PhotoAssetManagerTests/SyncLedgerTests.swift:.*)" || true
   )"
   if [[ -n "$FILTERED_MATCHES" ]]; then
     printf '%s\n' "$FILTERED_MATCHES"
     echo "疑似敏感信息匹配，停止发布。" >&2
     exit 1
   fi
-fi
-
-if command -v terraform >/dev/null 2>&1; then
-  terraform -chdir="$ROOT_DIR/infra/terraform" fmt -check
 fi

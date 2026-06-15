@@ -168,7 +168,7 @@ struct StartupPerformanceTests {
         #expect(functionBody(named: "sourcesNeedingStartupOrganization", in: store).contains("lastScannedAt == nil"))
         #expect(functionBody(named: "sourcesNeedingStartupOrganization", in: store).contains("sourceDirectoryPathsNeedingBrowseGraphRepair"))
         #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("blockingTask = BlockingTaskReport"))
-        #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("database.backfillBrowseGraphFromFileInstances()"))
+        #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("database.rebuildBrowseGraph()"))
         #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("scanner.scanDirectory"))
         #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("database.markSourceDirectoryScanned"))
         #expect(functionBody(named: "startStartupLibraryOrganizationIfNeeded", in: store).contains("indexedBrowseFolders = try database.browseFolders()"))
@@ -239,11 +239,11 @@ struct StartupPerformanceTests {
         #expect(!scanner.contains("report.scannedFiles % 25"))
     }
 
-    @Test func thumbnailWriteFailuresDoNotFailPhotoScan() throws {
+    @Test func previewWriteFailuresDoNotFailPhotoScan() throws {
         let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")
         let scanFileBody = functionBody(named: "scanFile", in: scanner)
 
-        #expect(scanFileBody.contains("try? generateThumbnail"))
+        #expect(scanFileBody.contains("try? generatePreview"))
         #expect(!scanFileBody.contains("let thumbnail = try generateThumbnail"))
     }
 
@@ -258,15 +258,29 @@ struct StartupPerformanceTests {
         #expect(content.contains("asset.primaryPath"))
     }
 
-    @Test func thumbnailsAreAssetScopedInsteadOfOnePerOriginalFile() throws {
+    @Test func previewsAreAssetScopedInsteadOfOnePerOriginalFile() throws {
         let database = try sourceFile("Sources/PhotoAssetManager/SQLiteDatabase.swift")
         let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")
 
-        #expect(database.contains("func upsertAssetThumbnail(assetID: UUID, url: URL, hash: String, sizeBytes: Int64) throws"))
-        #expect(functionBody(named: "upsertScannedFile", in: database).contains("upsertAssetThumbnail(assetID: assetID"))
+        #expect(!functionBody(named: "upsertScannedFile", in: database).contains("upsertAssetThumbnail"))
         #expect(!functionBody(named: "upsertScannedFile", in: database).contains("upsertDerivedFile(assetID: assetID, url: thumbnailURL, role: .thumbnail"))
         #expect(database.contains("CREATE UNIQUE INDEX IF NOT EXISTS idx_file_instances_one_thumbnail_per_asset"))
-        #expect(scanner.contains("thumbnailURL: thumbnail"))
+        #expect(!scanner.contains("thumbnailURL: thumbnail"))
+        #expect(scanner.contains("previewURL: preview"))
+    }
+
+    @Test func generatedPreviewsUseHEIFInsteadOfJPEG() throws {
+        let scanner = try sourceFile("Sources/PhotoAssetManager/PhotoScanner.swift")
+        let iosGallery = try sourceFile("../ios/Sources/KeepsIOS/WaterfallGalleryView.swift")
+        let syncBootstrapper = try sourceFile("Sources/PhotoAssetManager/SyncBootstrapper.swift")
+
+        #expect(scanner.contains("appendingPathComponent(\"\\(contentHash)-\\(maxPixel).heic\")"))
+        #expect(scanner.contains("try ImageRenderer.writeHEIF"))
+        #expect(!scanner.contains("try ImageRenderer.writeJPEG"))
+        #expect(!scanner.contains(".representation(using: .jpeg"))
+        #expect(iosGallery.contains("appendingPathComponent(\"\\(hex).heic\")"))
+        #expect(!iosGallery.contains("jpegData(compressionQuality:"))
+        #expect(syncBootstrapper.contains("return \"\\(digest).heic\""))
     }
 
     @Test func thumbnailMigrationDeduplicatesExistingRawJpegPairThumbnails() throws {
@@ -302,7 +316,19 @@ struct StartupPerformanceTests {
         #expect(app.contains("struct ToolCommands: Commands"))
         #expect(app.contains("CommandMenu(\"工具\")"))
         #expect(app.contains("Button(\"补齐拍摄时间\")"))
+        #expect(app.contains("Button(\"重建全部预览 (1200px，一次性)\")"))
+        #expect(app.contains("Button(\"修复预览同步状态\")"))
+        #expect(app.contains("library.rebuildAllPreviews()"))
+        #expect(app.contains("library.repairPreviewSyncState()"))
+        #expect(app.contains("--repair-preview-sync-state"))
+        #expect(app.contains("ProcessInfo.processInfo.arguments.contains"))
+        #expect(app.contains("library.repairPreviewSyncStateFromLaunchArgument()"))
         #expect(app.contains("library.fillMissingCaptureTimes()"))
+        #expect(store.contains("func repairPreviewSyncState()"))
+        #expect(store.contains("func repairPreviewSyncStateFromLaunchArgument()"))
+        #expect(store.contains("preview_sync_repair_launch_requested_at"))
+        #expect(functionBody(named: "repairPreviewSyncState", in: store).contains("pendingAutomaticSync = true"))
+        #expect(functionBody(named: "repairPreviewSyncState", in: store).contains("queueBackgroundTask(.automaticSync)"))
     }
 
     @Test func assetPreviewLoadsImagesAsynchronouslyWithCache() throws {

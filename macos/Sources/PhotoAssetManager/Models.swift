@@ -34,7 +34,7 @@ enum FileRole: String, CaseIterable, Codable, Identifiable, Sendable {
         case .jpegOriginal: "JPEG 原片"
         case .sidecar: "Sidecar"
         case .preview: "预览"
-        case .thumbnail: "缩略图"
+        case .thumbnail: "旧缩略图"
         case .export: "导出"
         }
     }
@@ -243,7 +243,7 @@ struct Asset: Identifiable, Hashable, Sendable {
     var status: AssetStatus
     var fileCount: Int
     var primaryPath: String?
-    var thumbnailPath: String?
+    var previewPath: String?
 }
 
 struct FileInstance: Identifiable, Hashable, Sendable {

@@ -24,7 +24,7 @@
 - 支持通过菜单栏从共享回收站恢复选中资产。
 - 新增同步 ledger 基础层：本地评分、精选、标签、共享回收站和归档 receipt 走 append-only 业务事件，SQLite 只作为本机 UI 投影。
 - 支持把现有 Mac SQLite 库 bootstrap 成幂等 ledger 初始快照，迁移只表达当前事实，不 replay 历史 SQL。
-- 衍生图采用 S3 authoritative / 本地 cache 模型：缩略图和中等预览图作为长期 S3 derivative，原片、RAW 和 sidecar canonical 不进入 S3。
+- 衍生图采用 NAS control-plane authoritative / 本地 cache 模型：1200px 预览图作为长期 NAS derivative，原片、RAW 和 sidecar canonical 不进入 `/myphoto/keeps`。
 
 ## 构建
 
@@ -63,10 +63,10 @@ NAS 挂载未完成时，后台文件状态校验会跳过这一轮，避免把�
 
 删除照片当前不是物理删除操作，不等同于“移除文件夹”或停止追踪。必须先在资产网格右键选择删除，再在确认弹窗中确认；确认后资产进入共享回收站并从默认视图隐藏，磁盘上的照片文件保持原样。第一版不自动执行原片物理清除。
 
-多设备同步基础层使用业务事件 ledger，而不是同步本地 SQL。评分、精选、标签、回收站、导入原片声明、归档请求和原片归档 receipt 都记录为 append-only operation；`assets`、`file_instances`、共享回收站和归档状态是 replay 后的本地投影。云端控制面保存 ledger、设备游标、缩略图/预览和归档 receipt，原片仍以单一 NAS/server 作为 canonical store。
+多设备同步基础层使用业务事件 ledger，而不是同步本地 SQL。评分、精选、标签、回收站、导入原片声明、归档请求和原片归档 receipt 都记录为 append-only operation；`assets`、`file_instances`、共享回收站和归档状态是 replay 后的本地投影。NAS control-plane 保存 ledger、设备游标、预览图和归档 receipt，原片仍以单一 NAS/server 作为 canonical store。
 
 已有 Mac 库迁移到同步架构时，会生成一次 `system:migration` actor 的 bootstrap ledger 快照，包括资产 metadata、标签、文件位置以及已有 thumbnail/preview derivative 指针。bootstrap operation 使用稳定 ID，重复运行必须幂等；如果同一稳定 operation ID 的 payload 变化，迁移会失败并要求人工处理。迁移状态记录在本地 watermark 中，只有 ledger replay 校验通过后才标记完成。
 
 如果希望在接入 remote control-plane 前先手动完成这一步，可在应用里使用“工具 -> 补齐同步 Ledger”或同步状态面板里的“补齐 ledger”。它只会把当前 SQLite 事实补成初始 ledger 快照，不会删除、移动或覆盖任何照片文件；后续配置好自动同步后，历史缩略图也会继续按数据库状态补传。
 
-缩略图和预览图的二进制内容不写入 ledger。ledger 只记录 `DerivativeDeclared` 业务事件和 S3 指针；本地路径只表示 cache 命中，cache miss 时按控制面返回的 derivative metadata 下载到本地 cache。cache 可清理和重建，清理 cache 不写 ledger，也不得触碰原片目录。
+预览图的二进制内容不写入 ledger。ledger 只记录 `DerivativeDeclared` 业务事件和对象指针；本地路径只表示 cache 命中，cache miss 时按控制面返回的 derivative metadata 下载到本地 cache。cache 可清理和重建，清理 cache 不写 ledger，也不得触碰原片目录。

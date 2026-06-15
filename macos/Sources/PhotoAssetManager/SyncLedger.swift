@@ -103,7 +103,7 @@ struct PixelSize: Hashable, Codable, Sendable {
     var height: Int
 }
 
-struct S3ObjectRef: Hashable, Codable, Sendable {
+struct DerivativeObjectRef: Hashable, Codable, Sendable {
     var bucket: String
     var key: String
     var eTag: String?
@@ -113,7 +113,7 @@ struct DerivativeObject: Hashable, Codable, Sendable {
     var assetID: UUID
     var role: DerivativeRole
     var fileObject: FileObjectID
-    var s3Object: S3ObjectRef
+    var objectRef: DerivativeObjectRef
     var pixelSize: PixelSize
 }
 
@@ -551,7 +551,7 @@ protocol SyncCommandWriting {
     func declareImportedOriginal(assetID: UUID, fileObject: FileObjectID, localPlacement: FilePlacement) throws
     func requestArchive(assetID: UUID) throws
     func recordArchiveReceipt(assetID: UUID, fileObject: FileObjectID, serverPlacement: FilePlacement) throws
-    func declareDerivative(assetID: UUID, role: DerivativeRole, fileObject: FileObjectID, s3Object: S3ObjectRef, pixelSize: PixelSize) throws
+    func declareDerivative(assetID: UUID, role: DerivativeRole, fileObject: FileObjectID, objectRef: DerivativeObjectRef, pixelSize: PixelSize) throws
 
     func makeRatingOperation(assetID: UUID, rating: Int, deviceSequence: Int64, time: HybridLogicalTime) -> OperationLedgerEntry
     func makeFlagOperation(assetID: UUID, flagState: AssetFlagState, deviceSequence: Int64, time: HybridLogicalTime) -> OperationLedgerEntry
@@ -733,11 +733,14 @@ struct SyncCommandLayer: SyncCommandWriting, Sendable {
         }
     }
 
-    func declareDerivative(assetID: UUID, role: DerivativeRole, fileObject: FileObjectID, s3Object: S3ObjectRef, pixelSize: PixelSize) throws {
+    func declareDerivative(assetID: UUID, role: DerivativeRole, fileObject: FileObjectID, objectRef: DerivativeObjectRef, pixelSize: PixelSize) throws {
+        guard role == .preview else {
+            throw SyncCommandError.unsupportedDerivativeRole(role)
+        }
         guard role.fileRole == fileObject.role else {
             throw SyncCommandError.invalidDerivativeRole(role: role, fileRole: fileObject.role)
         }
-        let derivative = DerivativeObject(assetID: assetID, role: role, fileObject: fileObject, s3Object: s3Object, pixelSize: pixelSize)
+        let derivative = DerivativeObject(assetID: assetID, role: role, fileObject: fileObject, objectRef: objectRef, pixelSize: pixelSize)
         let wallTime = Int64(nowProvider().timeIntervalSince1970 * 1000)
         try database.recordLedgerOperation(
             libraryID: libraryID,
@@ -823,7 +826,7 @@ extension SyncCommandWriting {
         }
     }
 
-    func declareDerivative(assetID: UUID, role: DerivativeRole, fileObject: FileObjectID, s3Object: S3ObjectRef, pixelSize: PixelSize) throws {
+    func declareDerivative(assetID: UUID, role: DerivativeRole, fileObject: FileObjectID, objectRef: DerivativeObjectRef, pixelSize: PixelSize) throws {
         throw SyncCommandError.unsupportedDerivativeControlPlane
     }
 }
@@ -831,12 +834,14 @@ extension SyncCommandWriting {
 enum SyncCommandError: LocalizedError {
     case invalidRating(Int)
     case invalidDerivativeRole(role: DerivativeRole, fileRole: FileRole)
+    case unsupportedDerivativeRole(DerivativeRole)
     case unsupportedDerivativeControlPlane
 
     var errorDescription: String? {
         switch self {
         case .invalidRating(let rating): "评分必须在 0 到 5 之间，实际值：\(rating)"
         case let .invalidDerivativeRole(role, fileRole): "衍生图 role 与文件 role 不匹配：\(role.rawValue) / \(fileRole.rawValue)"
+        case let .unsupportedDerivativeRole(role): "不支持新的 \(role.rawValue) 衍生图声明；当前只允许 preview"
         case .unsupportedDerivativeControlPlane: "当前控制面客户端不支持衍生图接口"
         }
     }
@@ -952,7 +957,7 @@ struct DerivativeUploadRequest: Codable, Equatable, Sendable {
 }
 
 struct DerivativeUploadResponse: Codable, Equatable, Sendable {
-    var s3Object: S3ObjectRef
+    var objectRef: DerivativeObjectRef
     var uploadURL: URL
 }
 
@@ -968,6 +973,7 @@ protocol SyncControlPlaneClient: Sendable {
     func recordArchiveReceipt(_ request: ArchiveReceiptRequest) async throws
     func createDerivativeUpload(_ request: DerivativeUploadRequest) async throws -> DerivativeUploadResponse
     func fetchDerivativeMetadata(libraryID: String, assetID: UUID, role: DerivativeRole) async throws -> DerivativeMetadataResponse
+    func deleteDerivative(libraryID: String, assetID: UUID, role: DerivativeRole) async throws
 }
 
 extension SyncControlPlaneClient {
@@ -976,6 +982,10 @@ extension SyncControlPlaneClient {
     }
 
     func fetchDerivativeMetadata(libraryID: String, assetID: UUID, role: DerivativeRole) async throws -> DerivativeMetadataResponse {
+        throw SyncCommandError.unsupportedDerivativeControlPlane
+    }
+
+    func deleteDerivative(libraryID: String, assetID: UUID, role: DerivativeRole) async throws {
         throw SyncCommandError.unsupportedDerivativeControlPlane
     }
 }
@@ -1092,7 +1102,7 @@ private struct ProjectorState {
             assets[assetID] = asset
             record(derivative.fileObject, placement: FilePlacement(
                 fileObjectID: derivative.fileObject,
-                holderID: derivative.s3Object.bucket,
+                holderID: derivative.objectRef.bucket,
                 storageKind: .cloudPreview,
                 authorityRole: .canonical,
                 availability: .online

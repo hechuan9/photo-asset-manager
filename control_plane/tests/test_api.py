@@ -10,8 +10,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.schema import CreateTable
 from sqlalchemy.dialects import postgresql
 
-from control_plane.app import _database_url_from_connection_secret, create_app
-from control_plane.db import ArchiveReceiptRecord, DerivativePresigner, DeviceStateRecord, DerivativeObjectRecord, LedgerEventRecord, SyncConflictRecord, create_engine_for_url
+from control_plane.app import _load_derivative_storage_from_env, create_app
+from control_plane.db import (
+    ArchiveReceiptRecord,
+    DeviceStateRecord,
+    DerivativeObjectRecord,
+    FilesystemDerivativeStorage,
+    LedgerEventRecord,
+    SyncConflictRecord,
+    create_engine_for_url,
+)
 from control_plane.schemas import (
     AssetMetadataField,
     AuthorityRole,
@@ -32,26 +40,22 @@ from control_plane.schemas import (
     OperationPayload,
     OriginalArchiveReceiptRecordedPayload,
     PixelSize,
-    S3ObjectRef,
+    DerivativeObjectRef,
     StorageKind,
     TagsUpdatedPayload,
 )
 
 
-class FakeDerivativePresigner(DerivativePresigner):
-    def presign_upload(self, bucket: str, key: str) -> str:
-        return f"https://presign.test/upload/{bucket}/{key}"
-
-    def presign_download(self, bucket: str, key: str) -> str:
-        return f"https://presign.test/download/{bucket}/{key}"
+def make_storage(tmp_path: Path) -> FilesystemDerivativeStorage:
+    return FilesystemDerivativeStorage(keeps_root=tmp_path / "myphoto" / "keeps", public_base_url="http://testserver")
 
 
 def make_app(tmp_path: Path, trusted_device_ids: set[str] | None = None):
-    database_url = f"sqlite+pysqlite:///{tmp_path / 'control_plane.sqlite'}"
+    keeps_root = tmp_path / "myphoto" / "keeps"
+    database_url = f"sqlite+pysqlite:///{keeps_root / 'db' / 'control_plane.sqlite'}"
     return create_app(
         database_url=database_url,
-        derivative_bucket="test-derivative-bucket",
-        derivative_presigner=FakeDerivativePresigner(),
+        derivative_storage=FilesystemDerivativeStorage(keeps_root=keeps_root, public_base_url="http://testserver"),
         trusted_device_ids=trusted_device_ids,
     )
 
@@ -448,9 +452,9 @@ def test_derivative_declared_rejects_mismatched_nested_asset_id_before_write(tmp
     inner_asset_id = UUID("00000000-0000-0000-0000-00000000d002")
     derivative = DerivativeObject(
         assetID=inner_asset_id,
-        role=DerivativeRole.thumbnail,
-        fileObject=FileObjectID(contentHash="hash-diff", sizeBytes=12, role=FileRole.thumbnail),
-        s3Object=S3ObjectRef(bucket="bucket", key="key", eTag="etag"),
+        role=DerivativeRole.preview,
+        fileObject=FileObjectID(contentHash="hash-diff", sizeBytes=12, role=FileRole.preview),
+        objectRef=DerivativeObjectRef(bucket="bucket", key="key", eTag="etag"),
         pixelSize=PixelSize(width=128, height=128),
     )
     op = OperationLedgerEntry(
@@ -477,7 +481,7 @@ def test_derivative_declared_rejects_mismatched_nested_asset_id_before_write(tmp
     assert response.json()["detail"]["code"] == "derivative_asset_id_mismatch"
     store = client.app.state.store
     assert store.get_ledger_state("library-a") == []
-    assert store.get_derivative_row("library-a", outer_asset_id, DerivativeRole.thumbnail) is None
+    assert store.get_derivative_row("library-a", outer_asset_id, DerivativeRole.preview) is None
 
 
 def test_get_after_cursor_orders_and_pages(tmp_path: Path) -> None:
@@ -640,7 +644,7 @@ def test_heartbeat_omitted_sequence_fields_return_persisted_values(tmp_path: Pat
 
 def test_derivative_metadata_returns_404_when_not_declared(tmp_path: Path) -> None:
     client = make_client(tmp_path)
-    response = client.get("/derivatives/00000000-0000-0000-0000-00000000b001?role=thumbnail")
+    response = client.get("/derivatives/00000000-0000-0000-0000-00000000b001?role=preview")
     assert response.status_code == 404
 
 
@@ -649,17 +653,141 @@ def test_derivative_upload_returns_controlled_metadata(tmp_path: Path) -> None:
     request = DerivativeUploadRequest(
         libraryID="library-a",
         assetID=UUID("00000000-0000-0000-0000-00000000b010"),
-        role=DerivativeRole.thumbnail,
-        fileObject=FileObjectID(contentHash="abc123", sizeBytes=12, role=FileRole.thumbnail),
-        pixelSize=PixelSize(width=128, height=128),
+        role=DerivativeRole.preview,
+        fileObject=FileObjectID(contentHash="abc123", sizeBytes=12, role=FileRole.preview),
+        pixelSize=PixelSize(width=1200, height=800),
     )
     response = client.post("/derivatives/uploads", json=request.model_dump(mode="json", by_alias=True, exclude_none=True))
     assert response.status_code == 200
     body = response.json()
     assert body["assetID"] == str(request.assetID)
-    assert body["role"] == "thumbnail"
-    assert body["s3Object"]["bucket"] == "test-derivative-bucket"
-    assert body["uploadURL"].startswith("https://presign.test/upload/test-derivative-bucket/")
+    assert body["role"] == "preview"
+    assert body["objectRef"]["bucket"] == "keeps-previews"
+    assert body["objectRef"]["key"].endswith(".heic")
+    assert body["uploadURL"].startswith("http://testserver/derivatives/local-upload/")
+
+
+def test_filesystem_derivative_storage_writes_preview_under_keeps_root(tmp_path: Path) -> None:
+    keeps_root = tmp_path / "myphoto" / "keeps"
+    storage = FilesystemDerivativeStorage(keeps_root=keeps_root, public_base_url="http://testserver")
+    client = TestClient(
+        create_app(
+            database_url=f"sqlite+pysqlite:///{keeps_root / 'db' / 'control_plane.sqlite'}",
+            derivative_storage=storage,
+        )
+    )
+    request = DerivativeUploadRequest(
+        libraryID="library-a",
+        assetID=UUID("00000000-0000-0000-0000-00000000b011"),
+        role=DerivativeRole.preview,
+        fileObject=FileObjectID(contentHash="abc123", sizeBytes=12, role=FileRole.preview),
+        pixelSize=PixelSize(width=1200, height=800),
+    )
+
+    upload = client.post("/derivatives/uploads", json=request.model_dump(mode="json", by_alias=True, exclude_none=True))
+
+    assert upload.status_code == 200
+    body = upload.json()
+    assert body["objectRef"]["bucket"] == "keeps-previews"
+    assert body["objectRef"]["key"].startswith("libraries/library-a/assets/")
+    assert body["objectRef"]["key"].endswith(".heic")
+    assert "/files/" not in body["objectRef"]["key"]
+    put = client.put(body["uploadURL"], content=b"preview-bytes")
+    assert put.status_code == 204
+    expected = keeps_root / "previews" / body["objectRef"]["key"]
+    assert expected.read_bytes() == b"preview-bytes"
+    for dirname in ("db", "ledger", "previews", "cache", "ingest", "exports", "backups", "logs", "tmp"):
+        assert (keeps_root / dirname).is_dir()
+    assert not (keeps_root / "files").exists()
+    assert not (keeps_root / "originals").exists()
+
+
+def test_filesystem_derivative_storage_rejects_original_root_inside_keeps(tmp_path: Path) -> None:
+    keeps_root = tmp_path / "myphoto" / "keeps"
+
+    try:
+        FilesystemDerivativeStorage(
+            keeps_root=keeps_root,
+            public_base_url="http://testserver",
+            original_root=keeps_root / "originals",
+        )
+    except ValueError as exc:
+        assert "original_root must not be inside keeps_root" in str(exc)
+    else:
+        raise AssertionError("expected original root inside keeps root to be rejected")
+
+
+def test_load_filesystem_derivative_storage_from_env_requires_keeps_root_and_keeps_originals_separate(tmp_path: Path, monkeypatch) -> None:
+    keeps_root = tmp_path / "myphoto" / "keeps"
+    original_root = tmp_path / "myphoto" / "library"
+    monkeypatch.setenv("DERIVATIVE_STORAGE_BACKEND", "filesystem")
+    monkeypatch.setenv("KEEPS_ROOT", str(keeps_root))
+    monkeypatch.setenv("CONTROL_PLANE_PUBLIC_BASE_URL", "http://nas.local:2283")
+    monkeypatch.setenv("ORIGINAL_ROOT", str(original_root))
+
+    storage = _load_derivative_storage_from_env()
+
+    assert storage is not None
+    assert storage.keeps_root == keeps_root.resolve(strict=False)
+    assert storage.previews_root == keeps_root.resolve(strict=False) / "previews"
+    assert storage.public_base_url == "http://nas.local:2283"
+
+    monkeypatch.setenv("ORIGINAL_ROOT", str(keeps_root / "originals"))
+    try:
+        _load_derivative_storage_from_env()
+    except ValueError as exc:
+        assert "original_root must not be inside keeps_root" in str(exc)
+    else:
+        raise AssertionError("expected ORIGINAL_ROOT inside KEEPS_ROOT to be rejected")
+
+
+def test_delete_derivative_removes_projection_and_object_ref(tmp_path: Path) -> None:
+    client = TestClient(make_app(tmp_path))
+    storage = client.app.state.derivative_storage
+    asset_id = UUID("00000000-0000-0000-0000-00000000b020")
+    key = "libraries/library-a/assets/a/preview.heic"
+    storage.write_object(storage.bucket, key, b"old-preview")
+    derivative = DerivativeObject(
+        assetID=asset_id,
+        role=DerivativeRole.preview,
+        fileObject=FileObjectID(contentHash="preview-hash", sizeBytes=1200, role=FileRole.preview),
+        objectRef=DerivativeObjectRef(bucket=storage.bucket, key=key, eTag="etag"),
+        pixelSize=PixelSize(width=1200, height=800),
+    )
+    op = OperationLedgerEntry(
+        opID=UUID("00000000-0000-0000-0000-0000000000b2"),
+        libraryID="library-a",
+        deviceID="mac",
+        deviceSequence=1,
+        hybridLogicalTime=HybridLogicalTime(wallTimeMilliseconds=1_700_000_000_800, counter=0, nodeID="mac"),
+        actorID="user",
+        entityType=LedgerEntityType.derivativeObject,
+        entityID=f"{asset_id}:preview:preview-hash",
+        opType=LedgerOperationType.derivativeDeclared,
+        payload=OperationPayload(
+            derivativeDeclared={
+                "assetID": str(asset_id),
+                "derivative": derivative.model_dump(mode="json", by_alias=True, exclude_none=True),
+            }
+        ),
+        createdAt=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    assert client.post("/libraries/library-a/ops", json={"operations": [op.model_dump(mode="json", by_alias=True, exclude_none=True)]}).status_code == 200
+
+    response = client.delete(f"/libraries/library-a/derivatives/{asset_id}?role=preview")
+
+    assert response.status_code == 204
+    assert client.app.state.store.get_derivative_row("library-a", asset_id, DerivativeRole.preview) is None
+    assert not storage.resolve_object_path(storage.bucket, key).exists()
+
+
+def test_delete_missing_derivative_is_idempotent(tmp_path: Path) -> None:
+    client = TestClient(make_app(tmp_path))
+    asset_id = UUID("00000000-0000-0000-0000-00000000b021")
+
+    response = client.delete(f"/libraries/library-a/derivatives/{asset_id}?role=preview")
+
+    assert response.status_code == 204
 
 
 def test_archive_receipt_requires_server_actor(tmp_path: Path) -> None:
@@ -797,39 +925,15 @@ def test_create_app_requires_explicit_database_config_when_env_missing(monkeypat
 
 
 def test_create_app_can_disable_auto_schema_creation(tmp_path: Path) -> None:
-    database_url = f"sqlite+pysqlite:///{tmp_path / 'control_plane.sqlite'}"
+    keeps_root = tmp_path / "myphoto" / "keeps"
+    database_url = f"sqlite+pysqlite:///{keeps_root / 'db' / 'control_plane.sqlite'}"
     app = create_app(
         database_url=database_url,
-        derivative_bucket="test-derivative-bucket",
-        derivative_presigner=FakeDerivativePresigner(),
+        derivative_storage=FilesystemDerivativeStorage(keeps_root=keeps_root, public_base_url="http://testserver"),
         auto_create_schema=False,
     )
     engine = app.state.engine
     assert inspect(engine).get_table_names() == []
-
-
-def test_database_url_can_be_built_from_aurora_connection_secret(monkeypatch) -> None:
-    class FakeSecretsManager:
-        def get_secret_value(self, SecretId: str):
-            assert SecretId == "arn:aws:secretsmanager:secret"
-            return {
-                "SecretString": (
-                    '{"username":"eventstore_admin","password":"p@ss/word",'
-                    '"host":"writer.cluster.local","port":5432,"database":"photo_asset_manager"}'
-                )
-            }
-
-    class FakeBoto3:
-        @staticmethod
-        def client(service_name: str):
-            assert service_name == "secretsmanager"
-            return FakeSecretsManager()
-
-    monkeypatch.setattr("control_plane.app.boto3", FakeBoto3)
-
-    url = _database_url_from_connection_secret("arn:aws:secretsmanager:secret")
-
-    assert url == "postgresql+psycopg://eventstore_admin:p%40ss%2Fword@writer.cluster.local:5432/photo_asset_manager"
 
 
 def test_postgresql_driver_and_ddl_smoke() -> None:

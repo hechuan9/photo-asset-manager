@@ -21,6 +21,7 @@ final class LibraryStore: ObservableObject {
     @Published var derivativeStorageURL: URL?
     @Published var hasselbladRawRootURL: URL?
     @Published var migrationReport: String?
+    @Published var previewRebuildReport: String?
     @Published var blockingTask: BlockingTaskReport?
     @Published var photoImportProgress: PhotoImportProgressReport?
     @Published var backgroundTask: BackgroundTaskReport?
@@ -51,7 +52,7 @@ final class LibraryStore: ObservableObject {
     private var pendingAutomaticSyncReason = "本地变更"
     private var pendingAvailabilityRefresh = false
     private var pendingAvailabilityRefreshForce = false
-    private var pendingThumbnailUploads: [UUID: ScannedDerivativeUploadCandidate] = [:]
+    private var pendingPreviewUploads: [UUID: ScannedDerivativeUploadCandidate] = [:]
     private var folderSelectionID: UUID?
     private var assetSelectionAnchorID: UUID?
     private var startupNASMountSucceeded = false
@@ -637,7 +638,7 @@ final class LibraryStore: ObservableObject {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.message = "选择缩略图迁移目标位置"
+        panel.message = "选择预览图迁移目标位置"
         if panel.runModal() == .OK, let url = panel.url {
             migrateDerivativeStorage(to: url.appendingPathComponent("PhotoAssetManagerDerivatives", isDirectory: true))
         }
@@ -971,6 +972,16 @@ final class LibraryStore: ObservableObject {
         startAvailabilityRefreshInBackground(force: true)
     }
 
+    /// 外部移动文件夹后，批量更新 DB 中匹配前缀的 source/fi 路径，并重建索引（避免 stale 旧路径残留）。
+    /// 例如 oldPrefix="/Volumes/home/Photos" , newPrefix="/Volumes/myphoto/和川专属"
+    func bulkUpdatePathsAfterExternalMove(oldPrefix: String, newPrefix: String) throws {
+        try database.bulkUpdatePathsForMovedFolder(oldPrefix: oldPrefix, newPrefix: newPrefix)
+        sourceDirectories = try database.sourceDirectories()
+        indexedBrowseFolders = try database.browseFolders()
+        refresh()
+        // 通知用户可能需要刷新 NAS 挂载或重新扫描以更新 fi 可用性
+    }
+
     func fillMissingCaptureTimes() {
         guard !isBusy else { return }
         let sources = sourceDirectories.filter(\.isTracked)
@@ -1131,7 +1142,7 @@ final class LibraryStore: ObservableObject {
                     return
                 }
 
-                try database.backfillBrowseGraphFromFileInstances()
+                try database.rebuildBrowseGraph()
                 sourceDirectories = try database.sourceDirectories()
                 indexedBrowseFolders = try database.browseFolders()
 
@@ -1181,7 +1192,7 @@ final class LibraryStore: ObservableObject {
                 }
 
                 interruptedScanPath = try database.latestInterruptedScanPath()
-                try database.backfillBrowseGraphFromFileInstances()
+                try database.rebuildBrowseGraph()
                 sourceDirectories = try database.sourceDirectories()
                 indexedBrowseFolders = try database.browseFolders()
                 if !scanErrors.isEmpty {
@@ -1851,21 +1862,21 @@ final class LibraryStore: ObservableObject {
     }
 
     private func migrateDerivativeStorage(to destinationRoot: URL) {
-        blockingTask = BlockingTaskReport(title: "迁移缩略图", phase: "准备迁移", currentPath: destinationRoot.path)
+        blockingTask = BlockingTaskReport(title: "迁移预览图", phase: "准备迁移", currentPath: destinationRoot.path)
         migrationReport = nil
         Task {
             await Task.yield()
             try? await Task.sleep(nanoseconds: 120_000_000)
             do {
-                try FileManager.default.createDirectory(at: destinationRoot.appendingPathComponent("thumbnails", isDirectory: true), withIntermediateDirectories: true)
-                let thumbnails = try database.thumbnailFileInstances()
-                blockingTask?.totalItems = thumbnails.count
-                blockingTask?.phase = thumbnails.isEmpty ? "没有可迁移缩略图" : "复制并校验"
+                try FileManager.default.createDirectory(at: destinationRoot.appendingPathComponent("previews", isDirectory: true), withIntermediateDirectories: true)
+                let previews = try database.previewFileInstances()
+                blockingTask?.totalItems = previews.count
+                blockingTask?.phase = previews.isEmpty ? "没有可迁移预览图" : "复制并校验"
                 await Task.yield()
                 var copied = 0
                 var skippedMissing = 0
-                for (index, thumbnail) in thumbnails.enumerated() {
-                    let source = URL(fileURLWithPath: thumbnail.path)
+                for (index, preview) in previews.enumerated() {
+                    let source = URL(fileURLWithPath: preview.path)
                     blockingTask?.currentPath = source.path
                     blockingTask?.completedItems = index
                     blockingTask?.skippedItems = skippedMissing
@@ -1878,7 +1889,7 @@ final class LibraryStore: ObservableObject {
                         continue
                     }
                     let destination = destinationRoot
-                        .appendingPathComponent("thumbnails", isDirectory: true)
+                        .appendingPathComponent("previews", isDirectory: true)
                         .appendingPathComponent(source.lastPathComponent)
                     if !FileManager.default.fileExists(atPath: destination.path) {
                         try FileManager.default.copyItem(at: source, to: destination)
@@ -1889,7 +1900,7 @@ final class LibraryStore: ObservableObject {
                         throw FileOperationError.hashMismatch(source: sourceHash, destination: destinationHash)
                     }
                     let size = try Int64(destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
-                    try database.updateFileInstanceLocation(id: thumbnail.id, path: destination.path, hash: destinationHash, sizeBytes: size)
+                    try database.updateFileInstanceLocation(id: preview.id, path: destination.path, hash: destinationHash, sizeBytes: size)
                     copied += 1
                     blockingTask?.completedItems = index + 1
                     blockingTask?.message = "已迁移 \(copied)，跳过 \(skippedMissing)"
@@ -1897,12 +1908,196 @@ final class LibraryStore: ObservableObject {
                 }
                 try database.setDerivativeStoragePath(destinationRoot.path)
                 derivativeStorageURL = destinationRoot
-                migrationReport = "缩略图迁移完成：\(copied) 个已迁移，\(skippedMissing) 个源文件缺失。旧文件未删除。"
+                migrationReport = "预览图迁移完成：\(copied) 个已迁移，\(skippedMissing) 个源文件缺失。旧文件未删除。"
                 blockingTask = nil
                 refresh()
             } catch {
                 blockingTask = nil
                 lastError = error.fullTrace
+            }
+        }
+    }
+
+    @MainActor
+    func rebuildAllPreviews() {
+        guard let derivativeRoot = derivativeStorageURL else {
+            previewRebuildReport = "未设置预览图存储位置，无法重建。"
+            return
+        }
+        guard !isBusy else { return }
+
+        blockingTask = BlockingTaskReport(
+            title: "重建所有预览 (1200px)",
+            phase: "准备中",
+            currentPath: "",
+            totalItems: 0,
+            completedItems: 0,
+            message: "正在收集原片信息..."
+        )
+        previewRebuildReport = nil
+
+        Task {
+            await performRebuildAllPreviews(derivativeRoot: derivativeRoot)
+        }
+    }
+
+    @MainActor
+    func repairPreviewSyncState() {
+        guard !isBusy, !isSyncing else { return }
+
+        let configuration = SyncClientConfiguration.load()
+        syncConfiguration = configuration
+        guard configuration.baseURL != nil else {
+            lastSyncSummary = "未配置自动同步，无法修复预览同步状态"
+            return
+        }
+
+        lastSyncSummary = "预览同步状态修复已排队"
+        syncProgressTask = BackgroundTaskReport(
+            title: "修复预览同步状态",
+            phase: "排队",
+            message: "将检查本地预览与云端声明投影，并补传缺失项。"
+        )
+        pendingAutomaticSync = true
+        pendingAutomaticSyncReason = "修复预览同步状态"
+        queueBackgroundTask(.automaticSync)
+    }
+
+    @MainActor
+    func repairPreviewSyncStateFromLaunchArgument() {
+        let timestamp = DateCoding.encode(Date())
+        try? database.execute(
+            """
+            INSERT INTO app_settings (key, value)
+            VALUES ('preview_sync_repair_launch_requested_at', '\(timestamp)')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
+        repairPreviewSyncState()
+    }
+
+    private func performRebuildAllPreviews(derivativeRoot: URL) async {
+        let db = database
+        let scanner = PhotoScanner()
+        let configuration = SyncClientConfiguration.load()
+        let remoteClient = configuration.baseURL.map {
+            SyncControlPlaneHTTPClient(baseURL: $0, authentication: configuration.requestAuthentication)
+        }
+        do {
+            let originals = try await Task.detached(priority: .utility) {
+                try db.originalFileInstances()
+            }.value
+
+            var byAsset: [UUID: [FileInstance]] = [:]
+            for fi in originals {
+                byAsset[fi.assetID, default: []].append(fi)
+            }
+            let assetIDs = Array(byAsset.keys).sorted(by: { $0.uuidString < $1.uuidString })
+            let total = assetIDs.count
+
+            await MainActor.run {
+                blockingTask?.totalItems = total
+                blockingTask?.phase = "生成 1200px 预览"
+                blockingTask?.message = "共 \(total) 个资产，开始重建..."
+            }
+
+            var uploadCandidates: [ScannedDerivativeUploadCandidate] = []
+            var generated = 0
+            var skipped = 0
+            var errs = 0
+            var remoteDeleted = 0
+            var remoteDeleteErrors = 0
+            var firstRemoteDeleteError: String?
+
+            for (idx, assetID) in assetIDs.enumerated() {
+                let insts = byAsset[assetID] ?? []
+                var chosen: FileInstance?
+                var srcURL: URL?
+                for inst in insts {
+                    let u = URL(fileURLWithPath: inst.path)
+                    if FileManager.default.fileExists(atPath: u.path) {
+                        chosen = inst
+                        srcURL = u
+                        break
+                    }
+                }
+
+                await MainActor.run {
+                    blockingTask?.currentPath = srcURL?.lastPathComponent ?? "资产 \(assetID.uuidString.prefix(8))"
+                    blockingTask?.completedItems = idx
+                }
+
+                guard let chosenInst = chosen, let source = srcURL else {
+                    skipped += 1
+                    continue
+                }
+
+                do {
+                    let origHash = chosenInst.contentHash
+                    if let previewURL = try scanner.generateDisplayPreview(
+                        source: source,
+                        originalContentHash: origHash,
+                        derivativeRoot: derivativeRoot,
+                        forceRegenerate: true
+                    ) {
+                        let pHash = try FileHasher.sha256(url: previewURL)
+                        let sz = Int64(try previewURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+
+                        let removedDerivatives = try await Task.detached(priority: .utility) {
+                            try db.replaceAssetPreview(assetID: assetID, url: previewURL, hash: pHash, sizeBytes: sz)
+                        }.value
+
+                        if let remoteClient {
+                            for removed in removedDerivatives {
+                                do {
+                                    try await remoteClient.deleteDerivative(
+                                        libraryID: configuration.libraryID,
+                                        assetID: removed.assetID,
+                                        role: removed.role
+                                    )
+                                    remoteDeleted += 1
+                                } catch {
+                                    remoteDeleteErrors += 1
+                                    if firstRemoteDeleteError == nil {
+                                        firstRemoteDeleteError = error.fullTrace
+                                    }
+                                }
+                            }
+                        }
+
+                        uploadCandidates.append(ScannedDerivativeUploadCandidate(assetID: assetID, role: .preview, fileURL: previewURL))
+                        generated += 1
+                    }
+                } catch {
+                    errs += 1
+                }
+            }
+
+            await MainActor.run {
+                for cand in uploadCandidates {
+                    pendingPreviewUploads[cand.assetID] = cand
+                }
+                blockingTask?.phase = "完成"
+                blockingTask?.completedItems = total
+                blockingTask?.message = "本地重建完成：\(generated) 个 1200px 预览。跳过 \(skipped)，错误 \(errs)，云端清理 \(remoteDeleted)，云端错误 \(remoteDeleteErrors)。已排队上传。"
+
+                previewRebuildReport = "重建完成：生成了 \(generated) 个 1200px 预览图。DB 已清理旧衍生图投影；云端已清理 \(remoteDeleted) 个旧 derivative 对象，失败 \(remoteDeleteErrors) 个；新预览已排队上传并声明。建议重启应用以刷新内存缓存和 UI。"
+                if let firstRemoteDeleteError {
+                    lastError = firstRemoteDeleteError
+                }
+
+                scheduleAutomaticSync(reason: "预览重建", immediate: true)
+
+                // 稍后关闭 blocking 界面
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    self?.blockingTask = nil
+                }
+            }
+        } catch {
+            await MainActor.run {
+                blockingTask = nil
+                lastError = error.fullTrace
+                previewRebuildReport = "重建失败：\(error.localizedDescription)"
             }
         }
     }
@@ -1959,14 +2154,14 @@ final class LibraryStore: ObservableObject {
 
     private func enqueueDerivativeCandidates(_ candidates: [ScannedDerivativeUploadCandidate]) {
         guard !candidates.isEmpty else { return }
-        for candidate in candidates where candidate.role == .thumbnail {
-            pendingThumbnailUploads[candidate.assetID] = candidate
+        for candidate in candidates where candidate.role == .preview {
+            pendingPreviewUploads[candidate.assetID] = candidate
         }
     }
 
-    private func mergePendingThumbnailUploads(_ candidates: [ScannedDerivativeUploadCandidate]) {
-        for candidate in candidates where candidate.role == .thumbnail {
-            pendingThumbnailUploads[candidate.assetID] = candidate
+    private func mergePendingPreviewUploads(_ candidates: [ScannedDerivativeUploadCandidate]) {
+        for candidate in candidates where candidate.role == .preview {
+            pendingPreviewUploads[candidate.assetID] = candidate
         }
     }
 
@@ -1999,12 +2194,12 @@ final class LibraryStore: ObservableObject {
         guard activeSyncTask == nil else { return }
         pendingAutomaticSync = false
         let reason = pendingAutomaticSyncReason
-        let queuedThumbnails = Array(pendingThumbnailUploads.values)
-        pendingThumbnailUploads.removeAll()
+        let queuedPreviews = Array(pendingPreviewUploads.values)
+        pendingPreviewUploads.removeAll()
 
         activeSyncTask = Task { [weak self] in
             guard let self else { return }
-            await self.performAutomaticSync(reason: reason, queuedThumbnails: queuedThumbnails)
+            await self.performAutomaticSync(reason: reason, queuedPreviews: queuedPreviews)
             await MainActor.run {
                 self.activeSyncTask = nil
                 self.finishBackgroundQueueTask(.automaticSync)
@@ -2017,16 +2212,16 @@ final class LibraryStore: ObservableObject {
 
     private func performAutomaticSync(
         reason: String,
-        queuedThumbnails: [ScannedDerivativeUploadCandidate]
+        queuedPreviews: [ScannedDerivativeUploadCandidate]
     ) async {
         let configuration = SyncClientConfiguration.load()
         syncConfiguration = configuration
 
         guard let baseURL = configuration.baseURL else {
-            mergePendingThumbnailUploads(queuedThumbnails)
+            mergePendingPreviewUploads(queuedPreviews)
             syncProgressTask = nil
             refreshBackgroundQueueItems()
-            lastSyncSummary = queuedThumbnails.isEmpty ? "未配置自动同步" : "未配置自动同步，待上传缩略图已保留"
+            lastSyncSummary = queuedPreviews.isEmpty ? "未配置自动同步" : "未配置自动同步，待上传预览图已保留"
             return
         }
 
@@ -2035,7 +2230,7 @@ final class LibraryStore: ObservableObject {
         syncProgressTask = BackgroundTaskReport(
             title: "自动同步",
             phase: "准备同步",
-            message: "正在统计待补传缩略图和 ledger 队列。"
+            message: "正在统计待补传预览图和 ledger 队列。"
         )
         refreshBackgroundQueueItems()
 
@@ -2047,8 +2242,8 @@ final class LibraryStore: ObservableObject {
         do {
             let outcome = try await Task.detached(priority: .utility) {
                 let didBootstrap = try Self.bootstrapLedgerIfNeeded(database: database, libraryID: libraryID)
-                var allThumbnails = queuedThumbnails
-                allThumbnails.append(contentsOf: try Self.pendingThumbnailSyncCandidates(database: database))
+                var allPreviews = queuedPreviews
+                allPreviews.append(contentsOf: try Self.pendingPreviewSyncCandidates(database: database))
 
                 let client = SyncControlPlaneHTTPClient(
                     baseURL: baseURL,
@@ -2060,8 +2255,8 @@ final class LibraryStore: ObservableObject {
                     actorID: NSUserName(),
                     database: database
                 )
-                let uploadSummary = try await Self.uploadThumbnailCandidates(
-                    allThumbnails,
+                let uploadSummary = try await Self.uploadPreviewCandidates(
+                    allPreviews,
                     libraryID: libraryID,
                     database: database,
                     controlPlane: client,
@@ -2088,16 +2283,16 @@ final class LibraryStore: ObservableObject {
                 try await service.sync()
                 return AutomaticSyncOutcome(
                     didBootstrap: didBootstrap,
-                    uploadedThumbnails: uploadSummary.uploadedCount,
-                    failedThumbnails: uploadSummary.failedCandidates,
+                    uploadedPreviews: uploadSummary.uploadedCount,
+                    failedPreviews: uploadSummary.failedCandidates,
                     pendingLedgerUploads: try database.pendingLedgerUploadCount()
                 )
             }.value
 
-            mergePendingThumbnailUploads(outcome.failedThumbnails)
-            if !outcome.failedThumbnails.isEmpty {
+            mergePendingPreviewUploads(outcome.failedPreviews)
+            if !outcome.failedPreviews.isEmpty {
                 pendingAutomaticSync = true
-                pendingAutomaticSyncReason = "重试缩略图上传"
+                pendingAutomaticSyncReason = "重试预览图上传"
             }
             isSyncing = false
             syncProgressTask = BackgroundTaskReport(
@@ -2112,7 +2307,7 @@ final class LibraryStore: ObservableObject {
                 outcome: outcome
             )
         } catch {
-            mergePendingThumbnailUploads(queuedThumbnails)
+            mergePendingPreviewUploads(queuedPreviews)
             pendingAutomaticSync = true
             pendingAutomaticSyncReason = reason
             isSyncing = false
@@ -2227,25 +2422,25 @@ final class LibraryStore: ObservableObject {
         return true
     }
 
-    nonisolated private static func pendingThumbnailSyncCandidates(database: SQLiteDatabase) throws -> [ScannedDerivativeUploadCandidate] {
-        try database.thumbnailsNeedingDerivativeUpload().map {
+    nonisolated private static func pendingPreviewSyncCandidates(database: SQLiteDatabase) throws -> [ScannedDerivativeUploadCandidate] {
+        try database.previewsNeedingDerivativeUpload().map {
             ScannedDerivativeUploadCandidate(
                 assetID: $0.assetID,
-                role: .thumbnail,
+                role: .preview,
                 fileURL: URL(fileURLWithPath: $0.path)
             )
         }
     }
 
-    nonisolated private static func uploadThumbnailCandidates(
+    nonisolated private static func uploadPreviewCandidates(
         _ candidates: [ScannedDerivativeUploadCandidate],
         libraryID: String,
         database: SQLiteDatabase,
         controlPlane: SyncControlPlaneHTTPClient,
         commandLayer: SyncCommandLayer,
         progressReporter: @escaping @Sendable (AutomaticSyncProgress) -> Void
-    ) async throws -> ThumbnailUploadOutcome {
-        let deduped = deduplicateThumbnailUploadCandidates(candidates)
+    ) async throws -> PreviewUploadOutcome {
+        let deduped = deduplicatePreviewUploadCandidates(candidates)
         let service = DerivativeUploadService(
             libraryID: libraryID,
             commandLayer: commandLayer,
@@ -2259,21 +2454,21 @@ final class LibraryStore: ObservableObject {
         let totalCandidates = sortedCandidates.count
         progressReporter(
             AutomaticSyncProgress(
-                phase: .uploadingThumbnails,
+                phase: .uploadingPreviews,
                 completedItems: 0,
                 totalItems: totalCandidates,
-                message: totalCandidates == 0 ? "没有待补传缩略图" : "准备补传 \(totalCandidates) 张缩略图"
+                message: totalCandidates == 0 ? "没有待补传预览图" : "准备补传 \(totalCandidates) 张预览图"
             )
         )
         for (index, candidate) in sortedCandidates.enumerated() {
-            guard candidate.role == .thumbnail else { continue }
+            guard candidate.role == .preview else { continue }
             guard FileManager.default.fileExists(atPath: candidate.fileURL.path) else {
                 progressReporter(
                     AutomaticSyncProgress(
-                        phase: .uploadingThumbnails,
+                        phase: .uploadingPreviews,
                         completedItems: index + 1,
                         totalItems: totalCandidates,
-                        message: "跳过缺失缩略图 \(index + 1) / \(totalCandidates)"
+                        message: "跳过缺失预览图 \(index + 1) / \(totalCandidates)"
                     )
                 )
                 continue
@@ -2284,18 +2479,18 @@ final class LibraryStore: ObservableObject {
                 let fileObject = FileObjectID(
                     contentHash: try FileHasher.sha256(url: candidate.fileURL),
                     sizeBytes: fileSize,
-                    role: .thumbnail
+                    role: .preview
                 )
                 let existingDerivative = try database.derivatives(assetID: candidate.assetID).first {
-                    $0.role == .thumbnail && $0.fileObject == fileObject
+                    $0.role == .preview && $0.fileObject == fileObject
                 }
                 if existingDerivative != nil {
                     progressReporter(
                         AutomaticSyncProgress(
-                            phase: .uploadingThumbnails,
+                            phase: .uploadingPreviews,
                             completedItems: index + 1,
                             totalItems: totalCandidates,
-                            message: "缩略图已存在 \(index + 1) / \(totalCandidates)"
+                            message: "预览图已存在 \(index + 1) / \(totalCandidates)"
                         )
                     )
                     continue
@@ -2303,24 +2498,24 @@ final class LibraryStore: ObservableObject {
 
                 try await service.uploadDerivative(
                     assetID: candidate.assetID,
-                    role: .thumbnail,
+                    role: .preview,
                     localFile: candidate.fileURL,
                     pixelSize: try pixelSize(for: candidate.fileURL)
                 )
                 uploadedCount += 1
                 progressReporter(
                     AutomaticSyncProgress(
-                        phase: .uploadingThumbnails,
+                        phase: .uploadingPreviews,
                         completedItems: index + 1,
                         totalItems: totalCandidates,
-                        message: "已补传 \(uploadedCount) 张缩略图"
+                        message: "已补传 \(uploadedCount) 张预览图"
                     )
                 )
             } catch {
                 failedCandidates.append(candidate)
                 progressReporter(
                     AutomaticSyncProgress(
-                        phase: .uploadingThumbnails,
+                        phase: .uploadingPreviews,
                         completedItems: index + 1,
                         totalItems: totalCandidates,
                         message: "补传失败 \(failedCandidates.count) / \(totalCandidates)"
@@ -2329,18 +2524,18 @@ final class LibraryStore: ObservableObject {
             }
         }
 
-        return ThumbnailUploadOutcome(
+        return PreviewUploadOutcome(
             uploadedCount: uploadedCount,
             failedCandidates: failedCandidates
         )
     }
 
-    nonisolated static func deduplicateThumbnailUploadCandidates(
+    nonisolated static func deduplicatePreviewUploadCandidates(
         _ candidates: [ScannedDerivativeUploadCandidate]
     ) -> [ScannedDerivativeUploadCandidate] {
         var merged: [UUID: ScannedDerivativeUploadCandidate] = [:]
         merged.reserveCapacity(candidates.count)
-        for candidate in candidates where candidate.role == .thumbnail {
+        for candidate in candidates where candidate.role == .preview {
             // 待补传列表来自内存队列和数据库投影，后者出现时应覆盖前者，避免重复 key 触发断言。
             merged[candidate.assetID] = candidate
         }
@@ -2364,11 +2559,11 @@ final class LibraryStore: ObservableObject {
         if outcome.didBootstrap {
             parts.append("已补齐初始 ledger")
         }
-        if outcome.uploadedThumbnails > 0 {
-            parts.append("上传 \(outcome.uploadedThumbnails) 张缩略图")
+        if outcome.uploadedPreviews > 0 {
+            parts.append("上传 \(outcome.uploadedPreviews) 张预览图")
         }
-        if !outcome.failedThumbnails.isEmpty {
-            parts.append("待重试 \(outcome.failedThumbnails.count) 张缩略图")
+        if !outcome.failedPreviews.isEmpty {
+            parts.append("待重试 \(outcome.failedPreviews.count) 张预览图")
         }
         if outcome.pendingLedgerUploads == 0 {
             parts.append("ledger 已上传")
@@ -2381,10 +2576,10 @@ final class LibraryStore: ObservableObject {
 
     nonisolated private static func syncProgressReport(for progress: AutomaticSyncProgress) -> BackgroundTaskReport {
         switch progress.phase {
-        case .uploadingThumbnails:
+        case .uploadingPreviews:
             return BackgroundTaskReport(
                 title: "自动同步",
-                phase: "补传缩略图",
+                phase: "补传预览图",
                 totalItems: progress.totalItems,
                 completedItems: progress.completedItems,
                 message: progress.message
@@ -2436,18 +2631,18 @@ final class LibraryStore: ObservableObject {
         let existingLedgerCount = try database.ledgerEntries(libraryID: libraryID).count
 
         if let migrationState, migrationState.status == .completed {
-            let pendingThumbnails = try database.thumbnailsNeedingDerivativeUpload().count
+            let pendingPreviews = try database.previewsNeedingDerivativeUpload().count
             return LedgerBackfillOutcome(
                 phase: "同步 ledger 已补齐",
                 message: Self.ledgerBackfillMessage(
                     createdOperationCount: 0,
                     ledgerHighWatermark: migrationState.ledgerHighWatermark,
                     projectionVerified: migrationState.projectionVerified,
-                    pendingThumbnailCount: pendingThumbnails,
+                    pendingPreviewCount: pendingPreviews,
                     alreadyCompleted: true
                 ),
                 syncSummary: Self.ledgerBackfillSummary(
-                    pendingThumbnailCount: pendingThumbnails,
+                    pendingPreviewCount: pendingPreviews,
                     projectionVerified: migrationState.projectionVerified
                 ),
                 ledgerHighWatermark: migrationState.ledgerHighWatermark
@@ -2471,18 +2666,18 @@ final class LibraryStore: ObservableObject {
             database: database,
             progressReporter: progressReporter
         ).bootstrapExistingLibraryToLedger()
-        let pendingThumbnails = try database.thumbnailsNeedingDerivativeUpload().count
+        let pendingPreviews = try database.previewsNeedingDerivativeUpload().count
         return LedgerBackfillOutcome(
             phase: "同步 ledger 补齐完成",
             message: Self.ledgerBackfillMessage(
                 createdOperationCount: result.createdOperationCount,
                 ledgerHighWatermark: result.ledgerHighWatermark,
                 projectionVerified: result.projectionVerified,
-                pendingThumbnailCount: pendingThumbnails,
+                pendingPreviewCount: pendingPreviews,
                 alreadyCompleted: false
             ),
             syncSummary: Self.ledgerBackfillSummary(
-                pendingThumbnailCount: pendingThumbnails,
+                pendingPreviewCount: pendingPreviews,
                 projectionVerified: result.projectionVerified
             ),
             ledgerHighWatermark: result.ledgerHighWatermark
@@ -2493,7 +2688,7 @@ final class LibraryStore: ObservableObject {
         createdOperationCount: Int,
         ledgerHighWatermark: Int,
         projectionVerified: Bool,
-        pendingThumbnailCount: Int,
+        pendingPreviewCount: Int,
         alreadyCompleted: Bool
     ) -> String {
         var parts: [String] = []
@@ -2504,22 +2699,22 @@ final class LibraryStore: ObservableObject {
         }
         parts.append("当前水位 \(ledgerHighWatermark) 条")
         parts.append(projectionVerified ? "projection 校验通过" : "projection 校验未通过")
-        if pendingThumbnailCount > 0 {
-            parts.append("待自动上传 \(pendingThumbnailCount) 张缩略图")
+        if pendingPreviewCount > 0 {
+            parts.append("待自动上传 \(pendingPreviewCount) 张预览图")
         }
         return parts.joined(separator: "，")
     }
 
     nonisolated private static func ledgerBackfillSummary(
-        pendingThumbnailCount: Int,
+        pendingPreviewCount: Int,
         projectionVerified: Bool
     ) -> String {
         var parts = ["已补齐初始 ledger"]
         if projectionVerified {
             parts.append("projection 已校验")
         }
-        if pendingThumbnailCount > 0 {
-            parts.append("待上传 \(pendingThumbnailCount) 张缩略图")
+        if pendingPreviewCount > 0 {
+            parts.append("待上传 \(pendingPreviewCount) 张预览图")
         }
         return parts.joined(separator: " · ")
     }
@@ -2593,18 +2788,18 @@ final class LibraryStore: ObservableObject {
 
 private struct AutomaticSyncOutcome: Sendable {
     var didBootstrap: Bool
-    var uploadedThumbnails: Int
-    var failedThumbnails: [ScannedDerivativeUploadCandidate]
+    var uploadedPreviews: Int
+    var failedPreviews: [ScannedDerivativeUploadCandidate]
     var pendingLedgerUploads: Int
 }
 
-private struct ThumbnailUploadOutcome: Sendable {
+private struct PreviewUploadOutcome: Sendable {
     var uploadedCount: Int
     var failedCandidates: [ScannedDerivativeUploadCandidate]
 }
 
 private enum AutomaticSyncProgressPhase: Sendable {
-    case uploadingThumbnails
+    case uploadingPreviews
     case uploadingLedger
     case pullingRemoteLedger
 }

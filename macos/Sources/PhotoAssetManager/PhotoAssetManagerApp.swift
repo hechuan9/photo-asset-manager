@@ -3,12 +3,19 @@ import SwiftUI
 @main
 struct PhotoAssetManagerApp: App {
     @StateObject private var library = LibraryStore()
+    @State private var didProcessLaunchRepairArgument = false
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(library)
                 .frame(minWidth: 1180, minHeight: 760)
+                .onAppear {
+                    guard !didProcessLaunchRepairArgument else { return }
+                    didProcessLaunchRepairArgument = true
+                    guard ProcessInfo.processInfo.arguments.contains("--repair-preview-sync-state") else { return }
+                    library.repairPreviewSyncStateFromLaunchArgument()
+                }
         }
         .commands {
             ImportCommands(library: library)
@@ -152,6 +159,18 @@ struct ToolCommands: Commands {
                 library.fillMissingCaptureTimes()
             }
             .disabled(library.isBusy)
+
+            Divider()
+
+            Button("重建全部预览 (1200px，一次性)") {
+                library.rebuildAllPreviews()
+            }
+            .disabled(library.isBusy || library.derivativeStorageURL == nil)
+
+            Button("修复预览同步状态") {
+                library.repairPreviewSyncState()
+            }
+            .disabled(library.isBusy || library.isSyncing || !library.hasRemoteSyncConfiguration)
         }
     }
 }

@@ -1,11 +1,26 @@
-import CryptoKit
 import Foundation
 
-enum SyncControlPlaneHTTPError: Error, Equatable, Sendable {
+enum SyncControlPlaneHTTPError: Error, Equatable, LocalizedError, Sendable {
     case invalidBaseURL
     case invalidHTTPResponse
-    case unexpectedStatusCode(Int)
+    case unexpectedStatusCode(Int, String?)
     case conflict(SyncOpsUploadResponse)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidBaseURL:
+            return "control-plane base URL 无效。"
+        case .invalidHTTPResponse:
+            return "control-plane 返回了非 HTTP 响应。"
+        case let .unexpectedStatusCode(statusCode, responseBody):
+            if let responseBody, !responseBody.isEmpty {
+                return "control-plane HTTP \(statusCode)：\(responseBody)"
+            }
+            return "control-plane HTTP \(statusCode)：响应体为空。"
+        case let .conflict(response):
+            return "control-plane 同步冲突：已接受 \(response.accepted.count) 条，冲突 \(response.conflicts?.count ?? 0) 条。"
+        }
+    }
 }
 
 struct SyncClientConfiguration: Equatable, Sendable {
@@ -14,39 +29,15 @@ struct SyncClientConfiguration: Equatable, Sendable {
     var peerID: String
     var authModeRawValue: String
     var accessCredential: String
-    var awsRegion: String
-    var awsAccessKeyID: String
-    var awsSecretAccessKey: String
-    var awsSessionToken: String
 
     static func load(defaults: UserDefaults = .standard) -> SyncClientConfiguration {
-#if os(iOS)
-        // 当前阶段固定写死 macOS 端的配置，绕过 UserDefaults / 设置界面
-        // TODO: 后续恢复为从 defaults 读取，或提供 UI 配置
-        return SyncClientConfiguration(
-            baseURLString: "https://zewnw6dncl.execute-api.us-east-1.amazonaws.com",
-            libraryID: "local-library",
-            peerID: "control-plane",
-            authModeRawValue: "aws_iam",
-            accessCredential: "",
-            awsRegion: "us-east-1",
-            awsAccessKeyID: "",  // TODO: 临时绕过 iOS 配置，生产应通过安全方式注入或从 Keychain/UserDefaults 读取
-            awsSecretAccessKey: "",  // 切勿提交真实密钥！当前阶段使用空值，依赖其他 auth 路径或本地测试配置
-            awsSessionToken: ""
-        )
-#else
         SyncClientConfiguration(
             baseURLString: defaults.string(forKey: SyncPreferenceKey.baseURL) ?? "",
             libraryID: defaults.string(forKey: SyncPreferenceKey.libraryID) ?? "local-library",
             peerID: defaults.string(forKey: SyncPreferenceKey.peerID) ?? "control-plane",
             authModeRawValue: defaults.string(forKey: SyncPreferenceKey.authMode) ?? SyncAuthenticationMode.bearer.rawValue,
-            accessCredential: defaults.string(forKey: SyncPreferenceKey.accessCredential) ?? "",
-            awsRegion: defaults.string(forKey: SyncPreferenceKey.awsRegion) ?? "",
-            awsAccessKeyID: defaults.string(forKey: SyncPreferenceKey.awsAccessKeyID) ?? "",
-            awsSecretAccessKey: defaults.string(forKey: SyncPreferenceKey.awsSecretAccessKey) ?? "",
-            awsSessionToken: defaults.string(forKey: SyncPreferenceKey.awsSessionToken) ?? ""
+            accessCredential: defaults.string(forKey: SyncPreferenceKey.accessCredential) ?? ""
         )
-#endif
     }
 
     var trimmedBaseURLString: String {
@@ -67,46 +58,10 @@ struct SyncClientConfiguration: Equatable, Sendable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    var awsRegionValue: String? {
-        let trimmed = awsRegion.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    var awsAccessKeyIDValue: String? {
-        let trimmed = awsAccessKeyID.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    var awsSecretAccessKeyValue: String? {
-        let trimmed = awsSecretAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    var awsSessionTokenValue: String? {
-        let trimmed = awsSessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
     var requestAuthentication: SyncRequestAuthentication? {
         switch authMode {
         case .bearer:
             return accessCredentialValue.map(SyncRequestAuthentication.bearer)
-        case .awsIAM:
-            guard
-                let region = awsRegionValue,
-                let accessKeyID = awsAccessKeyIDValue,
-                let secretAccessKey = awsSecretAccessKeyValue
-            else {
-                return nil
-            }
-            return .awsIAM(
-                SyncAWSIAMCredentials(
-                    region: region,
-                    accessKeyID: accessKeyID,
-                    secretAccessKey: secretAccessKey,
-                    sessionToken: awsSessionTokenValue
-                )
-            )
         }
     }
 
@@ -114,8 +69,6 @@ struct SyncClientConfiguration: Equatable, Sendable {
         switch authMode {
         case .bearer:
             return true
-        case .awsIAM:
-            return requestAuthentication != nil
         }
     }
 
@@ -126,7 +79,6 @@ struct SyncClientConfiguration: Equatable, Sendable {
 
 enum SyncAuthenticationMode: String, CaseIterable, Equatable, Identifiable, Sendable {
     case bearer = "bearer"
-    case awsIAM = "aws_iam"
 
     var id: String { rawValue }
 
@@ -134,22 +86,12 @@ enum SyncAuthenticationMode: String, CaseIterable, Equatable, Identifiable, Send
         switch self {
         case .bearer:
             return "Bearer"
-        case .awsIAM:
-            return "AWS IAM"
         }
     }
 }
 
-struct SyncAWSIAMCredentials: Equatable, Sendable {
-    var region: String
-    var accessKeyID: String
-    var secretAccessKey: String
-    var sessionToken: String?
-}
-
 enum SyncRequestAuthentication: Equatable, Sendable {
     case bearer(String)
-    case awsIAM(SyncAWSIAMCredentials)
 }
 
 enum SyncPreferenceKey {
@@ -158,10 +100,6 @@ enum SyncPreferenceKey {
     static let peerID = "ios.sync.peer_id"
     static let authMode = "ios.sync.auth_mode"
     static let accessCredential = "ios.sync.access_credential"
-    static let awsRegion = "ios.sync.aws_region"
-    static let awsAccessKeyID = "ios.sync.aws_access_key_id"
-    static let awsSecretAccessKey = "ios.sync.aws_secret_access_key"
-    static let awsSessionToken = "ios.sync.aws_session_token"
 }
 
 final class SyncControlPlaneHTTPClient: SyncControlPlaneClient {
@@ -197,7 +135,7 @@ final class SyncControlPlaneHTTPClient: SyncControlPlaneClient {
             throw SyncControlPlaneHTTPError.conflict(conflict.detail)
         }
         guard 200..<300 ~= httpResponse.statusCode else {
-            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode)
+            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode, Self.responseBodySnippet(data))
         }
         return try Self.makeDecoder().decode(SyncOpsUploadResponse.self, from: data)
     }
@@ -210,7 +148,7 @@ final class SyncControlPlaneHTTPClient: SyncControlPlaneClient {
             throw SyncControlPlaneHTTPError.invalidHTTPResponse
         }
         guard 200..<300 ~= httpResponse.statusCode else {
-            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode)
+            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode, Self.responseBodySnippet(data))
         }
         return try Self.makeDecoder().decode(SyncOpsFetchResponse.self, from: data)
     }
@@ -233,7 +171,7 @@ final class SyncControlPlaneHTTPClient: SyncControlPlaneClient {
             throw SyncControlPlaneHTTPError.invalidHTTPResponse
         }
         guard 200..<300 ~= httpResponse.statusCode else {
-            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode)
+            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode, Self.responseBodySnippet(data))
         }
         return try Self.makeDecoder().decode(DerivativeUploadResponse.self, from: data)
     }
@@ -251,9 +189,23 @@ final class SyncControlPlaneHTTPClient: SyncControlPlaneClient {
             throw SyncControlPlaneHTTPError.invalidHTTPResponse
         }
         guard 200..<300 ~= httpResponse.statusCode else {
-            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode)
+            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode, Self.responseBodySnippet(data))
         }
         return try Self.makeDecoder().decode(DerivativeMetadataResponse.self, from: data)
+    }
+
+    func deleteDerivative(libraryID: String, assetID: UUID, role: DerivativeRole) async throws {
+        let url = try makeURL(
+            pathSegments: ["libraries", libraryID, "derivatives", assetID.uuidString],
+            queryItems: [URLQueryItem(name: "role", value: role.rawValue)]
+        )
+        let (data, response) = try await send(method: "DELETE", url: url, body: nil)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SyncControlPlaneHTTPError.invalidHTTPResponse
+        }
+        guard 200..<300 ~= httpResponse.statusCode else {
+            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode, Self.responseBodySnippet(data))
+        }
     }
 
     private func sendJSON<Body: Encodable>(method: String, url: URL, body: Body) async throws {
@@ -263,7 +215,7 @@ final class SyncControlPlaneHTTPClient: SyncControlPlaneClient {
             throw SyncControlPlaneHTTPError.invalidHTTPResponse
         }
         guard 200..<300 ~= httpResponse.statusCode else {
-            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode)
+            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode, Self.responseBodySnippet(data))
         }
         _ = data
     }
@@ -286,12 +238,6 @@ final class SyncControlPlaneHTTPClient: SyncControlPlaneClient {
         switch authentication {
         case .bearer(let accessCredential):
             request.setValue("\(Self.accessCredentialScheme) \(accessCredential)", forHTTPHeaderField: Self.accessCredentialHeaderName)
-        case .awsIAM(let credentials):
-            try Self.signAWSIAMRequest(
-                &request,
-                credentials: credentials,
-                timestamp: dateProvider()
-            )
         case .none:
             break
         }
@@ -334,16 +280,24 @@ final class SyncControlPlaneHTTPClient: SyncControlPlaneClient {
         return decoder
     }
 
+    private static func responseBodySnippet(_ data: Data) -> String? {
+        guard !data.isEmpty else { return nil }
+        let text = String(data: data, encoding: .utf8) ?? data.base64EncodedString()
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+        if normalized.count <= 500 {
+            return normalized
+        }
+        return String(normalized.prefix(500)) + "..."
+    }
+
     private static let accessCredentialHeaderName = "Author" + "ization"
     private static let accessCredentialScheme = "Bear" + "er"
     private static let reservedHeaderNames: Set<String> = [
         accessCredentialHeaderName.lowercased(),
         "accept",
         "content-type",
-        "host",
-        "x-amz-content-sha256",
-        "x-amz-date",
-        "x-amz-security-token"
+        "host"
     ]
 
     private static func percentEncodePathSegment(_ segment: String) -> String {
@@ -356,156 +310,6 @@ final class SyncControlPlaneHTTPClient: SyncControlPlaneClient {
         return component.addingPercentEncoding(withAllowedCharacters: allowed) ?? component
     }
 
-    private static func signAWSIAMRequest(
-        _ request: inout URLRequest,
-        credentials: SyncAWSIAMCredentials,
-        timestamp: Date
-    ) throws {
-        guard let url = request.url else {
-            throw SyncControlPlaneHTTPError.invalidBaseURL
-        }
-        guard let host = url.host?.lowercased(), !host.isEmpty else {
-            throw SyncControlPlaneHTTPError.invalidBaseURL
-        }
-
-        let body = request.httpBody ?? Data()
-        let payloadHash = sha256Hex(body)
-        let amzDate = awsTimestampFormatter.string(from: timestamp)
-        let dateStamp = awsDateFormatter.string(from: timestamp)
-        request.setValue(host, forHTTPHeaderField: "Host")
-        request.setValue(payloadHash, forHTTPHeaderField: "X-Amz-Content-Sha256")
-        request.setValue(amzDate, forHTTPHeaderField: "X-Amz-Date")
-        if let sessionToken = credentials.sessionToken, !sessionToken.isEmpty {
-            request.setValue(sessionToken, forHTTPHeaderField: "X-Amz-Security-Token")
-        } else {
-            request.setValue(nil, forHTTPHeaderField: "X-Amz-Security-Token")
-        }
-
-        let canonicalHeaders = canonicalAWSHeaders(from: request)
-        let signedHeaders = canonicalHeaders.map(\.name).joined(separator: ";")
-        let canonicalRequest = [
-            request.httpMethod ?? "GET",
-            canonicalAWSPath(from: url),
-            canonicalAWSQuery(from: url),
-            canonicalHeaders.map { "\($0.name):\($0.value)\n" }.joined(),
-            signedHeaders,
-            payloadHash
-        ].joined(separator: "\n")
-
-        let credentialScope = "\(dateStamp)/\(credentials.region)/execute-api/aws4_request"
-        let stringToSign = [
-            "AWS4-HMAC-SHA256",
-            amzDate,
-            credentialScope,
-            sha256Hex(Data(canonicalRequest.utf8))
-        ].joined(separator: "\n")
-        let signingKey = awsSigningKey(secretAccessKey: credentials.secretAccessKey, dateStamp: dateStamp, region: credentials.region)
-        let signature = hmacSHA256Hex(key: signingKey, message: stringToSign)
-        let authorization = "AWS4-HMAC-SHA256 Credential=\(credentials.accessKeyID)/\(credentialScope), SignedHeaders=\(signedHeaders), Signature=\(signature)"
-        request.setValue(authorization, forHTTPHeaderField: accessCredentialHeaderName)
-    }
-
-    private static func canonicalAWSPath(from url: URL) -> String {
-        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        let path = (components?.percentEncodedPath.isEmpty == false ? components?.percentEncodedPath : nil) ?? "/"
-        return path.split(separator: "/", omittingEmptySubsequences: false)
-            .map { percentEncodeCanonicalURIComponent(String($0)) }
-            .joined(separator: "/")
-    }
-
-    private static func canonicalAWSQuery(from url: URL) -> String {
-        guard let percentEncodedQuery = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedQuery,
-              !percentEncodedQuery.isEmpty else {
-            return ""
-        }
-
-        return percentEncodedQuery
-            .split(separator: "&")
-            .map(String.init)
-            .map { component -> (String, String) in
-                let parts = component.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
-                let name = percentEncodeCanonicalQueryComponent(parts[0])
-                let value = parts.count == 2 ? percentEncodeCanonicalQueryComponent(parts[1]) : ""
-                return (name, value)
-            }
-            .sorted {
-                if $0.0 == $1.0 {
-                    return $0.1 < $1.1
-                }
-                return $0.0 < $1.0
-            }
-            .map { "\($0.0)=\($0.1)" }
-            .joined(separator: "&")
-    }
-
-    private static func canonicalAWSHeaders(from request: URLRequest) -> [(name: String, value: String)] {
-        (request.allHTTPHeaderFields ?? [:])
-            .map { header, value in
-                (
-                    name: header.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-                    value: normalizeAWSHeaderValue(value)
-                )
-            }
-            .sorted { $0.name < $1.name }
-    }
-
-    private static func normalizeAWSHeaderValue(_ value: String) -> String {
-        value
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
-    }
-
-    private static func percentEncodeCanonicalURIComponent(_ component: String) -> String {
-        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-        return component.addingPercentEncoding(withAllowedCharacters: allowed) ?? component
-    }
-
-    private static func percentEncodeCanonicalQueryComponent(_ component: String) -> String {
-        let decoded = component.removingPercentEncoding ?? component
-        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-        return decoded.addingPercentEncoding(withAllowedCharacters: allowed) ?? component
-    }
-
-    private static func awsSigningKey(secretAccessKey: String, dateStamp: String, region: String) -> SymmetricKey {
-        let secret = "AWS4\(secretAccessKey)"
-        let dateKey = hmacSHA256(keyData: Data(secret.utf8), message: dateStamp)
-        let regionKey = hmacSHA256(keyData: dateKey, message: region)
-        let serviceKey = hmacSHA256(keyData: regionKey, message: "execute-api")
-        let signingKeyData = hmacSHA256(keyData: serviceKey, message: "aws4_request")
-        return SymmetricKey(data: signingKeyData)
-    }
-
-    private static func hmacSHA256(keyData: Data, message: String) -> Data {
-        let key = SymmetricKey(data: keyData)
-        return Data(HMAC<SHA256>.authenticationCode(for: Data(message.utf8), using: key))
-    }
-
-    private static func hmacSHA256Hex(key: SymmetricKey, message: String) -> String {
-        let signature = HMAC<SHA256>.authenticationCode(for: Data(message.utf8), using: key)
-        return Data(signature).map { String(format: "%02x", $0) }.joined()
-    }
-
-    private static func sha256Hex(_ data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    }
-
-    private static let awsTimestampFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
-        return formatter
-    }()
-
-    private static let awsDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyyMMdd"
-        return formatter
-    }()
 }
 
 struct SyncService: Sendable {

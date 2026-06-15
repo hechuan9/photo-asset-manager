@@ -5,7 +5,6 @@ import Testing
 struct SyncLedgerTests {
     private static let accessCredentialHeaderName = "Author" + "ization"
     private static let accessCredentialScheme = "Bear" + "er"
-    private static let sigV4Scheme = "AWS4-HMAC-SHA256"
 
     @Test func scalarMetadataUsesFieldLevelRegistersForDeterministicOfflineMerge() throws {
         let assetID = UUID()
@@ -437,7 +436,7 @@ struct SyncLedgerTests {
         }
     }
 
-    @Test func thumbnailsNeedingDerivativeUploadOnlyReturnsMissingOrStaleThumbnailDerivatives() throws {
+    @Test func previewsNeedingDerivativeUploadOnlyReturnsMissingOrStalePreviewDerivatives() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
@@ -459,8 +458,8 @@ struct SyncLedgerTests {
             )
         }
 
-        let thumbnailAPath = root.appendingPathComponent("thumb-a.jpg").path
-        let thumbnailBPath = root.appendingPathComponent("thumb-b.jpg").path
+        let previewAPath = root.appendingPathComponent("preview-a.heic").path
+        let previewBPath = root.appendingPathComponent("preview-b.heic").path
         try database.execute(
             """
             INSERT INTO file_instances (
@@ -468,12 +467,12 @@ struct SyncLedgerTests {
                 sync_status, size_bytes, content_hash, last_seen_at, availability
             ) VALUES
             (
-                '00000000-0000-0000-0000-00000000bd11', '\(assetNeedingUpload.uuidString)', '\(thumbnailAPath)',
-                'mac', 'local', 'thumbnail', 'cache', 'cache_only', 111, 'thumb-hash-a', '\(createdAt)', 'online'
+                '00000000-0000-0000-0000-00000000bd11', '\(assetNeedingUpload.uuidString)', '\(previewAPath)',
+                'mac', 'local', 'preview', 'cache', 'cache_only', 111, 'preview-hash-a', '\(createdAt)', 'online'
             ),
             (
-                '00000000-0000-0000-0000-00000000bd12', '\(assetAlreadyUploaded.uuidString)', '\(thumbnailBPath)',
-                'mac', 'local', 'thumbnail', 'cache', 'cache_only', 222, 'thumb-hash-b', '\(createdAt)', 'online'
+                '00000000-0000-0000-0000-00000000bd12', '\(assetAlreadyUploaded.uuidString)', '\(previewBPath)',
+                'mac', 'local', 'preview', 'cache', 'cache_only', 222, 'preview-hash-b', '\(createdAt)', 'online'
             )
             """
         )
@@ -482,34 +481,99 @@ struct SyncLedgerTests {
             INSERT INTO file_objects (
                 id, content_hash, size_bytes, file_role, created_at
             ) VALUES (
-                'thumb-hash-b:222:thumbnail', 'thumb-hash-b', 222, 'thumbnail', '\(createdAt)'
+                'preview-hash-b:222:preview', 'preview-hash-b', 222, 'preview', '\(createdAt)'
             )
             """
         )
         try database.execute(
             """
             INSERT INTO derivative_objects (
-                asset_id, role, file_object_id, s3_bucket, s3_key, s3_etag, pixel_width, pixel_height, updated_at
+                asset_id, role, file_object_id, object_bucket, object_key, object_etag, pixel_width, pixel_height, updated_at
             ) VALUES (
-                '\(assetAlreadyUploaded.uuidString)', 'thumbnail', 'thumb-hash-b:222:thumbnail',
+                '\(assetAlreadyUploaded.uuidString)', 'preview', 'preview-hash-b:222:preview',
                 'bucket', 'key', 'etag', 400, 300, '\(createdAt)'
             )
             """
         )
 
-        let candidates = try database.thumbnailsNeedingDerivativeUpload()
+        let candidates = try database.previewsNeedingDerivativeUpload()
 
         #expect(candidates.map(\.assetID) == [assetNeedingUpload])
     }
 
-    @Test func thumbnailUploadCandidateDeduplicationPrefersLaterDatabaseCandidateWithoutCrashing() {
+    @Test func replacingWithSinglePreviewClearsLegacyDerivativeRowsAndReturnsCloudObjectsForDeletion() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
+        let assetID = UUID(uuidString: "00000000-0000-0000-0000-00000000bd04")!
+        let createdAt = DateCoding.encode(Date(timeIntervalSince1970: 1_700_006_200))
+
+        try insertAsset(id: assetID, database: database)
+        try database.execute(
+            """
+            INSERT INTO file_instances (
+                id, asset_id, path, device_id, storage_kind, file_role, authority_role,
+                sync_status, size_bytes, content_hash, last_seen_at, availability
+            ) VALUES
+            (
+                '00000000-0000-0000-0000-00000000bd41', '\(assetID.uuidString)', '\(root.appendingPathComponent("old-thumb.jpg").path)',
+                'mac', 'local', 'thumbnail', 'cache', 'cache_only', 12, 'old-thumb-hash', '\(createdAt)', 'online'
+            ),
+            (
+                '00000000-0000-0000-0000-00000000bd42', '\(assetID.uuidString)', '\(root.appendingPathComponent("old-preview.jpg").path)',
+                'mac', 'local', 'preview', 'cache', 'cache_only', 120, 'old-preview-hash', '\(createdAt)', 'online'
+            )
+            """
+        )
+        try database.execute(
+            """
+            INSERT INTO file_objects (id, content_hash, size_bytes, file_role, created_at) VALUES
+            ('thumbnail:12:old-thumb-hash', 'old-thumb-hash', 12, 'thumbnail', '\(createdAt)'),
+            ('preview:120:old-preview-hash', 'old-preview-hash', 120, 'preview', '\(createdAt)')
+            """
+        )
+        try database.execute(
+            """
+            INSERT INTO derivative_objects (
+                asset_id, role, file_object_id, object_bucket, object_key, object_etag, pixel_width, pixel_height, updated_at
+            ) VALUES
+            (
+                '\(assetID.uuidString)', 'thumbnail', 'thumbnail:12:old-thumb-hash',
+                'bucket', 'legacy/thumb.jpg', 'etag-thumb', 320, 240, '\(createdAt)'
+            ),
+            (
+                '\(assetID.uuidString)', 'preview', 'preview:120:old-preview-hash',
+                'bucket', 'legacy/preview.jpg', 'etag-preview', 2048, 1365, '\(createdAt)'
+            )
+            """
+        )
+        let newPreview = root.appendingPathComponent("new-preview.heic")
+        try Data("new-preview".utf8).write(to: newPreview)
+
+        let removed = try database.replaceAssetPreview(
+            assetID: assetID,
+            url: newPreview,
+            hash: "new-preview-hash",
+            sizeBytes: 11
+        )
+        let fileInstances = try database.fileInstances(assetID: assetID)
+        let roles = fileInstances.map(\.fileRole)
+        let derivatives = try database.derivatives(assetID: assetID)
+
+        #expect(roles == [.preview])
+        #expect(derivatives.isEmpty)
+        #expect(removed.map(\.role).sorted { $0.rawValue < $1.rawValue } == [DerivativeRole.preview, DerivativeRole.thumbnail])
+        #expect(removed.map(\.objectRef.key).sorted() == ["legacy/preview.jpg", "legacy/thumb.jpg"])
+    }
+
+    @Test func previewUploadCandidateDeduplicationPrefersLaterDatabaseCandidateWithoutCrashing() {
         let assetID = UUID(uuidString: "00000000-0000-0000-0000-00000000bd03")!
         let staleURL = URL(fileURLWithPath: "/tmp/stale-thumb.jpg")
         let databaseURL = URL(fileURLWithPath: "/tmp/database-thumb.jpg")
 
-        let deduped = LibraryStore.deduplicateThumbnailUploadCandidates([
-            ScannedDerivativeUploadCandidate(assetID: assetID, role: .thumbnail, fileURL: staleURL),
-            ScannedDerivativeUploadCandidate(assetID: assetID, role: .thumbnail, fileURL: databaseURL)
+        let deduped = LibraryStore.deduplicatePreviewUploadCandidates([
+            ScannedDerivativeUploadCandidate(assetID: assetID, role: .preview, fileURL: staleURL),
+            ScannedDerivativeUploadCandidate(assetID: assetID, role: .preview, fileURL: databaseURL)
         ])
 
         #expect(deduped.count == 1)
@@ -517,7 +581,7 @@ struct SyncLedgerTests {
         #expect(deduped.first?.fileURL == databaseURL)
     }
 
-    @Test func commandLayerDeclaresS3ThumbnailAndPreviewDerivativesWithoutStoringBytesInLedger() throws {
+    @Test func commandLayerDeclaresPreviewDerivativesWithoutStoringBytesInLedgerAndRejectsNewThumbnails() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
@@ -530,7 +594,7 @@ struct SyncLedgerTests {
         )
         let assetID = UUID(uuidString: "00000000-0000-0000-0000-00000000bc01")!
         let thumbnailObject = FileObjectID(contentHash: "thumb-hash", sizeBytes: 320, role: .thumbnail)
-        let previewObject = FileObjectID(contentHash: "preview-hash", sizeBytes: 2048, role: .preview)
+        let previewObject = FileObjectID(contentHash: "preview-hash", sizeBytes: 1200, role: .preview)
         let createdAt = DateCoding.encode(Date(timeIntervalSince1970: 1_700_004_900))
         try database.execute(
             """
@@ -544,32 +608,33 @@ struct SyncLedgerTests {
             """
         )
 
-        try commandLayer.declareDerivative(
-            assetID: assetID,
-            role: .thumbnail,
-            fileObject: thumbnailObject,
-            s3Object: S3ObjectRef(bucket: "photo-derivatives", key: "libraries/library/assets/\(assetID.uuidString)/thumbnail/thumb-hash.jpg", eTag: "etag-thumb"),
-            pixelSize: PixelSize(width: 320, height: 240)
-        )
+        #expect(throws: SyncCommandError.self) {
+            try commandLayer.declareDerivative(
+                assetID: assetID,
+                role: .thumbnail,
+                fileObject: thumbnailObject,
+                objectRef: DerivativeObjectRef(bucket: "photo-derivatives", key: "libraries/library/assets/\(assetID.uuidString)/thumbnail/thumb-hash.jpg", eTag: "etag-thumb"),
+                pixelSize: PixelSize(width: 320, height: 240)
+            )
+        }
         try commandLayer.declareDerivative(
             assetID: assetID,
             role: .preview,
             fileObject: previewObject,
-            s3Object: S3ObjectRef(bucket: "photo-derivatives", key: "libraries/library/assets/\(assetID.uuidString)/preview/preview-hash.jpg", eTag: "etag-preview"),
-            pixelSize: PixelSize(width: 2048, height: 1365)
+            objectRef: DerivativeObjectRef(bucket: "photo-derivatives", key: "libraries/library/assets/\(assetID.uuidString)/preview/preview-hash.heic", eTag: "etag-preview"),
+            pixelSize: PixelSize(width: 1200, height: 800)
         )
 
         let entries = try database.ledgerEntries(libraryID: "library")
         let projection = try SyncLedgerProjector.project(entries)
         let derivatives = try database.derivatives(assetID: assetID)
 
-        #expect(entries.map(\.opType) == [.derivativeDeclared, .derivativeDeclared])
+        #expect(entries.map(\.opType) == [.derivativeDeclared])
         #expect(entries.allSatisfy { $0.entityType == .derivativeObject })
         #expect(entries.allSatisfy { !$0.entityID.contains("/Users/") })
-        #expect(projection.derivatives[assetID]?[.thumbnail]?.fileObject == thumbnailObject)
-        #expect(projection.derivatives[assetID]?[.preview]?.pixelSize.width == 2048)
-        #expect(derivatives.map(\.role).sorted { $0.rawValue < $1.rawValue } == [.preview, .thumbnail])
-        #expect(try database.pendingLedgerUploadCount() == 2)
+        #expect(projection.derivatives[assetID]?[.preview]?.pixelSize.width == 1200)
+        #expect(derivatives.map(\.role) == [.preview])
+        #expect(try database.pendingLedgerUploadCount() == 1)
     }
 
     @Test func controlPlaneSupportsDerivativeUploadAndDownloadRoutes() async throws {
@@ -582,7 +647,7 @@ struct SyncLedgerTests {
             pixelSize: PixelSize(width: 2048, height: 1365)
         )
         let uploadResponse = DerivativeUploadResponse(
-            s3Object: S3ObjectRef(bucket: "photo-derivatives", key: "libraries/library/assets/\(assetID.uuidString)/preview/preview-hash.jpg", eTag: nil),
+            objectRef: DerivativeObjectRef(bucket: "photo-derivatives", key: "libraries/library/assets/\(assetID.uuidString)/preview/preview-hash.heic", eTag: nil),
             uploadURL: URL(string: "https://upload.example.com/preview")!
         )
         let metadata = DerivativeMetadataResponse(
@@ -590,7 +655,7 @@ struct SyncLedgerTests {
                 assetID: assetID,
                 role: .preview,
                 fileObject: uploadRequest.fileObject,
-                s3Object: uploadResponse.s3Object,
+                objectRef: uploadResponse.objectRef,
                 pixelSize: uploadRequest.pixelSize
             ),
             downloadURL: URL(string: "https://download.example.com/preview")!
@@ -613,6 +678,10 @@ struct SyncLedgerTests {
                 #expect(queryItems?.first(where: { $0.name == "role" })?.value == "preview")
                 #expect(queryItems?.first(where: { $0.name == "libraryID" })?.value == "library")
                 return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, try encoder.encode(metadata))
+            case ("DELETE", "/libraries/library/derivatives/\(assetID.uuidString)"):
+                let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
+                #expect(queryItems?.first(where: { $0.name == "role" })?.value == "preview")
+                return (HTTPURLResponse(url: url, statusCode: 204, httpVersion: nil, headerFields: nil)!, Data())
             default:
                 throw NSError(domain: "PhotoAssetManagerTests", code: 42, userInfo: [NSLocalizedDescriptionKey: "unexpected derivative request"])
             }
@@ -626,10 +695,11 @@ struct SyncLedgerTests {
 
         let signedUpload = try await client.createDerivativeUpload(uploadRequest)
         let fetchedMetadata = try await client.fetchDerivativeMetadata(libraryID: "library", assetID: assetID, role: .preview)
+        try await client.deleteDerivative(libraryID: "library", assetID: assetID, role: .preview)
 
         #expect(signedUpload == uploadResponse)
         #expect(fetchedMetadata == metadata)
-        #expect(captured.map(\.httpMethod) == ["POST", "GET"])
+        #expect(captured.map(\.httpMethod) == ["POST", "GET", "DELETE"])
     }
 
     @Test func derivativeCacheMissDownloadsOnlyIntoCacheRoot() async throws {
@@ -640,17 +710,17 @@ struct SyncLedgerTests {
         try FileManager.default.createDirectory(at: original.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("original".utf8).write(to: original)
 
-        let ref = S3ObjectRef(bucket: "photo-derivatives", key: "libraries/library/assets/a/thumbnail/thumb.jpg", eTag: "etag")
-        let fetcher = StubDerivativeDataFetcher(data: Data("thumbnail".utf8))
+        let ref = DerivativeObjectRef(bucket: "photo-derivatives", key: "libraries/library/assets/a/preview/preview.heic", eTag: "etag")
+        let fetcher = StubDerivativeDataFetcher(data: Data("preview".utf8))
         let store = DerivativeCacheStore(cacheRoot: cacheRoot, fetcher: fetcher)
 
         let cached = try await store.cacheDerivative(
             assetID: UUID(uuidString: "00000000-0000-0000-0000-00000000be01")!,
-            role: .thumbnail,
-            s3Object: ref
+            role: .preview,
+            objectRef: ref
         )
 
-        #expect(try Data(contentsOf: cached) == Data("thumbnail".utf8))
+        #expect(try Data(contentsOf: cached) == Data("preview".utf8))
         #expect(try Data(contentsOf: original) == Data("original".utf8))
         #expect(cached.path.hasPrefix(cacheRoot.path))
         #expect(fetcher.requests == [ref])
@@ -661,7 +731,7 @@ struct SyncLedgerTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
         let assetID = UUID(uuidString: "00000000-0000-0000-0000-00000000bf01")!
-        let derivativeFile = root.appendingPathComponent("preview.jpg")
+        let derivativeFile = root.appendingPathComponent("preview.heic")
         try Data("preview".utf8).write(to: derivativeFile)
         let createdAt = DateCoding.encode(Date(timeIntervalSince1970: 1_700_006_000))
         try database.execute(
@@ -710,8 +780,8 @@ struct SyncLedgerTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let database = try SQLiteDatabase(path: root.appendingPathComponent("Library.sqlite"))
         let assetID = UUID(uuidString: "00000000-0000-0000-0000-00000000bf02")!
-        let derivativeFile = root.appendingPathComponent("thumbnail.jpg")
-        try Data("thumbnail".utf8).write(to: derivativeFile)
+        let derivativeFile = root.appendingPathComponent("preview.heic")
+        try Data("preview".utf8).write(to: derivativeFile)
         let commandLayer = SyncCommandLayer(
             libraryID: "library",
             deviceID: SyncDeviceID("mac"),
@@ -732,9 +802,9 @@ struct SyncLedgerTests {
         do {
             try await service.uploadDerivative(
                 assetID: assetID,
-                role: .thumbnail,
+                role: .preview,
                 localFile: derivativeFile,
-                pixelSize: PixelSize(width: 320, height: 240)
+                pixelSize: PixelSize(width: 1200, height: 800)
             )
             Issue.record("expected derivative upload failure")
         } catch {
@@ -1048,8 +1118,8 @@ struct SyncLedgerTests {
         try await withTempDatabaseAsync { database, databaseURL in
             let assetID = UUID(uuidString: "00000000-0000-0000-0000-00000000be01")!
             let createdAt = DateCoding.encode(Date(timeIntervalSince1970: 1_700_007_000))
-            let thumbnailURL = databaseURL.deletingLastPathComponent().appendingPathComponent("manual-backfill-thumb.jpg")
-            try Data("thumb".utf8).write(to: thumbnailURL)
+            let previewURL = databaseURL.deletingLastPathComponent().appendingPathComponent("manual-backfill-preview.heic")
+            try Data("preview".utf8).write(to: previewURL)
 
             try database.execute(
                 """
@@ -1068,8 +1138,8 @@ struct SyncLedgerTests {
                     id, asset_id, path, device_id, storage_kind, file_role, authority_role,
                     sync_status, size_bytes, content_hash, last_seen_at, availability
                 ) VALUES (
-                    '00000000-0000-0000-0000-00000000be02', '\(assetID.uuidString)', '\(thumbnailURL.path)',
-                    'mac', 'local', 'thumbnail', 'cache', 'cache_only', 5, 'thumb-hash', '\(createdAt)', 'online'
+                    '00000000-0000-0000-0000-00000000be02', '\(assetID.uuidString)', '\(previewURL.path)',
+                    'mac', 'local', 'preview', 'cache', 'cache_only', 5, 'preview-hash', '\(createdAt)', 'online'
                 )
                 """
             )
@@ -1101,7 +1171,7 @@ struct SyncLedgerTests {
             #expect(entries.map(\.actorID).allSatisfy { $0 == "system:migration" })
             #expect(migrationState.projectionVerified == true)
             #expect(store.lastSyncSummary.contains("已补齐初始 ledger"))
-            #expect(store.lastSyncSummary.contains("待上传 1 张缩略图"))
+            #expect(store.lastSyncSummary.contains("待上传 1 张预览图"))
             #expect(store.backgroundTask?.phase == "同步 ledger 补齐完成")
         }
     }
@@ -1585,41 +1655,26 @@ struct SyncLedgerTests {
         #expect(SyncControlPlaneRoute.trash(libraryID: libraryID).path == "/libraries/lib%2Fary%201/trash")
     }
 
-    @Test func syncClientConfigurationRequiresCompleteAWSIAMCredentialsBeforeTreatingRemoteAsConfigured() {
-        let incomplete = SyncClientConfiguration(
-            baseURLString: "https://zewnw6dncl.execute-api.us-east-1.amazonaws.com",
+    @Test func syncClientConfigurationTreatsNASBearerCredentialAsOptional() {
+        let withoutToken = SyncClientConfiguration(
+            baseURLString: "http://nas.local:2283",
             libraryID: "library",
             peerID: "control-plane",
-            authModeRawValue: SyncAuthenticationMode.awsIAM.rawValue,
-            accessCredential: "",
-            awsRegion: "us-east-1",
-            awsAccessKeyID: "AKIAEXAMPLE",
-            awsSecretAccessKey: "",
-            awsSessionToken: ""
+            authModeRawValue: SyncAuthenticationMode.bearer.rawValue,
+            accessCredential: ""
         )
-        #expect(incomplete.hasRemoteSync == false)
-        #expect(incomplete.requestAuthentication == nil)
+        #expect(withoutToken.hasRemoteSync)
+        #expect(withoutToken.requestAuthentication == nil)
 
-        let complete = SyncClientConfiguration(
-            baseURLString: "https://zewnw6dncl.execute-api.us-east-1.amazonaws.com",
+        let withToken = SyncClientConfiguration(
+            baseURLString: "http://nas.local:2283",
             libraryID: "library",
             peerID: "control-plane",
-            authModeRawValue: SyncAuthenticationMode.awsIAM.rawValue,
-            accessCredential: "",
-            awsRegion: "us-east-1",
-            awsAccessKeyID: "AKIAEXAMPLE",
-            awsSecretAccessKey: "secret",
-            awsSessionToken: "session"
+            authModeRawValue: SyncAuthenticationMode.bearer.rawValue,
+            accessCredential: "secret-token"
         )
-        #expect(complete.hasRemoteSync)
-        #expect(complete.requestAuthentication == .awsIAM(
-            SyncAWSIAMCredentials(
-                region: "us-east-1",
-                accessKeyID: "AKIAEXAMPLE",
-                secretAccessKey: "secret",
-                sessionToken: "session"
-            )
-        ))
+        #expect(withToken.hasRemoteSync)
+        #expect(withToken.requestAuthentication == .bearer("secret-token"))
     }
 
     @Test func controlPlaneHTTPClientBuildsExpectedRequestsAndDecodesResponses() async throws {
@@ -1708,7 +1763,7 @@ struct SyncLedgerTests {
 
         let errorSession = makeStubSession { request in
             let url = request.url ?? URL(string: "https://control.example.com/libraries/library/ops")!
-            return (HTTPURLResponse(url: url, statusCode: 503, httpVersion: nil, headerFields: nil)!, Data())
+            return (HTTPURLResponse(url: url, statusCode: 503, httpVersion: nil, headerFields: nil)!, Data(#"{"message":"service unavailable"}"#.utf8))
         }
         let errorClient = SyncControlPlaneHTTPClient(
             baseURL: URL(string: "https://control.example.com")!,
@@ -1719,7 +1774,9 @@ struct SyncLedgerTests {
             _ = try await errorClient.uploadOperations(SyncOpsUploadRequest(operations: []), libraryID: "library")
             Issue.record("expected status code error")
         } catch let error as SyncControlPlaneHTTPError {
-            #expect(error == .unexpectedStatusCode(503))
+            #expect(error == .unexpectedStatusCode(503, #"{"message":"service unavailable"}"#))
+            #expect(error.localizedDescription.contains("HTTP 503"))
+            #expect(error.localizedDescription.contains("service unavailable"))
         }
 
         #expect(capturedRequests.count == 4)
@@ -1730,72 +1787,6 @@ struct SyncLedgerTests {
         #expect(fetched.operations == [remoteOp])
         #expect(fetched.cursor == "cursor-2")
         #expect(uploaded.accepted == [SyncOpsAcceptedOperation(opID: localOp.opID, globalSeq: 11, status: "committed")])
-    }
-
-    @Test func controlPlaneHTTPClientSignsAWSIAMRequests() async throws {
-        let assetID = UUID(uuidString: "00000000-0000-0000-0000-0000000000d2")!
-        let op = OperationLedgerEntry.metadataSet(
-            opID: UUID(uuidString: "00000000-0000-0000-0000-0000000000d3")!,
-            libraryID: "library",
-            deviceID: SyncDeviceID("mac"),
-            deviceSequence: 2,
-            time: HybridLogicalTime(wallTimeMilliseconds: 300, counter: 0, nodeID: "mac"),
-            actorID: "user",
-            assetID: assetID,
-            field: .rating,
-            value: .int(1),
-            createdAt: Date(timeIntervalSince1970: 1_700_000_700)
-        )
-
-        let fixedDate = Date(timeIntervalSince1970: 1_713_700_800) // 2024-04-21T12:00:00Z
-        let sessionStub = makeStubSession { request in
-            guard let url = request.url else {
-                throw NSError(domain: "PhotoAssetManagerTests", code: 51, userInfo: [NSLocalizedDescriptionKey: "missing url"])
-            }
-            #expect(request.value(forHTTPHeaderField: "Host") == "zewnw6dncl.execute-api.us-east-1.amazonaws.com")
-            #expect(request.value(forHTTPHeaderField: "X-Amz-Date") == "20240421T120000Z")
-            #expect(request.value(forHTTPHeaderField: "X-Amz-Security-Token") == "session-token")
-            #expect(request.value(forHTTPHeaderField: "X-Amz-Content-Sha256")?.count == 64)
-
-            let authorization = try #require(request.value(forHTTPHeaderField: Self.accessCredentialHeaderName))
-            #expect(authorization.hasPrefix("\(Self.sigV4Scheme) Credential=AKIAIOSFODNN7EXAMPLE/20240421/us-east-1/execute-api/aws4_request, SignedHeaders="))
-            #expect(authorization.contains("accept"))
-            #expect(authorization.contains("content-type"))
-            #expect(authorization.contains("host"))
-            #expect(authorization.contains("x-amz-content-sha256"))
-            #expect(authorization.contains("x-amz-date"))
-            #expect(authorization.contains("x-amz-security-token"))
-            let signature = authorization.split(separator: "=").last.map(String.init) ?? ""
-            #expect(signature.count == 64)
-            #expect(signature.allSatisfy { $0.isHexDigit })
-
-            let response = SyncOpsUploadResponse(
-                accepted: [SyncOpsAcceptedOperation(opID: op.opID, globalSeq: 13, status: "committed")],
-                cursor: "13"
-            )
-            return (
-                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!,
-                try makeJSONEncoder().encode(response)
-            )
-        }
-
-        let client = SyncControlPlaneHTTPClient(
-            baseURL: URL(string: "https://zewnw6dncl.execute-api.us-east-1.amazonaws.com")!,
-            authentication: .awsIAM(
-                SyncAWSIAMCredentials(
-                    region: "us-east-1",
-                    accessKeyID: "AKIAIOSFODNN7EXAMPLE",
-                    secretAccessKey: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
-                    sessionToken: "session-token"
-                )
-            ),
-            headerProvider: { ["X-Stub-Key": sessionStub.stubKey] },
-            dateProvider: { fixedDate },
-            session: sessionStub.session
-        )
-
-        let uploaded = try await client.uploadOperations(SyncOpsUploadRequest(operations: [op]), libraryID: "library")
-        #expect(uploaded.cursor == "13")
     }
 
     @Test func controlPlaneHTTPClientPercentEncodesOpaquePathSegmentsAndQueryItems() async throws {
@@ -1879,71 +1870,6 @@ struct SyncLedgerTests {
                     "X-Trace": "trace-1"
                 ]
             },
-            session: sessionStub.session
-        )
-
-        _ = try await client.uploadOperations(SyncOpsUploadRequest(operations: [op]), libraryID: "library")
-    }
-
-    @Test func controlPlaneHTTPClientProtectsAWSReservedHeadersWhenHeaderProviderConflicts() async throws {
-        let op = OperationLedgerEntry.metadataSet(
-            opID: UUID(uuidString: "00000000-0000-0000-0000-0000000000ae")!,
-            libraryID: "library",
-            deviceID: SyncDeviceID("mac"),
-            deviceSequence: 1,
-            time: HybridLogicalTime(wallTimeMilliseconds: 220, counter: 0, nodeID: "mac"),
-            actorID: "user",
-            assetID: UUID(uuidString: "00000000-0000-0000-0000-0000000000af")!,
-            field: .rating,
-            value: .int(2),
-            createdAt: Date(timeIntervalSince1970: 1_700_000_800)
-        )
-
-        let sessionStub = makeStubSession { request in
-            guard let url = request.url else {
-                throw NSError(domain: "PhotoAssetManagerTests", code: 52, userInfo: [NSLocalizedDescriptionKey: "missing url"])
-            }
-            #expect(request.value(forHTTPHeaderField: "Host") == "zewnw6dncl.execute-api.us-east-1.amazonaws.com")
-            #expect(request.value(forHTTPHeaderField: "X-Amz-Date") == "20240421T120000Z")
-            #expect(request.value(forHTTPHeaderField: "X-Amz-Content-Sha256")?.count == 64)
-            #expect(request.value(forHTTPHeaderField: "X-Amz-Security-Token") == nil)
-            let authorization = try #require(request.value(forHTTPHeaderField: Self.accessCredentialHeaderName))
-            #expect(authorization.contains("Credential=AKIAEXAMPLE/20240421/us-east-1/execute-api/aws4_request"))
-            #expect(authorization.contains("host"))
-            #expect(authorization.contains("x-amz-content-sha256"))
-            #expect(authorization.contains("x-amz-date"))
-            #expect(request.value(forHTTPHeaderField: "X-Trace") == "trace-1")
-            let response = SyncOpsUploadResponse(
-                accepted: [SyncOpsAcceptedOperation(opID: op.opID, globalSeq: 14, status: "committed")],
-                cursor: "14"
-            )
-            return (
-                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!,
-                try makeJSONEncoder().encode(response)
-            )
-        }
-
-        let client = SyncControlPlaneHTTPClient(
-            baseURL: URL(string: "https://zewnw6dncl.execute-api.us-east-1.amazonaws.com")!,
-            authentication: .awsIAM(
-                SyncAWSIAMCredentials(
-                    region: "us-east-1",
-                    accessKeyID: "AKIAEXAMPLE",
-                    secretAccessKey: "secret"
-                )
-            ),
-            headerProvider: {
-                [
-                    Self.accessCredentialHeaderName: "bad",
-                    "Host": "bad.example.com",
-                    "X-Amz-Date": "20000101T000000Z",
-                    "X-Amz-Content-Sha256": "bad",
-                    "X-Amz-Security-Token": "bad",
-                    "X-Stub-Key": sessionStub.stubKey,
-                    "X-Trace": "trace-1"
-                ]
-            },
-            dateProvider: { Date(timeIntervalSince1970: 1_713_700_800) },
             session: sessionStub.session
         )
 
@@ -3045,13 +2971,13 @@ struct SyncLedgerTests {
 
     private final class StubDerivativeDataFetcher: @unchecked Sendable, DerivativeDataFetching {
         private let data: Data
-        private(set) var requests: [S3ObjectRef] = []
+        private(set) var requests: [DerivativeObjectRef] = []
 
         init(data: Data) {
             self.data = data
         }
 
-        func fetchDerivative(_ object: S3ObjectRef) async throws -> Data {
+        func fetchDerivative(_ object: DerivativeObjectRef) async throws -> Data {
             requests.append(object)
             return data
         }
@@ -3075,9 +3001,9 @@ struct SyncLedgerTests {
         func createDerivativeUpload(_ request: DerivativeUploadRequest) async throws -> DerivativeUploadResponse {
             uploadRequests.append(request)
             return DerivativeUploadResponse(
-                s3Object: S3ObjectRef(
+                objectRef: DerivativeObjectRef(
                     bucket: "photo-derivatives",
-                    key: "libraries/\(request.libraryID)/assets/\(request.assetID.uuidString)/\(request.role.rawValue)/\(request.fileObject.contentHash).jpg",
+                    key: "libraries/\(request.libraryID)/assets/\(request.assetID.uuidString)/\(request.role.rawValue)/\(request.fileObject.contentHash).heic",
                     eTag: "etag"
                 ),
                 uploadURL: URL(string: "https://upload.example.com/\(request.role.rawValue)")!
@@ -3087,6 +3013,8 @@ struct SyncLedgerTests {
         func fetchDerivativeMetadata(libraryID: String, assetID: UUID, role: DerivativeRole) async throws -> DerivativeMetadataResponse {
             throw NSError(domain: "PhotoAssetManagerTests", code: 62, userInfo: [NSLocalizedDescriptionKey: "unused"])
         }
+
+        func deleteDerivative(libraryID: String, assetID: UUID, role: DerivativeRole) async throws {}
     }
 
     private final class StubDerivativeUploader: @unchecked Sendable, DerivativeDataUploading {

@@ -140,7 +140,7 @@ enum SyncBootstrapProgress: Sendable {
 }
 
 protocol DerivativeDataFetching: Sendable {
-    func fetchDerivative(_ object: S3ObjectRef) async throws -> Data
+    func fetchDerivative(_ object: DerivativeObjectRef) async throws -> Data
 }
 
 protocol DerivativeDataUploading: Sendable {
@@ -153,12 +153,12 @@ struct URLSessionDerivativeDataUploader: DerivativeDataUploading {
     func uploadDerivativeData(_ data: Data, to uploadURL: URL) async throws {
         var request = URLRequest(url: uploadURL)
         request.httpMethod = "PUT"
-        let (_, response) = try await session.upload(for: request, from: data)
+        let (responseBody, response) = try await session.upload(for: request, from: data)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw SyncControlPlaneHTTPError.invalidHTTPResponse
         }
         guard 200..<300 ~= httpResponse.statusCode else {
-            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode)
+            throw SyncControlPlaneHTTPError.unexpectedStatusCode(httpResponse.statusCode, String(data: responseBody, encoding: .utf8))
         }
     }
 }
@@ -189,7 +189,7 @@ struct DerivativeUploadService<CommandLayer: SyncCommandWriting & Sendable>: Sen
             assetID: assetID,
             role: role,
             fileObject: fileObject,
-            s3Object: upload.s3Object,
+            objectRef: upload.objectRef,
             pixelSize: pixelSize
         )
     }
@@ -199,21 +199,21 @@ struct DerivativeCacheStore: Sendable {
     var cacheRoot: URL
     let fetcher: DerivativeDataFetching
 
-    func cacheDerivative(assetID: UUID, role: DerivativeRole, s3Object: S3ObjectRef) async throws -> URL {
-        let data = try await fetcher.fetchDerivative(s3Object)
+    func cacheDerivative(assetID: UUID, role: DerivativeRole, objectRef: DerivativeObjectRef) async throws -> URL {
+        let data = try await fetcher.fetchDerivative(objectRef)
         let directory = cacheRoot
             .appendingPathComponent(assetID.uuidString, isDirectory: true)
             .appendingPathComponent(role.rawValue, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let destination = directory.appendingPathComponent(Self.safeFilename(for: s3Object), isDirectory: false)
+        let destination = directory.appendingPathComponent(Self.safeFilename(for: objectRef), isDirectory: false)
         try data.write(to: destination, options: [.atomic])
         return destination
     }
 
-    private static func safeFilename(for object: S3ObjectRef) -> String {
+    private static func safeFilename(for object: DerivativeObjectRef) -> String {
         let digest = SHA256.hash(data: Data("\(object.bucket):\(object.key):\(object.eTag ?? "")".utf8))
             .map { String(format: "%02x", $0) }
             .joined()
-        return "\(digest).jpg"
+        return "\(digest).heic"
     }
 }

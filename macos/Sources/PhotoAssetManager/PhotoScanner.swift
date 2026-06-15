@@ -30,9 +30,6 @@ struct ScannedFile {
     var cameraModel: String
     var lensModel: String
     var rating: Int
-    var thumbnailURL: URL?
-    var thumbnailHash: String?
-    var thumbnailSize: Int64
     var previewURL: URL? = nil
     var previewHash: String? = nil
     var previewSize: Int64 = 0
@@ -280,7 +277,6 @@ struct PhotoScanner: @unchecked Sendable {
         let role = SupportedFiles.isRaw(url) ? FileRole.rawOriginal : FileRole.jpegOriginal
         let authority = storageKind == .nas ? AuthorityRole.canonical : AuthorityRole.workingCopy
         let syncStatus = storageKind == .nas ? SyncStatus.synced : SyncStatus.needsArchive
-        let thumbnail = try? generateThumbnail(source: url, contentHash: hash, derivativeRoot: derivativeRoot)
         let preview = try? generatePreview(source: url, contentHash: hash, derivativeRoot: derivativeRoot)
 
         return ScannedFile(
@@ -298,9 +294,6 @@ struct PhotoScanner: @unchecked Sendable {
             cameraModel: metadata.cameraModel,
             lensModel: metadata.lensModel,
             rating: metadata.rating,
-            thumbnailURL: thumbnail,
-            thumbnailHash: thumbnail.flatMap { try? FileHasher.sha256(url: $0) },
-            thumbnailSize: thumbnail.flatMap { (try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) } ?? 0,
             previewURL: preview,
             previewHash: preview.flatMap { try? FileHasher.sha256(url: $0) },
             previewSize: preview.flatMap { (try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) } ?? 0,
@@ -340,20 +333,25 @@ struct PhotoScanner: @unchecked Sendable {
             .sorted { $0.url.path.localizedStandardCompare($1.url.path) == .orderedAscending }
     }
 
-    private func generateThumbnail(source: URL, contentHash: String, derivativeRoot: URL?) throws -> URL? {
-        try generateDerivative(source: source, contentHash: contentHash, derivativeRoot: derivativeRoot, directoryName: "thumbnails", maxPixel: 320)
+    private func generatePreview(source: URL, contentHash: String, derivativeRoot: URL?, forceRegenerate: Bool = false) throws -> URL? {
+        try generateDerivative(source: source, contentHash: contentHash, derivativeRoot: derivativeRoot, directoryName: "previews", maxPixel: 1200, forceRegenerate: forceRegenerate)
     }
 
-    private func generatePreview(source: URL, contentHash: String, derivativeRoot: URL?) throws -> URL? {
-        try generateDerivative(source: source, contentHash: contentHash, derivativeRoot: derivativeRoot, directoryName: "previews", maxPixel: 2048)
+    /// 公开的重建入口：为指定原片生成/强制重建 1200px 预览。
+    /// originalContentHash 用于保持与扫描时一致的文件命名（{hash}-1200.heic）。
+    func generateDisplayPreview(source: URL, originalContentHash: String, derivativeRoot: URL?, forceRegenerate: Bool = true) throws -> URL? {
+        return try generatePreview(source: source, contentHash: originalContentHash, derivativeRoot: derivativeRoot, forceRegenerate: forceRegenerate)
     }
 
-    private func generateDerivative(source: URL, contentHash: String, derivativeRoot: URL?, directoryName: String, maxPixel: Int) throws -> URL? {
+    private func generateDerivative(source: URL, contentHash: String, derivativeRoot: URL?, directoryName: String, maxPixel: Int, forceRegenerate: Bool = false) throws -> URL? {
         guard let derivativeRoot else { return nil }
         let derivativeDirectory = derivativeRoot.appendingPathComponent(directoryName, isDirectory: true)
         try FileManager.default.createDirectory(at: derivativeDirectory, withIntermediateDirectories: true)
 
-        let derivativeURL = derivativeDirectory.appendingPathComponent("\(contentHash)-\(maxPixel).jpg")
+        let derivativeURL = derivativeDirectory.appendingPathComponent("\(contentHash)-\(maxPixel).heic")
+        if forceRegenerate {
+            try? FileManager.default.removeItem(at: derivativeURL)
+        }
         if FileManager.default.fileExists(atPath: derivativeURL.path) {
             return derivativeURL
         }
@@ -361,7 +359,7 @@ struct PhotoScanner: @unchecked Sendable {
         guard let image = ImageRenderer.renderableImage(url: source) else {
             return nil
         }
-        try ImageRenderer.writeJPEG(image: image, maxPixel: CGFloat(maxPixel), destination: derivativeURL)
+        try ImageRenderer.writeHEIF(image: image, maxPixel: CGFloat(maxPixel), destination: derivativeURL)
         return derivativeURL
     }
 }
@@ -526,14 +524,23 @@ enum ImageRenderer {
         return NSImage(contentsOf: url)
     }
 
-    static func writeJPEG(image: NSImage, maxPixel: CGFloat, destination: URL) throws {
-        guard let resized = image.resized(maxPixel: maxPixel),
-              let tiff = resized.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff),
-              let data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.84]) else {
+    static func writeHEIF(image: NSImage, maxPixel: CGFloat, destination: URL) throws {
+        guard let resized = image.resized(maxPixel: maxPixel) else {
             throw CocoaError(.fileWriteUnknown)
         }
-        try data.write(to: destination, options: .atomic)
+        var rect = NSRect(origin: .zero, size: resized.size)
+        guard let cgImage = resized.cgImage(forProposedRect: &rect, context: nil, hints: nil),
+              let destinationRef = CGImageDestinationCreateWithURL(destination as CFURL, UTType.heic.identifier as CFString, 1, nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        CGImageDestinationAddImage(
+            destinationRef,
+            cgImage,
+            [kCGImageDestinationLossyCompressionQuality: 0.72] as CFDictionary
+        )
+        guard CGImageDestinationFinalize(destinationRef) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
     }
 }
 

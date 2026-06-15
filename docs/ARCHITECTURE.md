@@ -6,19 +6,17 @@
 
 - `macos/`：SwiftPM macOS app、本地 SQLite projection/cache、测试和 app 打包脚本。
 - `ios/`：Xcode iOS app，复用同一套 ledger/SQLite core，当前只实现自动同步回放验证与瀑布流图库。
-- `control_plane/`：FastAPI + SQLAlchemy 的 Aurora authoritative event store control-plane API 和测试。
-- `infra/terraform/`：AWS control plane 与 S3 衍生图层的 Terraform 入口，已经开始定义 remote state bootstrap、Aurora、derivative bucket 和 runtime skeleton。
+- `control_plane/`：FastAPI + SQLAlchemy 的 authoritative event store control-plane API、preview derivative storage 和测试。
+- `deploy/nas/`：NAS + Docker Compose 生产入口。默认把 Keeps 服务端状态放在 `/myphoto/keeps` 下。
 
-control_plane 已经实现第一版 dev/test HTTP 服务；AWS control plane 仍然会继续通过 Terraform 承载部署边界，但设备不能直连 Aurora，所有读写都必须经过 control-plane API。生产认证、迁移编排和 Aurora 部署参数仍未完成，当前服务不应把 dev/test 授权 stub 当成生产边界。
+control_plane 已经实现第一版 dev/test HTTP 服务和 NAS filesystem preview backend；默认生产部署边界迁到 NAS + Docker。设备不能直连服务端数据库或服务端目录，所有读写都必须经过 control-plane API。生产认证和迁移编排仍未完成，当前服务不应把 dev/test 授权 stub 当成生产边界。
 
-Terraform 当前已经明确了这些边界：
+NAS 当前明确了这些边界：
 
-- remote state 使用 S3 bucket + DynamoDB lock table 的 bootstrap 资源，但 backend 仍需先用本地 state 启动后再切换。
-- Aurora PostgreSQL 采用 Serverless v2，连接材料放在 Secrets Manager，Lambda 通过 VPC 直连 PostgreSQL。
-- derivative 只落 S3 thumbnail/preview bucket，开启 encryption、versioning、Block Public Access，并为 presigned upload 保留受控 CORS。
-- control-plane runtime 采用 API Gateway + Lambda，默认入口使用 `AWS_IAM`；当前 macOS/iOS 客户端已经支持 Bearer 和 AWS SigV4 两种请求认证，其中 AWS 路径固定签 `execute-api` 服务名并要求显式提供 region。CloudWatch logs 作为最小可观测面。
-- Lambda 访问 AWS API 走 VPC endpoints：Secrets Manager interface endpoint 和 S3 gateway endpoint，避免依赖公网出口。
-- 仍未定义真实迁移、健康检查、smoke gate 和 production deployment 流程。
+- `KEEPS_ROOT=/myphoto/keeps` 是 Keeps 服务端状态根，内部只放数据库、ledger 工件、preview 衍生图、cache、ingest、exports、backups、logs 和 tmp。
+- 原片根目录必须在 Keeps 外部，默认 `ORIGINAL_ROOT=/myphoto/library`，第一阶段以只读 volume 挂载给 control-plane。
+- control-plane 的 filesystem derivative backend 只允许写入 `/myphoto/keeps/previews/**`，并拒绝 `ORIGINAL_ROOT` 落在 `KEEPS_ROOT` 内。
+- 不使用 `files` 作为 Keeps 的磁盘目录名；领域模型中的 `file_objects` / `file_placements` 仍表示资产内容和位置，不代表磁盘目录。
 
 ## 数据所有权
 
@@ -26,8 +24,8 @@ Terraform 当前已经明确了这些边界：
 
 - 每台 iOS/macOS 设备拥有自己的本地 SQLite，用来保存本地 replicated event cache、outbox、UI 投影、迁移状态和可丢弃 cache metadata；本地 SQLite 不是跨设备权威 ledger。
 - 跨设备同步的真源是 append-only 业务事件 ledger，不是本地 SQL update。
-- 缩略图和中等预览图是衍生对象，目标是长期放在 S3；ledger 只保存声明和指针，不保存图片 bytes。
-- 原片、RAW、sidecar canonical 和 canonical export 不进入 S3，仍归单一 original server/NAS 管。
+- 1200px 预览图是唯一正式衍生对象，默认长期放在 `/myphoto/keeps/previews`。ledger 只保存声明和指针，不保存图片 bytes。旧 thumbnail 记录只作为迁移/清理输入，不再作为新功能概念。
+- 原片、RAW、sidecar canonical 和 canonical export 永远不进入 `/myphoto/keeps`，仍归单一 original server/NAS 管，默认根目录为 `/myphoto/library`。
 
 ## 客户端 App
 
@@ -105,7 +103,7 @@ SQLite 里与同步相关的表包括：
 - `sync_migration_state`：现有 Mac 库 bootstrap ledger 化的水位。
 - `file_objects`：content hash、size、role 表示的文件对象。
 - `file_placements`：某个 file object 当前在哪个设备、NAS/server 或云端位置。
-- `derivative_objects`：asset 级 thumbnail/preview 的 S3 指针和尺寸。
+- `derivative_objects`：asset 级 preview 的对象指针和尺寸。
 - `asset_trash_states`：共享回收站投影状态。
 
 本地 `assets`、`file_instances` 等表仍用于 UI 查询和现有 macOS 功能，但跨设备语义应从 ledger 事件产生，而不是直接同步这些表。
@@ -132,7 +130,7 @@ SwiftUI / LibraryStore
 - 新导入原片声明：`declareImportedOriginal`
 - 请求归档：`requestArchive`
 - 原片 server 归档 receipt：`recordArchiveReceipt`
-- S3 thumbnail/preview 衍生图声明：`declareDerivative`
+- preview 衍生图声明：`declareDerivative`
 - 扫描/导入路径产生的资产快照与 placement 快照：`upsertScannedFile(..., ledgerContext:)`
 
 `LibraryStore` 对评分、flag、标签等现有 UI 操作会先更新本地 projection，再在同一个事务中 append ledger。这样 UI 立即可见，同时同步队列不会丢事件。
@@ -140,10 +138,10 @@ SwiftUI / LibraryStore
 macOS 当前不会等用户手动点同步才上传。`LibraryStore` 会在扫描、导入、元数据回填、评分/标签修改和回收站状态变化后做一次 debounce，然后自动执行：
 
 1. 如有需要先把现有资料库 bootstrap 成 ledger 快照。
-2. 上传待同步的缩略图衍生对象。
+2. 上传待同步的预览图衍生对象。
 3. 再执行 `SyncService.sync()` 上传/拉取 ledger。
 
-这样 iOS 端只要前台在线，就能自动回放最新 ledger，并按需拉取缩略图，不需要任何手动导出或手动触发同步流程。
+这样 iOS 端只要前台在线，就能自动回放最新 ledger，并按需拉取预览图，不需要任何手动导出或手动触发同步流程。
 
 `LibraryStore` 里的后台任务现在要求走单一串行队列，当前至少覆盖：
 
@@ -198,7 +196,7 @@ pullRemoteOperations()
 
 本地 projection replay 优先使用服务端 `global_seq` 排序。没有 `global_seq` 的本机 pending op 只表示本机乐观状态，不改变 authoritative committed events 的 replay 顺序。
 
-目前 control-plane HTTP client 已实现请求构造、JSON 编解码、路径/query percent-encoding、保留 header 防覆盖、archive receipt、derivative upload metadata、derivative metadata 获取，以及面向 API Gateway `AWS_IAM` 的 SigV4 请求签名。control-plane API 已有 FastAPI/Lambda 运行时，客户端不能绕过它直连 Aurora。
+目前 control-plane HTTP client 已实现请求构造、JSON 编解码、路径/query percent-encoding、保留 header 防覆盖、archive receipt、derivative upload metadata、derivative metadata 获取，以及可选 Bearer token。control-plane API 已有 FastAPI/Uvicorn NAS runtime，客户端不能绕过它直连服务端数据库或目录。
 
 ### 新设备冷启动投影
 
@@ -206,9 +204,9 @@ pullRemoteOperations()
 
 - `asset_snapshot_declared` 会直接 materialize 到本地 `assets` 表；
 - 后续 `metadata_set` / `tags_updated` / trash restore 会继续更新本地投影；
-- `derivative_declared` 继续写 `derivative_objects` 和云端 placement，iOS 端再通过 control-plane `GET /derivatives/{assetID}` 取 signed download URL 做缩略图加载。
+- `derivative_declared` 继续写 `derivative_objects` 和云端 placement，iOS 端再通过 control-plane `GET /derivatives/{assetID}` 取 signed download URL 做预览图加载。
 
-这样 iOS 新设备即使没有任何本地原片路径，也能先看到资产元数据和远端缩略图。iOS 瀑布流不会回退去读原图路径；没有缩略图时只显示占位或等待远端 derivative。
+这样 iOS 新设备即使没有任何本地原片路径，也能先看到资产元数据和远端预览图。iOS 瀑布流不会回退去读原图路径；没有预览图时只显示占位或等待远端 derivative。
 
 ### Projection 和冲突处理
 
@@ -228,7 +226,7 @@ opID ASC
 - trash/restore 是 asset lifecycle 状态，投影到 `asset_trash_states`。
 - imported original / archive requested 会把 asset 标成 `pending_original_upload`。
 - original archive receipt 会把 asset 标成 `archived` 并记录 server placement。
-- derivative declaration 会记录 `derivative_objects`，并把 S3 bucket 作为 cloud preview placement。
+- derivative declaration 会记录 `derivative_objects`，并把 NAS preview bucket 作为 preview placement。
 
 当 rating 或 flag 在同一个 HLC 下出现不同值时，projector 会记录 `SyncConflict`，同时仍按确定性 tie-break 选出投影值。当前 conflict 还只是内存 projection 结果，没有持久化 conflict queue 或 UI 解决流程。
 
@@ -248,9 +246,9 @@ opID ASC
 
 bootstrap 的 `opID` 来自稳定 key 的 SHA-256 派生 UUID。重复运行时同一事实不会重复写入；如果同一 stable `opID` 对应的 payload 变化，会快速失败。
 
-bootstrap 不会伪造 thumbnail/preview derivative declaration。真实衍生图必须等本地已经生成缩略图文件，并且上传成功后，再由 macOS append `derivative_declared`。这样 ledger 始终只声明真实存在、iOS 可取到的缩略图对象。
+bootstrap 不会伪造 preview derivative declaration。真实衍生图必须等本地已经生成预览图文件，并且上传成功后，再由 macOS append `derivative_declared`。这样 ledger 始终只声明真实存在、iOS 可取到的预览图对象。
 
-### 文件内容和 S3 衍生图
+### 文件内容和 preview 衍生图
 
 文件内容不直接塞进 ledger。当前模型是：
 
@@ -260,17 +258,19 @@ Asset
   -> FilePlacement(holderID, storageKind, authorityRole, availability)
 ```
 
-thumbnail/preview 通过 `DerivativeObject` 表达：
+preview 通过 `DerivativeObject` 表达：
 
 ```text
-assetID + role + fileObject + s3Object(bucket/key/eTag) + pixelSize
+assetID + role + fileObject + objectRef(bucket/key/eTag) + pixelSize
 ```
 
-当前第一阶段只优先同步 thumbnail；preview 可以沿用同一套对象模型，但还不是跨设备浏览成立的前置条件。未来正式后端应由 control-plane 签发上传/下载 URL，客户端不应靠猜 key 作为权限边界。
+当前正式衍生图只保留 preview，生成格式为 HEIF（`.heic`），尺寸为长边 1200px，除非原图更小。旧 thumbnail role 只用于清理历史 DB/对象记录，不再签发新的上传对象。后端由 control-plane 签发上传/下载 URL，客户端不应靠猜 key 作为权限边界。
 
-## AWS Control Plane 边界
+NAS filesystem backend 使用 `DERIVATIVE_STORAGE_BACKEND=filesystem`、`KEEPS_ROOT=/myphoto/keeps` 和 `CONTROL_PLANE_PUBLIC_BASE_URL` 启动。它签发 control-plane 本地 upload/download URL，并把对象写入 `/myphoto/keeps/previews/<key>`。`ORIGINAL_ROOT` 必须在 Keeps 外部；如果配置成 `/myphoto/keeps/originals` 或其他 Keeps 子目录，服务启动应快速失败。
 
-预期 AWS control plane 位于客户端和云端持久化之间。客户端不直接连云端数据库。
+## Control Plane API 边界
+
+control plane 位于客户端和服务端持久化之间。客户端不直接连服务端数据库，也不直接写服务端 preview/original 目录。
 
 第一版 API 面建议保持为：
 
@@ -278,28 +278,24 @@ assetID + role + fileObject + s3Object(bucket/key/eTag) + pixelSize
 - `GET /libraries/{libraryID}/ops?after=<cursor>`
 - `POST /devices/{deviceID}/heartbeat`
 - `POST /derivatives/uploads`
-- `GET /derivatives/{assetID}?role=thumbnail|preview`
+- `GET /derivatives/{assetID}?role=preview`
+- `DELETE /libraries/{libraryID}/derivatives/{assetID}?role=preview`（重建预览时清理旧 derivative；legacy thumbnail 仅用于历史对象清理）
 - `POST /archive/receipts`
 
-control plane 负责校验 operation payload、执行 library/device 访问控制、检查幂等、签发 S3 URL、保存 audit metadata。
+control plane 负责校验 operation payload、执行 library/device 访问控制、检查幂等、签发 derivative upload/download URL、保存 audit metadata。
 
-## Terraform
+## NAS Docker
 
-Terraform 文件位于 `infra/terraform/`。
+NAS 部署文件位于 `deploy/nas/`。
 
 当前已经实现：
 
-- AWS provider 配置和默认 tags。
-- 基于 project/environment/account 的命名策略与共享变量。
-- remote state bootstrap 资源：S3 bucket + DynamoDB lock table。
-- 默认 VPC 下的 Aurora PostgreSQL subnet group、security group、Serverless v2 cluster、Secrets Manager connection secret，以及 Lambda VPC 直连所需的 subnet 绑定。
-- 只用于 thumbnail/preview 的 S3 derivative bucket，启用 encryption、versioning 和 Block Public Access。
-- API Gateway + Lambda control-plane runtime skeleton、CloudWatch logs 和最小 IAM 边界。
-- 关键 outputs：Aurora endpoint/database/secret ARN、derivative bucket name、runtime API URL。
+- `deploy/nas/docker-compose.yml`：control-plane + Postgres。
+- `deploy/nas/.env.example`：默认 `KEEPS_ROOT=/myphoto/keeps`、`ORIGINAL_ROOT=/myphoto/library`。
+- `control_plane/Dockerfile.nas`：普通 Uvicorn/FastAPI runtime。
+- filesystem derivative backend：preview 写入 `KEEPS_ROOT/previews`，不创建 `files` 目录。
 
-Terraform definitions 已经落地，但尚未完成真实 AWS apply/deployment/remote backend activation/migration/auth/smoke。当前仓库中的 Terraform 仍然需要先用本地 backend bootstrap，再切换到共享 backend，不能把 local state 的结果误当成生产环境已部署。
-
-Terraform state 不提交。实际 AWS 资源是否已创建，以后续 apply 和部署结果为准，不应从配置文件本身推断。
+NAS 部署仍未完成真实认证、正式 migration gate、备份/恢复脚本和生产 smoke 编排。
 
 ## 当前未实现
 
@@ -307,26 +303,21 @@ Terraform state 不提交。实际 AWS 资源是否已创建，以后续 apply �
 
 - 生产认证边界和权限门控。
 - schema 迁移、版本门禁和发布编排。
-- 真实 AWS apply 和生产环境 deployment。
-- 远程 Terraform backend activation。
-- S3 derivative bucket 的 signed upload/download policy 收敛。
-- API Gateway、Lambda、ECS、App Runner 或等价生产运行时的生产化配置。
-- 用于衍生图 signed upload/download 的 IAM role 和 policy。
 - conflict queue 持久化和 UI 冲突解决。
-- dev/test 之外的 control_plane 生产化包装和部署脚本。
+- NAS 备份/恢复脚本和 production smoke。
 
 ## 架构清单
 
 ```json
 {
   "repo_type": "photo_asset_manager_monorepo",
-  "implemented_runtimes": ["macos_app", "ios_app", "control_plane_devtest"],
-  "planned_runtimes": ["aws_control_plane"],
+  "implemented_runtimes": ["macos_app", "ios_app", "control_plane_devtest", "nas_control_plane"],
+  "planned_runtimes": [],
   "key_directories": {
     "macos_app": "macos",
     "ios_app": "ios",
     "control_plane": "control_plane",
-    "terraform": "infra/terraform",
+    "nas_deploy": "deploy/nas",
     "root_wrappers": "scripts"
   },
   "macos_entrypoints": [
@@ -348,33 +339,28 @@ Terraform state 不提交。实际 AWS 资源是否已创建，以后续 apply �
     "macos/Sources/PhotoAssetManager/SQLiteDatabase.swift",
     "macos/Sources/PhotoAssetManager/LibraryStore.swift"
   ],
-  "terraform_entrypoints": [
-    "infra/terraform/main.tf",
-    "infra/terraform/variables.tf",
-    "infra/terraform/outputs.tf",
-    "infra/terraform/versions.tf",
-    "infra/terraform/networking.tf",
-    "infra/terraform/endpoints.tf",
-    "infra/terraform/aurora.tf",
-    "infra/terraform/runtime.tf",
-    "infra/terraform/s3.tf",
-    "infra/terraform/state.tf"
+  "nas_entrypoints": [
+    "deploy/nas/docker-compose.yml",
+    "deploy/nas/.env.example",
+    "deploy/nas/README.md",
+    "control_plane/Dockerfile.nas"
   ],
-  "cloud_resources_currently_defined": [
-    "terraform_remote_state_bootstrap",
-    "aurora_postgresql_serverless_v2",
-    "s3_derivative_bucket",
-    "apigw_lambda_control_plane_runtime"
-  ],
-  "cloud_resources_currently_applied": [],
-  "local_state_files_committed": false,
-  "original_file_policy": "当前仓库流程不得删除、移动、覆盖用户照片原片，也不得把 RAW、sidecar 或 canonical export 存入 S3。",
+  "cloud_resources_currently_defined": [],
+  "nas_storage_layout": {
+    "keeps_root": "/myphoto/keeps",
+    "preview_root": "/myphoto/keeps/previews",
+    "database_root": "/myphoto/keeps/db",
+    "ledger_artifact_root": "/myphoto/keeps/ledger",
+    "original_root": "/myphoto/library",
+    "files_directory_allowed": false
+  },
+  "original_file_policy": "当前仓库流程不得删除、移动、覆盖用户照片原片，也不得把 RAW、sidecar 或 canonical export 存入 /myphoto/keeps。",
   "control_plane_status": {
     "dev_test_http_api": "implemented",
+    "nas_filesystem_derivative_backend": "implemented",
+    "nas_docker_compose": "implemented",
     "production_auth": "not_implemented",
     "migration_version_gate": "not_implemented",
-    "aurora_deployment": "terraform_defined_not_applied",
-    "remote_backend_activation": "not_implemented",
     "smoke_gate": "not_implemented"
   }
 }

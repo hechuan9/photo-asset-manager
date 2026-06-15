@@ -191,7 +191,7 @@ struct IOSGalleryEmptyState: View {
                 .foregroundStyle(.white)
 
             Text(isConfigured
-                 ? "应用会在前台自动拉取 macOS 已上传的 ledger，并优先显示缩略图。"
+                 ? "应用会在前台自动拉取 macOS 已上传的 ledger，并优先显示预览图。"
                  : "先填 control plane 地址，随后 iPhone 会自动拉取这个只读图库。")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -229,10 +229,6 @@ struct IOSSyncSettingsView: View {
     @AppStorage(SyncPreferenceKey.peerID) private var peerID = "control-plane"
     @AppStorage(SyncPreferenceKey.authMode) private var authModeRawValue = SyncAuthenticationMode.bearer.rawValue
     @AppStorage(SyncPreferenceKey.accessCredential) private var accessCredential = ""
-    @AppStorage(SyncPreferenceKey.awsRegion) private var awsRegion = "us-east-1"
-    @AppStorage(SyncPreferenceKey.awsAccessKeyID) private var awsAccessKeyID = ""
-    @AppStorage(SyncPreferenceKey.awsSecretAccessKey) private var awsSecretAccessKey = ""
-    @AppStorage(SyncPreferenceKey.awsSessionToken) private var awsSessionToken = ""
 
     var didSave: () -> Void
 
@@ -263,30 +259,14 @@ struct IOSSyncSettingsView: View {
                             Text(mode.displayName).tag(mode)
                         }
                     }
-                    if authMode == .bearer {
-                        SecureField("Bearer token（可留空）", text: $accessCredential)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    } else {
-                        TextField("AWS region", text: $awsRegion)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                        TextField("AWS access key ID", text: $awsAccessKeyID)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                        SecureField("AWS secret access key", text: $awsSecretAccessKey)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                        SecureField("AWS session token（可留空）", text: $awsSessionToken)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
+                    SecureField("Bearer token（可留空）", text: $accessCredential)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
                 }
 
                 Section("说明") {
                     Text("当前 iOS 端只负责同步验证和瀑布流浏览，不会扫描、移动、删除或覆盖任何原片。")
-                    Text("前台会自动拉取 ledger。缩略图优先读本地缓存，没有本地缓存时，再通过 derivative metadata 取远端下载链接。")
-                    Text("若 control plane 使用 API Gateway AWS_IAM，请切到 AWS IAM 并填写 region 与临时或长期凭证。")
+                    Text("前台会自动拉取 ledger。预览图优先读本地缓存，没有本地缓存时，再通过 derivative metadata 取远端下载链接。")
                     Text((Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String).map { "企业内部版 \($0)（本构建为企业内部发行，仅授权设备）" } ?? "企业内部版（本构建为企业内部发行，仅授权设备）")
                         .font(.footnote)
                         .foregroundStyle(.secondary)

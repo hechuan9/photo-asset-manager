@@ -1,0 +1,39 @@
+services:
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: control_plane/Dockerfile.nas
+    container_name: keeps-control-plane
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "2283:2283"
+    environment:
+      CONTROL_PLANE_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      CONTROL_PLANE_AUTO_CREATE_SCHEMA: ${CONTROL_PLANE_AUTO_CREATE_SCHEMA:-1}
+      CONTROL_PLANE_PUBLIC_BASE_URL: ${CONTROL_PLANE_PUBLIC_BASE_URL}
+      CONTROL_PLANE_TRUSTED_DEVICE_IDS: ${CONTROL_PLANE_TRUSTED_DEVICE_IDS:-}
+      DERIVATIVE_STORAGE_BACKEND: filesystem
+      KEEPS_ROOT: /myphoto/keeps
+      ORIGINAL_ROOT: /myphoto/library
+    volumes:
+      - ${KEEPS_ROOT}:/myphoto/keeps
+      - ${ORIGINAL_ROOT}:/myphoto/library:ro
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: keeps-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - ${KEEPS_ROOT}/db/postgres:/var/lib/postgresql/data
