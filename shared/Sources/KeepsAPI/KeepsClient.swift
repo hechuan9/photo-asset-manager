@@ -1,0 +1,103 @@
+import Foundation
+
+public enum KeepsAPIError: Error, LocalizedError, Sendable {
+    case invalidConfiguration
+    case invalidResponse
+    case http(Int, String)
+    public var errorDescription: String? {
+        switch self {
+        case .invalidConfiguration: "请填写有效的 NAS HTTP/HTTPS 地址和资料库名称。"
+        case .invalidResponse: "NAS 返回了非 HTTP 响应。"
+        case let .http(status, body): "NAS HTTP \(status)：\(body)"
+        }
+    }
+}
+
+public final class KeepsClient: Sendable {
+    // Keep interactive API requests out of the shared preview-download session.
+    public static let apiSession = URLSession(configuration: .default)
+    public let configuration: KeepsConfiguration
+    private let session: URLSession
+    public init(configuration: KeepsConfiguration, session: URLSession = KeepsClient.apiSession) {
+        self.configuration = configuration
+        self.session = session
+    }
+    private var library: [String] { ["libraries", configuration.libraryID] }
+
+    public func assets(query: KeepsAssetQuery = KeepsAssetQuery()) async throws -> KeepsAssetPage {
+        try await request("GET", library + ["assets"], query: query.queryItems)
+    }
+    public func asset(id: UUID) async throws -> KeepsAsset {
+        try await request("GET", library + ["assets", id.uuidString])
+    }
+    public func updateAsset(id: UUID, patch: KeepsAssetPatch) async throws -> KeepsAsset {
+        try await request("PATCH", library + ["assets", id.uuidString], body: JSONEncoder().encode(patch))
+    }
+    public func trashAsset(id: UUID) async throws -> KeepsAsset {
+        try await request("POST", library + ["assets", id.uuidString, "trash"])
+    }
+    public func restoreAsset(id: UUID) async throws -> KeepsAsset {
+        try await request("POST", library + ["assets", id.uuidString, "restore"])
+    }
+    public func counts(showHidden: Bool = false) async throws -> KeepsCounts {
+        try await request("GET", library + ["counts"], query: [URLQueryItem(name: "showHidden", value: String(showHidden))])
+    }
+    public func hiddenDirectories() async throws -> KeepsHiddenDirectories {
+        try await request("GET", library + ["hidden-directories"])
+    }
+    public func setDirectoryHidden(path: String, hidden: Bool) async throws -> KeepsHiddenDirectories {
+        struct Change: Encodable { var path: String; var hidden: Bool }
+        return try await request("PUT", library + ["hidden-directories"], body: JSONEncoder().encode(Change(path: path, hidden: hidden)))
+    }
+    public func directories() async throws -> [KeepsDirectory] {
+        let response: Directories = try await request("GET", library + ["directories"])
+        return response.directories
+    }
+    public func folders() async throws -> KeepsFoldersResponse { try await request("GET", library + ["folders"]) }
+    public func navigation(path: String? = nil) async throws -> KeepsNavigation {
+        try await request("GET", library + ["navigation"], query: path.map { [URLQueryItem(name: "path", value: $0)] } ?? [])
+    }
+    public func addFolder(path: String) async throws -> KeepsFolder {
+        try await request("POST", library + ["folders"], body: JSONEncoder().encode(["path": path]))
+    }
+    public func removeFolder(id: String) async throws {
+        _ = try await send("DELETE", library + ["folders", id])
+    }
+    public func scanFolder(id: String) async throws -> KeepsJob {
+        try await request("POST", library + ["folders", id, "scan"])
+    }
+    public func jobs() async throws -> KeepsJobsResponse { try await request("GET", library + ["jobs"]) }
+    public func retryJob(id: String) async throws -> KeepsJob {
+        try await request("POST", library + ["jobs", id, "retry"])
+    }
+    public func refreshPreview(assetID: UUID) async throws -> URL {
+        let response: PreviewURL = try await request("GET", ["derivatives", assetID.uuidString], query: [URLQueryItem(name: "role", value: "preview"), URLQueryItem(name: "libraryID", value: configuration.libraryID)])
+        return response.downloadURL
+    }
+    private struct Directories: Decodable { var directories: [KeepsDirectory] }
+    private struct PreviewURL: Decodable { var downloadURL: URL }
+    private func request<T: Decodable>(_ method: String, _ segments: [String], query: [URLQueryItem] = [], body: Data? = nil) async throws -> T {
+        try JSONDecoder().decode(T.self, from: await send(method, segments, query: query, body: body))
+    }
+    private func send(_ method: String, _ segments: [String], query: [URLQueryItem] = [], body: Data? = nil) async throws -> Data {
+        guard ["http", "https"].contains(configuration.baseURL.scheme?.lowercased() ?? ""),
+              configuration.baseURL.host != nil, !configuration.libraryID.isEmpty,
+              var url = URLComponents(url: configuration.baseURL, resolvingAgainstBaseURL: false) else { throw KeepsAPIError.invalidConfiguration }
+        let allowed = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%"))
+        let suffix = segments.map { $0.addingPercentEncoding(withAllowedCharacters: allowed)! }.joined(separator: "/")
+        let prefix = url.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        url.percentEncodedPath = "/" + ([prefix, suffix].filter { !$0.isEmpty }.joined(separator: "/"))
+        url.queryItems = query.isEmpty ? nil : query
+        guard let endpoint = url.url else { throw KeepsAPIError.invalidConfiguration }
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = method
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        if let credential = configuration.accessCredential, !credential.isEmpty { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw KeepsAPIError.invalidResponse }
+        guard 200..<300 ~= http.statusCode else { throw KeepsAPIError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "响应体无法解码") }
+        return data
+    }
+}

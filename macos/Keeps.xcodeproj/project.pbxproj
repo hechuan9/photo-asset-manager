@@ -1,0 +1,45 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+		000000000000000000000098 = { isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Version.xcconfig; sourceTree = SOURCE_ROOT; };
+		000000000000000000000064 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/PhotoAssetManager/ContentView.swift"; sourceTree = SOURCE_ROOT; };
+		0000000000000000000000C8 = { isa = PBXBuildFile; fileRef = 000000000000000000000064; };
+		000000000000000000000065 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/PhotoAssetManager/DirectoryOutlineView.swift"; sourceTree = SOURCE_ROOT; };
+		0000000000000000000000C9 = { isa = PBXBuildFile; fileRef = 000000000000000000000065; };
+		000000000000000000000066 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/PhotoAssetManager/JustifiedAssetGridLayout.swift"; sourceTree = SOURCE_ROOT; };
+		0000000000000000000000CA = { isa = PBXBuildFile; fileRef = 000000000000000000000066; };
+		000000000000000000000067 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/PhotoAssetManager/LibraryStore.swift"; sourceTree = SOURCE_ROOT; };
+		0000000000000000000000CB = { isa = PBXBuildFile; fileRef = 000000000000000000000067; };
+		000000000000000000000068 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/PhotoAssetManager/NASTasksView.swift"; sourceTree = SOURCE_ROOT; };
+		0000000000000000000000CC = { isa = PBXBuildFile; fileRef = 000000000000000000000068; };
+		000000000000000000000069 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/PhotoAssetManager/PhotoAssetManagerApp.swift"; sourceTree = SOURCE_ROOT; };
+		0000000000000000000000CD = { isa = PBXBuildFile; fileRef = 000000000000000000000069; };
+		00000000000000000000006A = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/PhotoAssetManager/WorkspaceStyle.swift"; sourceTree = SOURCE_ROOT; };
+		0000000000000000000000CE = { isa = PBXBuildFile; fileRef = 00000000000000000000006A; };
+		000000000000000000000096 = { isa = PBXFileReference; lastKnownFileType = image.icns; path = "Sources/PhotoAssetManager/Resources/AppIcon.icns"; sourceTree = SOURCE_ROOT; };
+		0000000000000000000000FA = { isa = PBXBuildFile; fileRef = 000000000000000000000096; };
+		000000000000000000000097 = { isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "PrivacyInfo.xcprivacy"; sourceTree = SOURCE_ROOT; };
+		0000000000000000000000FB = { isa = PBXBuildFile; fileRef = 000000000000000000000097; };
+		000000000000000000000014 = { isa = PBXFileReference; explicitFileType = wrapper.application; path = Keeps.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		000000000000000000000015 = { isa = PBXGroup; children = (000000000000000000000064,000000000000000000000065,000000000000000000000066,000000000000000000000067,000000000000000000000068,000000000000000000000069,00000000000000000000006A,000000000000000000000096,000000000000000000000097,000000000000000000000098,000000000000000000000016,); sourceTree = "<group>"; };
+		000000000000000000000016 = { isa = PBXGroup; children = (000000000000000000000014,); name = Products; sourceTree = "<group>"; };
+		00000000000000000000001E = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (0000000000000000000000C8,0000000000000000000000C9,0000000000000000000000CA,0000000000000000000000CB,0000000000000000000000CC,0000000000000000000000CD,0000000000000000000000CE,); runOnlyForDeploymentPostprocessing = 0; };
+		00000000000000000000001F = { isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (0000000000000000000000FA,0000000000000000000000FB,); runOnlyForDeploymentPostprocessing = 0; };
+		000000000000000000000020 = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (00000000000000000000002A,); runOnlyForDeploymentPostprocessing = 0; };
+		000000000000000000000028 = { isa = XCLocalSwiftPackageReference; relativePath = ../shared; };
+		000000000000000000000029 = { isa = XCSwiftPackageProductDependency; package = 000000000000000000000028; productName = KeepsAPI; };
+		00000000000000000000002A = { isa = PBXBuildFile; productRef = 000000000000000000000029; };
+		000000000000000000000002 = { isa = PBXNativeTarget; buildConfigurationList = 000000000000000000000033; buildPhases = (00000000000000000000001E,000000000000000000000020,00000000000000000000001F,); buildRules = (); dependencies = (); name = Keeps; packageProductDependencies = (000000000000000000000029,); productName = Keeps; productReference = 000000000000000000000014; productType = "com.apple.product-type.application"; };
+		000000000000000000000001 = { isa = PBXProject; attributes = { LastUpgradeCheck = 2700; TargetAttributes = { 000000000000000000000002 = { CreatedOnToolsVersion = 27.0; ProvisioningStyle = Automatic; }; }; }; buildConfigurationList = 000000000000000000000032; compatibilityVersion = "Xcode 14.0"; developmentRegion = zh_CN; knownRegions = (en,zh_CN,Base,); mainGroup = 000000000000000000000015; productRefGroup = 000000000000000000000016; projectDirPath = ""; projectRoot = ""; packageReferences = (000000000000000000000028,); targets = (000000000000000000000002,); };
+		000000000000000000000032 = { isa = XCConfigurationList; buildConfigurations = (00000000000000000000003C,00000000000000000000003D,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		000000000000000000000033 = { isa = XCConfigurationList; buildConfigurations = (00000000000000000000003E,00000000000000000000003F,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		00000000000000000000003C = { isa = XCBuildConfiguration; name = Debug; buildSettings = { CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; DEBUG_INFORMATION_FORMAT = "dwarf"; }; };
+		00000000000000000000003D = { isa = XCBuildConfiguration; name = Release; buildSettings = { CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; SWIFT_OPTIMIZATION_LEVEL = "-O"; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; }; };
+		00000000000000000000003E = { isa = XCBuildConfiguration; name = Debug; baseConfigurationReference = 000000000000000000000098; buildSettings = { CODE_SIGN_ENTITLEMENTS = Keeps.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = 3TZ6RCL8NE; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Sources/PhotoAssetManager/Resources/Info.plist; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography"; PRODUCT_BUNDLE_IDENTIFIER = local.keeps; PRODUCT_NAME = Keeps; PRODUCT_MODULE_NAME = PhotoAssetManager; COMBINE_HIDPI_IMAGES = YES; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; }; };
+		00000000000000000000003F = { isa = XCBuildConfiguration; name = Release; baseConfigurationReference = 000000000000000000000098; buildSettings = { CODE_SIGN_ENTITLEMENTS = Keeps.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = 3TZ6RCL8NE; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Sources/PhotoAssetManager/Resources/Info.plist; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography"; PRODUCT_BUNDLE_IDENTIFIER = local.keeps; PRODUCT_NAME = Keeps; PRODUCT_MODULE_NAME = PhotoAssetManager; COMBINE_HIDPI_IMAGES = YES; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; }; };
+	};
+	rootObject = 000000000000000000000001;
+}

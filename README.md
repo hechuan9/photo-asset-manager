@@ -1,39 +1,43 @@
 # Keeps
 
-本仓库包含 macOS / iOS 照片资产管理器客户端，以及 NAS-first control plane / preview 衍生图层的部署定义。
+Keeps 是以 NAS 为核心的照片资产管理器。Rust 常驻服务负责照片索引、扫描任务、元数据整理与预览生成；macOS 和 iOS 是原生薄客户端，通过共享 HTTP 接口浏览和操作 NAS 资料库。
+
+NAS 核心服务已于 2026-09-26 部署并迁移历史资料库，首次全库扫描在后台运行。客户端已移除本地业务数据库、ledger 回放和扫描路径；两端构建通过，iOS 界面实测尚未完成。具体证据见部署说明。
 
 ## 目录
 
-- `macos/`：SwiftPM macOS app、测试和本地打包脚本。
-- `ios/`：Xcode iOS app，当前先做自动同步回放验证和瀑布流图库。
-- `control_plane/`：FastAPI/SQLAlchemy 后端、ledger API、preview derivative storage 和测试。
-- `deploy/nas/`：NAS + Docker Compose 生产入口，默认把 Keeps 状态放在 `/myphoto/keeps` 下。
-- `feature.md`：产品和同步架构设计记录。
+- `server/`：唯一活跃后端，Rust/Axum、SQLite、资产查询和后台处理。
+- `shared/`：两端共用的 `KeepsAPI` Swift 包，含 DTO、HTTP 客户端和连接配置。
+- `macos/`：SwiftUI 三栏浏览、筛选、多选整理与 NAS 任务管理。
+- `ios/`：SwiftUI 图库、详情与整理界面。
+- `deploy/nas/`：Docker Compose 和 NAS 部署说明。
+- `control_plane/`：旧 Python 协议与迁移对照工具，不作为第二套运行后端。
+- [docs/UX_DESIGN.md](docs/UX_DESIGN.md)：产品行为与能力边界；[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：当前架构与职责。
+- `feature.md`：早期需求草案，包含尚未实现或已调整的设想，不是当前架构依据。
 
-## macOS app
+## NAS 部署与客户端连接
 
-```bash
-cd macos
-swift test
-swift build
-./scripts/pre_merge_gate.sh
-./scripts/package_app.sh
-open .build/app/Keeps.app
-```
+部署、环境变量、状态目录和验收步骤见 [deploy/nas/README.md](deploy/nas/README.md)。Rust 开发说明见 [server/README.md](server/README.md)。
 
-根目录保留兼容入口：
+macOS 在 Keeps → 设置（⌘,）的 Server 页面配置照片服务地址、资料库名称和服务访问令牌，验证连接成功后保存；iOS 在连接设置中配置同一服务。地址及资料库保留在 UserDefaults，凭据保存在 Keychain；原有连接偏好会迁移。客户端只保存界面状态和可丢弃的图片缓存，所有业务读写经 NAS API。
 
-```bash
-./scripts/pre_merge_gate.sh
-./scripts/package_app.sh
+客户端不需要 SMB 挂载或本地资料库；主入口为统一照片资料库，目录仅作为服务器来源。原片与服务状态目录分开，NAS 容器内的原片目录映射为只读。扫描、停止追踪和共享回收站均不得删除、移动或覆盖原片。
+
+## 开发与验证
+
+共享契约和 macOS：
+
+```sh
+swift test --package-path shared
+swift test --package-path macos
+swift build --package-path macos
+./macos/scripts/package_app.sh
 open macos/.build/app/Keeps.app
 ```
 
-## iOS app
+iOS Simulator：
 
-```bash
-open ios/KeepsIOS.xcodeproj
-
+```sh
 xcodebuild \
   -project ios/KeepsIOS.xcodeproj \
   -scheme KeepsIOS \
@@ -42,99 +46,35 @@ xcodebuild \
   build
 ```
 
-（注意：以上仅 Simulator 构建，供日常开发调试使用。企业内部发布、IPA 打包及直接部署到设备请参考下文“## iOS 企业内部发布（仅内部 In-House 发行）”章节。）
+Rust 服务：
 
-iOS 端当前是最小只读回放器：
-
-- 首次打开会在 app 自己的 sandbox 里创建本地 `Library.sqlite`。
-- 设置页里填入 control-plane base URL、`libraryID` 和可选 access token 后，app 会在前台自动拉取远端 ledger 并回放到本地投影；设置页里的“立即刷新”只用于手动补拉一次。
-- 远端 ledger 会 materialize 成本地 `assets` 投影；瀑布流只读本地预览图缓存或通过 derivative metadata 下载远端预览图，不会回退去读原图路径。
-- 当前不支持 iOS 侧扫描、导入、归档或修改原片文件，也不会把原图同步到 iOS。
-
-macOS 端当前会把可同步的资料库变化自动写入本地 ledger，并在配置好 control-plane 后自动上传：
-
-- 扫描、导入、元数据回填、评分、旗标、标签、回收站状态等变化都会先写本地 ledger，再由后台自动同步。
-- bootstrap 只补资产快照和原片 placement 快照；预览图声明必须在本地生成并上传预览图后再进入 ledger，不会伪造远端 derivative。
-- 当前只同步 1200px HEIF (`.heic`) 预览图；原图、RAW、sidecar canonical 仍只留在 macOS / NAS 一侧，不会上行到 iOS。
-
-## NAS 部署
-
-默认生产边界是 NAS + Docker Compose。Keeps 相关服务端状态统一放在 `/myphoto/keeps` 下，原片根目录必须放在 Keeps 外部：
-
-```text
-/myphoto/
-  keeps/
-    db/
-    ledger/
-    previews/
-    cache/
-    ingest/
-    exports/
-    backups/
-    logs/
-    tmp/
-  library/
+```sh
+cargo test --manifest-path server/Cargo.toml
+cargo build --manifest-path server/Cargo.toml
 ```
 
-启动：
+端到端验证还需要实际 NAS、原片只读挂载、任务重启恢复，以及客户端对 NAS 的查询和整理操作。
 
-```bash
-cd deploy/nas
-cp .env.example .env
-docker compose up -d --build
+## 客户端分发
+
+macOS 与 iOS 以 TestFlight 内部测试为主要分发渠道，使用 ClimaMind LLC 的 Apple Developer Program（Team ID `3TZ6RCL8NE`）。本地构建保留用于开发验证；不再使用企业 IPA 导出。NAS 服务仍按 Docker Compose 流程独立部署。
+
+```sh
+# 先运行上面的共享契约、macOS 测试，再分别归档。
+./scripts/testflight.sh ios archive
+./scripts/testflight.sh macos archive
+
+# 上传已归档的构建到 App Store Connect，仅用于 TestFlight 内测。
+./scripts/testflight.sh ios upload
+./scripts/testflight.sh macos upload
 ```
 
-`/myphoto/keeps/previews` 保存 1200px `.heic` preview derivative；`/myphoto/keeps/db` 保存 Postgres 数据。原片、RAW、sidecar canonical 和 canonical export 永远不放进 `/myphoto/keeps`，第一阶段通过 `/myphoto/library` 只读挂载给 control-plane。
+归档分别位于 `ios/.build/testflight/KeepsIOS.xcarchive` 和 `macos/.build/testflight/Keeps.xcarchive`。上传使用 Xcode 已登录的团队账号与自动签名，不在仓库保存凭据。上传不会重建源码；修改后必须重新归档，每次发布前递增对应工程的 build number。Apple 完成处理并在 TestFlight 显示 `Testing` 后才算分发完成，上传成功不等于已经可安装。
 
-## iOS 企业内部发布（仅内部 In-House 发行）
+App Store Connect 已创建应用记录：[Keeps 照片库（iOS）](https://appstoreconnect.apple.com/apps/6816541067/testflight)，Bundle ID `com.hechuan.Keeps`；[Keeps 照片库 for Mac](https://appstoreconnect.apple.com/apps/6816541220/testflight)，Bundle ID `local.keeps`。两端的“Keeps 内部测试”组均启用自动分发，目前仅加入账号本人。两端保留现有 bundle ID，使用独立的应用记录。macOS 发布工程启用 App Sandbox 和出站网络权限；沙盒签名版本的连接设置与 Keychain 访问需要实机验收，必要时在应用设置中重新连接 NAS。
 
-**前置条件**：
-- 本机已用企业账户登录 Xcode（team 3TZ6RCL8NE）。
-- “Chuan iPhone” 已配对（UDID 036DD950-A8BC-5B88-B477-167F1DFB73E1）。
-- 首次安装需在 iPhone “设置 > 通用 > VPN 与设备管理” 信任企业开发者证书。
+TestFlight 构建有效期为 90 天，需要持续发布新构建。该渠道用于测试，未提交 App Store 正式上架审核。实现与首次发布证据见 [TestFlight 迁移记录](docs/validation/testflight-20260926.md)。
 
-**打包企业 IPA**（推荐用于内部分发）：
-```bash
-./ios/scripts/package_app.sh
-# 输出：ios/.build/enterprise/KeepsIOS.ipa
-```
+## 历史数据迁移
 
-**直接发布到我的 iOS（Chuan iPhone，端到端验证）**：
-```bash
-xcodebuild \
-  -project ios/KeepsIOS.xcodeproj \
-  -scheme KeepsIOS \
-  -destination 'platform=iOS,id=036DD950-A8BC-5B88-B477-167F1DFB73E1' \
-  -configuration Release \
-  build
-
-xcrun devicectl device install app \
-  --device 036DD950-A8BC-5B88-B477-167F1DFB73E1 \
-  $(find ~/Library/Developer/Xcode/DerivedData -path '*Keeps.app' | head -1)
-```
-
-**内部分发说明**：
-- IPA 可通过内部 HTTPS + manifest、MDM、Apple Configurator、邮件等方式分发给授权设备。
-- 保留原有 simulator 命令用于日常开发调试。
-
-## Control plane
-
-```bash
-cd control_plane
-uv run pytest
-
-export CONTROL_PLANE_DATABASE_URL='sqlite+pysqlite:////myphoto/keeps/db/control_plane.sqlite'
-export DERIVATIVE_STORAGE_BACKEND=filesystem
-export KEEPS_ROOT=/myphoto/keeps
-export ORIGINAL_ROOT=/myphoto/library
-export CONTROL_PLANE_PUBLIC_BASE_URL='http://localhost:2283'
-uv run uvicorn control_plane.app:app --host 0.0.0.0 --port 2283
-
-docker buildx build \
-  --platform linux/arm64 \
-  -f control_plane/Dockerfile.nas \
-  -t keeps-control-plane:local \
-  .
-```
-
-后端通过 control-plane API 访问 NAS-hosted authoritative event store，不允许客户端直连数据库或服务端目录。`actorID == "server"` / trusted device 只是第一版开发和测试授权 stub，不是最终生产权限边界；生产环境应通过迁移管理 schema，并显式关闭自动建表。
+旧 Python 测试和 seed 工具位于 `control_plane/` 与 `scripts/`，用于已有数据库的迁移和协议对照。新客户端不自动打开旧本地数据库，不恢复旧复制或扫描任务。同一 NAS 状态目录只能由一个后端管理。

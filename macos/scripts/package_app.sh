@@ -8,7 +8,7 @@ MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
 cd "$ROOT_DIR"
-swift build
+swift build >&2
 
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR"
@@ -16,6 +16,15 @@ mkdir -p "$RESOURCES_DIR"
 cp "$ROOT_DIR/.build/debug/PhotoAssetManager" "$MACOS_DIR/Keeps"
 chmod +x "$MACOS_DIR/Keeps"
 cp "$ROOT_DIR/Sources/PhotoAssetManager/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
+MARKETING_VERSION="$(awk '$1 == "MARKETING_VERSION" { print $3 }' "$ROOT_DIR/Version.xcconfig")"
+BUILD_NUMBER="$(awk '$1 == "CURRENT_PROJECT_VERSION" { print $3 }' "$ROOT_DIR/Version.xcconfig")"
+[[ -n "$MARKETING_VERSION" && -n "$BUILD_NUMBER" ]]
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MARKETING_VERSION" "$CONTENTS_DIR/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$CONTENTS_DIR/Info.plist"
 cp "$ROOT_DIR/Sources/PhotoAssetManager/Resources/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
+
+# SwiftPM signs the executable alone; the assembled application needs a bundle signature.
+codesign --force --sign - "$APP_DIR" >&2
+codesign --verify --deep --strict "$APP_DIR" >&2
 
 echo "$APP_DIR"

@@ -1,2836 +1,361 @@
-import AppKit
 import Foundation
-import ImageIO
+import KeepsAPI
 import SwiftUI
+import OSLog
 
 @MainActor
 final class LibraryStore: ObservableObject {
-    @Published var assets: [Asset] = []
-    @Published var selectedAssetID: UUID?
-    @Published var selectedAssetIDs: Set<UUID> = []
-    @Published var selectedFiles: [FileInstance] = []
-    @Published var filter = LibraryFilter()
-    @Published var counts: [AssetStatus: Int] = [:]
-    @Published var isScanning = false
-    @Published var scanReport = ScanReport()
-    @Published var lastError: String?
-    @Published var nasRoot: URL?
-    @Published var interruptedScanPath: String?
-    @Published var sourceDirectories: [SourceDirectory] = []
-    @Published var indexedBrowseFolders: [BrowseNode] = []
-    @Published var derivativeStorageURL: URL?
-    @Published var hasselbladRawRootURL: URL?
-    @Published var migrationReport: String?
-    @Published var previewRebuildReport: String?
-    @Published var blockingTask: BlockingTaskReport?
-    @Published var photoImportProgress: PhotoImportProgressReport?
-    @Published var backgroundTask: BackgroundTaskReport?
-    @Published var syncProgressTask: BackgroundTaskReport?
-    @Published private(set) var backgroundQueueItems: [BackgroundQueueItem] = []
-    @Published var hasMoreAssets = false
-    @Published var pendingBrowseSelection: BrowseSelection?
-    @Published var isPhotoImportDialogPresented = false
-    @Published var photoImportPreferences = PhotoImportPreferences()
-    @Published private(set) var isSyncing = false
-    @Published private(set) var lastSyncSummary = "未配置自动同步"
-    @Published private(set) var syncConfiguration = SyncClientConfiguration.load()
-
-    private let databasePath: URL
-    private let database: SQLiteDatabase
-    private let scanner: PhotoScanner
-    private let fileOperations = FileOperations()
-    private let nasMountManager = NASMountManager()
-    private let syncCommandLayerFactory: () -> any SyncCommandWriting
-    private var availabilityTask: Task<Void, Never>?
-    private var startupOrganizationTask: Task<Void, Never>?
-    private var folderSelectionTask: Task<Void, Never>?
-    private var syncDebounceTask: Task<Void, Never>?
-    private var activeSyncTask: Task<Void, Never>?
-    private var currentBackgroundQueueTaskKind: BackgroundQueueTaskKind?
-    private var queuedBackgroundTaskKinds: [BackgroundQueueTaskKind] = []
-    private var pendingAutomaticSync = false
-    private var pendingAutomaticSyncReason = "本地变更"
-    private var pendingAvailabilityRefresh = false
-    private var pendingAvailabilityRefreshForce = false
-    private var pendingPreviewUploads: [UUID: ScannedDerivativeUploadCandidate] = [:]
-    private var folderSelectionID: UUID?
-    private var assetSelectionAnchorID: UUID?
-    private var startupNASMountSucceeded = false
-    private let assetPageSize = 96
-    private let assetLoadAheadThreshold = 24
-    private let availabilityRefreshInterval: TimeInterval = 24 * 60 * 60
-    private let syncLibraryID = "local-library"
-    private let syncPeerID = "control-plane"
-    private let automaticSyncDebounceNanoseconds: UInt64 = 800_000_000
-    private let syncMigrationActorID = "system:migration"
-
-    convenience init() {
-        do {
-            let support = try Self.applicationSupport()
-            let libraryDatabasePath = support.appendingPathComponent("Library.sqlite")
-            let database = try SQLiteDatabase(path: libraryDatabasePath)
-            self.init(
-                databasePath: libraryDatabasePath,
-                database: database,
-                scanner: PhotoScanner(),
-                syncCommandLayerFactory: {
-                    SyncCommandLayer(
-                        libraryID: "local-library",
-                        deviceID: SyncDeviceID(currentDeviceID()),
-                        actorID: NSUserName(),
-                        database: database
-                    )
-                },
-                performStartupWork: true
-            )
-        } catch {
-            fatalError(error.fullTrace)
+    @Published private(set) var hiddenDirectoryPaths: Set<String> = []
+    @Published private(set) var isUpdatingHiddenDirectory = false
+    @Published var hiddenDirectoryFilterEnabled = true {
+        didSet {
+            guard hiddenDirectoryFilterEnabled != oldValue else { return }
+            preferences.set(hiddenDirectoryFilterEnabled, forKey: "keeps.hiddenDirectoryFilterEnabled")
+            clearResults()
+            refresh()
         }
     }
+    @Published private(set) var assets: [KeepsAsset] = []
+    @Published var selectedIDs: Set<UUID> = []
+    @Published var query = KeepsAssetQuery()
+    @Published private(set) var counts: KeepsCounts?
+    @Published private(set) var directories: [KeepsNavigationDirectory] = []
+    @Published private(set) var expandedPaths: Set<String> = []
+    @Published private(set) var directoryChildren: [String: [KeepsNavigationDirectory]] = [:]
+    @Published private(set) var directoryErrors: [String: String] = [:]
+    @Published private(set) var loadingDirectories: Set<String> = []
+    @Published private(set) var navigationError: String?
+    @Published private(set) var isLoadingNavigation = false
+    @Published private(set) var navigationGeneration = 0
+    @Published private(set) var total = 0
+    @Published private(set) var nextCursor: String?
+    @Published private(set) var isLoading = false
+    @Published private(set) var isMutating = false
+    @Published private(set) var configuration: KeepsConfiguration?
+    @Published var lastError: String?
+    @Published private(set) var isCheckingConnection = false
+    @Published private(set) var connectionMessage: String?
+    @Published private(set) var connectionError: String?
+    private(set) var client: KeepsClient?
+    private var loadTask: Task<Void, Never>?
+    private var loadGeneration = 0
+    private var paginationVisible = false
+    private var rootRequestGeneration = 0
+    private static let navigationLogger = Logger(subsystem: "local.keeps", category: "navigation")
+    private let preferences: UserDefaults
+    private let session: URLSession
+    private let persistConfiguration: (KeepsConfiguration) throws -> Void
 
     init(
-        databasePath: URL,
-        database: SQLiteDatabase,
-        scanner: PhotoScanner = PhotoScanner(),
-        syncCommandLayerFactory: @escaping () -> any SyncCommandWriting,
-        performStartupWork: Bool = true
+        configuration: KeepsConfiguration? = nil,
+        session: URLSession = KeepsClient.apiSession,
+        loadSavedSettings: Bool = true,
+        preferences: UserDefaults = .standard,
+        persistConfiguration: @escaping (KeepsConfiguration) throws -> Void = { value in
+            try KeepsSettings.save(baseURLString: value.baseURL.absoluteString, libraryID: value.libraryID, accessCredential: value.accessCredential ?? "")
+        }
     ) {
-        self.databasePath = databasePath
-        self.database = database
-        self.scanner = scanner
-        self.syncCommandLayerFactory = syncCommandLayerFactory
-
+        self.preferences = preferences
+        hiddenDirectoryFilterEnabled = preferences.object(forKey: "keeps.hiddenDirectoryFilterEnabled") as? Bool ?? true
+        self.session = session
+        self.persistConfiguration = persistConfiguration
         do {
-            try database.markInterruptedImportBatches()
-            try database.markInterruptedFolderMoveJobs()
-            try database.markInterruptedPhotoImportJobs()
-            interruptedScanPath = try database.latestInterruptedScanPath()
-            derivativeStorageURL = try database.derivativeStoragePath().map { URL(fileURLWithPath: $0, isDirectory: true) }
-            hasselbladRawRootURL = try database.hasselbladRawRootPath().map { URL(fileURLWithPath: $0, isDirectory: true) }
-            photoImportPreferences = try database.photoImportPreferences()
-            sourceDirectories = try database.sourceDirectories()
-            indexedBrowseFolders = try database.browseFolders()
-            refresh()
-            reloadSyncConfiguration(scheduleSync: !performStartupWork)
-            if performStartupWork {
-                resumeInterruptedFolderMoveIfNeeded()
-                resumeInterruptedPhotoImportIfNeeded()
-                startStartupLibraryOrganizationIfNeeded()
+            let settings = try configuration ?? (loadSavedSettings ? KeepsSettings.load() : nil)
+            self.configuration = settings
+            client = settings.map { KeepsClient(configuration: $0, session: session) }
+        } catch { lastError = Self.describe(error) }
+    }
+
+    var selectedAsset: KeepsAsset? { return assets.first { selectedIDs.contains($0.id) } }
+
+    var locationTitle: String {
+        if let path = query.directory {
+            let root = directories.filter { path == $0.path || path.hasPrefix($0.path + "/") }.max { $0.path.count < $1.path.count }
+            if let root {
+                let suffix = String(path.dropFirst(root.path.count)).split(separator: "/").joined(separator: " / ")
+                return "来源 / " + root.name + (suffix.isEmpty ? "" : " / " + suffix)
             }
-        } catch {
-            fatalError(error.fullTrace)
+            let name = directoryChildren.values.lazy.flatMap { $0 }.first { $0.path == path }?.name
+            return "来源 / " + (name ?? path)
+        }
+        return query.trashed ? "回收站" : query.flagState == "picked" ? "精选" : "全部照片"
+    }
+
+    func isDirectoryHidden(_ path: String) -> Bool {
+        hiddenDirectoryPaths.contains { path == $0 || path.hasPrefix($0 + "/") }
+    }
+
+    func setDirectoryHidden(_ path: String, hidden: Bool) {
+        guard let client, !isUpdatingHiddenDirectory else { return }
+        let generation = navigationGeneration
+        isUpdatingHiddenDirectory = true
+        clearResults()
+        Task {
+            defer { isUpdatingHiddenDirectory = false }
+            do {
+                let response = try await client.setDirectoryHidden(path: path, hidden: hidden)
+                guard generation == navigationGeneration else { return }
+                hiddenDirectoryPaths = Set(response.paths)
+                refresh()
+            } catch {
+                if generation == navigationGeneration { lastError = Self.describe(error) }
+            }
         }
     }
 
-    deinit {
-        availabilityTask?.cancel()
-        startupOrganizationTask?.cancel()
-        folderSelectionTask?.cancel()
-        syncDebounceTask?.cancel()
-        activeSyncTask?.cancel()
+    func setDirectoryExpanded(_ path: String, expanded: Bool) {
+        if expanded {
+            expandedPaths.insert(path)
+            if directoryErrors[path] == nil { loadChildren(of: path) }
+        } else { expandedPaths.remove(path) }
     }
 
-    var selectedAsset: Asset? {
-        assets.first { $0.id == selectedAssetID }
+    func showLibrary(directory: String? = nil, trashed: Bool = false, picked: Bool = false) {
+        clearResults()
+        query = KeepsAssetQuery()
+        query.directory = directory
+        query.recursive = true
+        query.trashed = trashed
+        query.flagState = picked ? "picked" : nil
+        refresh()
     }
 
-    var isBusy: Bool {
-        isScanning || blockingTask != nil || photoImportProgress != nil
+    private func clearResults() {
+        loadTask?.cancel()
+        loadGeneration += 1
+        isLoading = false
+        paginationVisible = false
+        assets = []; selectedIDs = []; total = 0; nextCursor = nil; lastError = nil
     }
 
-    var hasRemoteSyncConfiguration: Bool {
-        syncConfiguration.hasRemoteSync
+    func refreshNavigation() {
+        guard let client else { return }
+        rootRequestGeneration += 1
+        let requestGeneration = rootRequestGeneration
+        let generation = navigationGeneration
+        isLoadingNavigation = true
+        navigationError = nil
+        Task {
+            defer { if requestGeneration == rootRequestGeneration && generation == navigationGeneration { isLoadingNavigation = false } }
+            do {
+                let navigation = try await client.navigation()
+                let hidden = try await client.hiddenDirectories()
+                guard generation == navigationGeneration, requestGeneration == rootRequestGeneration else { return }
+                removeMissingDirectories(old: directories, new: navigation.directories)
+                hiddenDirectoryPaths = Set(hidden.paths)
+                directories = navigation.directories
+                for path in expandedPaths { loadChildren(of: path, refresh: true) }
+            } catch {
+                if generation == navigationGeneration && requestGeneration == rootRequestGeneration { navigationError = Self.describe(error) }
+            }
+        }
     }
 
-    var runningBackgroundQueueItem: BackgroundQueueItem? {
-        backgroundQueueItems.first(where: { $0.state == .running })
+    func loadChildren(of path: String, refresh: Bool = false) {
+        guard let client, (refresh || directoryChildren[path] == nil), !loadingDirectories.contains(path) else { return }
+        let generation = navigationGeneration
+        loadingDirectories.insert(path)
+        directoryErrors[path] = nil
+        let started = ContinuousClock.now
+        Self.navigationLogger.info("Directory request started")
+        Task {
+            defer { if generation == navigationGeneration { loadingDirectories.remove(path) } }
+            do {
+                let navigation = try await client.navigation(path: path)
+                let elapsed = started.duration(to: .now).components
+                let milliseconds = Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15
+                Self.navigationLogger.info("Directory request completed in \(milliseconds, privacy: .public) ms; children \(navigation.directories.count, privacy: .public)")
+                guard generation == navigationGeneration else { return }
+                guard directories.contains(where: { path == $0.path }) || directoryChildren.values.contains(where: { $0.contains(where: { $0.path == path }) }) else { return }
+                removeMissingDirectories(old: directoryChildren[path] ?? [], new: navigation.directories)
+                directoryChildren[path] = navigation.directories
+            } catch {
+                let elapsed = started.duration(to: .now).components
+                let milliseconds = Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15
+                Self.navigationLogger.error("Directory request failed after \(milliseconds, privacy: .public) ms")
+                if generation == navigationGeneration { directoryErrors[path] = Self.describe(error) }
+            }
+        }
     }
 
-    var queuedBackgroundQueueItems: [BackgroundQueueItem] {
-        backgroundQueueItems.filter { $0.state == .queued }
+    private func removeMissingDirectories(old: [KeepsNavigationDirectory], new: [KeepsNavigationDirectory]) {
+        let removed = Set(old.map(\.path)).subtracting(new.map(\.path))
+        for path in removed {
+            expandedPaths = expandedPaths.filter { $0 != path && !$0.hasPrefix(path + "/") }
+            directoryChildren = directoryChildren.filter { $0.key != path && !$0.key.hasPrefix(path + "/") }
+            directoryErrors = directoryErrors.filter { $0.key != path && !$0.key.hasPrefix(path + "/") }
+            if let selected = query.directory, selected == path || selected.hasPrefix(path + "/") { showLibrary() }
+        }
     }
 
-    var visibleBackgroundTaskReport: BackgroundTaskReport? {
-        runningBackgroundQueueItem?.report ?? syncProgressTask ?? backgroundTask
+    private func resetNavigation() {
+        navigationGeneration += 1
+        rootRequestGeneration += 1
+        directories = []; directoryChildren = [:]; directoryErrors = [:]
+        expandedPaths = []; loadingDirectories = []
+        navigationError = nil
+        hiddenDirectoryPaths = []
     }
 
-    func reloadSyncConfiguration(scheduleSync: Bool = true) {
-        syncConfiguration = SyncClientConfiguration.load()
-        syncProgressTask = nil
-        refreshBackgroundQueueItems()
-        if syncConfiguration.hasRemoteSync {
-            if scheduleSync {
-                scheduleAutomaticSync(reason: "同步配置已更新", immediate: true)
+    func clearConnectionFeedback() {
+        connectionMessage = nil
+        connectionError = nil
+    }
+
+    @discardableResult
+    func checkConnection(baseURL: String, libraryID: String, accessCredential: String, save: Bool) async -> Bool {
+        guard !isCheckingConnection else { return false }
+        isCheckingConnection = true
+        clearConnectionFeedback()
+        defer { isCheckingConnection = false }
+        do {
+            let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            let library = libraryID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let url = URL(string: base), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  url.host != nil, url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
+                  !library.isEmpty else { throw KeepsAPIError.invalidConfiguration }
+            let credential = accessCredential.trimmingCharacters(in: .whitespacesAndNewlines)
+            let candidate = KeepsConfiguration(baseURL: url, libraryID: library, accessCredential: credential.isEmpty ? nil : credential)
+            let candidateClient = KeepsClient(configuration: candidate, session: session)
+            _ = try await candidateClient.counts()
+            var probe = KeepsAssetQuery()
+            probe.limit = 1
+            _ = try await candidateClient.assets(query: probe)
+            try Task.checkCancellation()
+            if save {
+                try persistConfiguration(candidate)
+                configuration = candidate
+                client = candidateClient
+                assets = []; selectedIDs = []; counts = nil
+                resetNavigation()
+                query = KeepsAssetQuery()
+                refreshNavigation()
+                refresh()
+                connectionMessage = "已连接并保存 Keeps Server。"
             } else {
-                lastSyncSummary = "已配置自动同步"
+                connectionMessage = "连接成功，服务鉴权与资料库 API 均可用。"
             }
-        } else {
-            lastSyncSummary = "未配置自动同步"
-        }
-    }
-
-    func forceAutomaticSync() {
-        scheduleAutomaticSync(reason: "手动触发同步", immediate: true)
-    }
-
-    func backfillSyncLedger() {
-        guard !isBusy else { return }
-        lastError = nil
-        blockingTask = BlockingTaskReport(
-            title: "工具",
-            phase: "统计资料库",
-            message: "正在确认需要补齐的资产和文件位置。"
-        )
-
-        let database = database
-        let libraryID = syncLibraryID
-        let migrationActorID = syncMigrationActorID
-        let shouldScheduleSync = hasRemoteSyncConfiguration
-        Task {
-            do {
-                let outcome = try await Task.detached(priority: .utility) {
-                    try Self.backfillLedger(
-                        database: database,
-                        libraryID: libraryID,
-                        deviceID: SyncDeviceID(currentDeviceID()),
-                        actorID: migrationActorID,
-                        progressReporter: { progress in
-                        Task { @MainActor in
-                            self.blockingTask = Self.blockingTaskReport(for: progress)
-                        }
-                    })
-                }.value
-
-                blockingTask = nil
-                backgroundTask = BackgroundTaskReport(
-                    title: "工具",
-                    phase: outcome.phase,
-                    totalItems: outcome.ledgerHighWatermark,
-                    completedItems: outcome.ledgerHighWatermark,
-                    message: outcome.message,
-                    isFinished: true
-                )
-                refreshBackgroundQueueItems()
-                lastSyncSummary = outcome.syncSummary
-
-                if shouldScheduleSync {
-                    scheduleAutomaticSync(reason: "ledger 补齐完成", immediate: true)
-                }
-            } catch {
-                blockingTask = nil
-                backgroundTask = BackgroundTaskReport(
-                    title: "工具",
-                    phase: "补齐同步 ledger 失败",
-                    message: error.localizedDescription,
-                    isFinished: true
-                )
-                refreshBackgroundQueueItems()
-                lastError = error.fullTrace
-            }
-        }
-    }
-
-    func chooseAndAddFolders(scanImmediately: Bool) {
-        guard !isBusy else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = true
-        panel.message = "添加一个或多个照片文件夹"
-        if panel.runModal() == .OK {
-            addSourceDirectories(panel.urls, scanImmediately: scanImmediately)
-        }
-    }
-
-    func chooseImportDirectory(message: String) -> URL? {
-        guard !isBusy else { return nil }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.message = message
-        return panel.runModal() == .OK ? panel.url : nil
-    }
-
-    func beginPhotoImport() {
-        isPhotoImportDialogPresented = true
-    }
-
-    func closePhotoImportDialog() {
-        isPhotoImportDialogPresented = false
-    }
-
-    func rememberPhotoImportConfiguration(_ configuration: PhotoImportConfiguration) {
-        do {
-            let preferences = PhotoImportPreferences(
-                importSourcePath: Self.normalizedDirectoryPath(configuration.importSource.path),
-                rawSourcePath: configuration.rawSource.map { Self.normalizedDirectoryPath($0.path) },
-                targetPath: Self.normalizedDirectoryPath(configuration.target.path),
-                targetRawPath: configuration.targetRawRoot.map { Self.normalizedDirectoryPath($0.path) }
-            )
-            try database.setPhotoImportPreferences(preferences)
-            photoImportPreferences = preferences
+            return true
         } catch {
-            lastError = error.fullTrace
+            connectionError = Self.describe(error)
+            return false
         }
-    }
-
-    func restoredPhotoImportURL(for path: String?) -> URL? {
-        guard let path, !path.isEmpty else { return nil }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            return nil
-        }
-        return URL(fileURLWithPath: path, isDirectory: true)
-    }
-
-    func photoImportTarget(for path: String) -> PhotoImportTarget {
-        let normalized = Self.normalizedDirectoryPath(path)
-        return PhotoImportTarget(
-            path: normalized,
-            displayName: URL(fileURLWithPath: normalized, isDirectory: true).lastPathComponent,
-            storageKind: storageKind(for: URL(fileURLWithPath: normalized, isDirectory: true))
-        )
-    }
-
-    func addSourceDirectories(_ urls: [URL], scanImmediately: Bool) {
-        guard !isBusy else { return }
-        guard !urls.isEmpty else { return }
-        do {
-            for url in urls {
-                let storageKind = storageKind(for: url)
-                try database.upsertSourceDirectory(path: url.path, storageKind: storageKind)
-                if storageKind == .nas, nasRoot == nil {
-                    nasRoot = nasRootURL(for: url)
-                }
-            }
-            sourceDirectories = try database.sourceDirectories()
-            indexedBrowseFolders = try database.browseFolders()
-            if scanImmediately {
-                scanSources(sourceDirectories.filter { source in
-                    urls.contains { $0.path == source.path }
-                })
-            }
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    func scan(_ url: URL, storageKind: StorageKind) {
-        guard !isBusy else { return }
-        isScanning = true
-        scanReport = ScanReport()
-        lastError = nil
-        Task {
-            let report = await scanner.scanDirectory(
-                url,
-                storageKind: storageKind,
-                derivativeRoot: derivativeStorageURL,
-                database: database,
-                ledgerContext: makeScanLedgerContext()
-            ) { [weak self] report in
-                self?.scanReport = report
-            } didPersist: { [weak self] result in
-                self?.enqueueDerivativeCandidates(result.derivativeCandidates)
-            }
-            scanReport = report
-            isScanning = false
-            if !report.errors.isEmpty {
-                lastError = report.errors.joined(separator: "\n\n")
-            }
-            try? database.markSourceDirectoryScanned(path: url.path)
-            try? database.clearInterruptedBatches(sourcePath: url.path)
-            interruptedScanPath = try? database.latestInterruptedScanPath()
-            sourceDirectories = (try? database.sourceDirectories()) ?? sourceDirectories
-            indexedBrowseFolders = (try? database.browseFolders()) ?? indexedBrowseFolders
-            refresh()
-            scheduleAutomaticSync(reason: "扫描完成")
-        }
-    }
-
-    func scanSource(_ source: SourceDirectory) {
-        scan(URL(fileURLWithPath: source.path), storageKind: source.storageKind)
-    }
-
-    func scanTrackedSources() {
-        guard !isBusy else { return }
-        scanSources(sourceDirectories.filter(\.isTracked))
-    }
-
-    func removeSourceDirectory(_ source: SourceDirectory) {
-        guard !isBusy else { return }
-        do {
-            try database.removeSourceDirectory(id: source.id)
-            sourceDirectories = try database.sourceDirectories()
-            indexedBrowseFolders = try database.browseFolders()
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    func removeFolder(_ source: FolderMoveSource, deleteEmptyFolder: Bool) {
-        guard !isBusy else { return }
-        if deleteEmptyFolder {
-            trashFolderAfterEmptyScan(source)
-            return
-        }
-        guard let sourceDirectoryID = source.sourceDirectoryID else {
-            lastError = "只有已添加到资料库的文件夹可以仅移除。"
-            return
-        }
-        do {
-            try database.removeBrowseFolderTree(path: source.path)
-            try database.removeSourceDirectory(id: sourceDirectoryID)
-            clearBrowseSelectionIfNeeded(removedPath: source.path)
-            finishFolderRemovalRefresh()
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    func moveSourceDirectory(_ source: SourceDirectory, to parent: SourceDirectory?) {
-        guard !isBusy else { return }
-        guard let parent else { return }
-        startFolderMove(FolderMoveSource(source: source), destinationParentPath: parent.path, parentID: parent.id)
-    }
-
-    func moveSourceDirectory(_ source: SourceDirectory, to target: FolderMoveTarget) {
-        guard !isBusy else { return }
-        moveFolder(FolderMoveSource(source: source), to: target)
-    }
-
-    func moveFolder(_ source: FolderMoveSource, to target: FolderMoveTarget) {
-        guard !isBusy else { return }
-        startFolderMove(source, destinationParentPath: target.path, parentID: parentSourceID(for: target.path, excluding: source.sourceDirectoryID))
-    }
-
-    func availableFolderMoveTargets(for source: FolderMoveSource) -> [FolderMoveTarget] {
-        SourceDirectoryTreeBuilder.moveTargets(
-            for: source.path,
-            sources: sourceDirectories,
-            indexedBrowseFolders: indexedBrowseFolders
-        )
-    }
-
-    func availablePhotoImportTargets() -> [PhotoImportTarget] {
-        var targetsByPath: [String: PhotoImportTarget] = [:]
-        for source in sourceDirectories {
-            let path = Self.normalizedDirectoryPath(source.path)
-            targetsByPath[path] = PhotoImportTarget(
-                path: path,
-                displayName: path,
-                storageKind: source.storageKind
-            )
-        }
-        for folder in indexedBrowseFolders {
-            let path = Self.normalizedDirectoryPath(folder.displayPath)
-            targetsByPath[path] = PhotoImportTarget(
-                path: path,
-                displayName: folder.displayName,
-                storageKind: folder.storageKind
-            )
-        }
-        return targetsByPath.values.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-    }
-
-    func importPhotoFolder(configuration: PhotoImportConfiguration) {
-        guard !isBusy else { return }
-        let sourcePath = Self.normalizedDirectoryPath(configuration.importSource.path)
-        guard !isLibraryPath(sourcePath) else {
-            lastError = "导入来源已经在资料库中：\(sourcePath)"
-            return
-        }
-        rememberPhotoImportConfiguration(configuration)
-        closePhotoImportDialog()
-        beginPhotoImportPlanning(configuration: configuration, resuming: false)
-    }
-
-    func resumeInterruptedPhotoImportIfNeeded() {
-        guard blockingTask == nil, photoImportProgress == nil else { return }
-        do {
-            guard let job = try database.unfinishedPhotoImportJob() else { return }
-            continuePhotoImport(job)
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    private func beginPhotoImportPlanning(configuration: PhotoImportConfiguration, resuming: Bool) {
-        let sourcePath = Self.normalizedDirectoryPath(configuration.importSource.path)
-        availabilityTask?.cancel()
-        availabilityTask = nil
-        backgroundTask = nil
-        photoImportProgress = PhotoImportProgressReport(
-            majorPhase: "导入规划",
-            phase: resuming ? "恢复导入规划" : "扫描照片",
-            currentPath: sourcePath,
-            message: resuming ? "正在恢复未完成的导入任务" : Self.photoImportPlanningMessage(phase: "扫描照片", completed: 0, total: 0)
-        )
-        lastError = nil
-
-        let database = database
-        Task.detached(priority: .userInitiated) {
-            do {
-                let plan = try FileOperations().buildPhotoImportPlan(configuration: configuration) { phase, path, completed, total in
-                    Task { @MainActor in
-                        let photoCount = phase == "扫描照片" && total > 0
-                            ? total
-                            : self.photoImportProgress?.photoCount ?? 0
-                        self.photoImportProgress = PhotoImportProgressReport(
-                            majorPhase: "导入规划",
-                            phase: phase,
-                            currentPath: path,
-                            totalItems: total,
-                            completedItems: completed,
-                            photoCount: photoCount,
-                            matchedRawCount: self.photoImportProgress?.matchedRawCount ?? 0,
-                            message: Self.photoImportPlanningMessage(phase: phase, completed: completed, total: total)
-                        )
-                    }
-                }
-                await MainActor.run {
-                    self.photoImportProgress = PhotoImportProgressReport(
-                        majorPhase: "导入规划",
-                        phase: "规划完成",
-                        currentPath: sourcePath,
-                        totalItems: plan.items.count,
-                        completedItems: plan.items.count,
-                        photoCount: plan.stats.photoCount,
-                        matchedRawCount: plan.stats.matchedRawCount,
-                        unmatchedPhotoCount: plan.stats.unmatchedPhotoCount,
-                        message: "将导入照片 \(plan.stats.photoCount) 张，匹配 RAW \(plan.stats.matchedRawCount) 张，共 \(plan.items.count) 个文件"
-                    )
-                }
-                let job = try database.createPhotoImportJob(configuration: configuration, plan: plan)
-                await MainActor.run {
-                    self.executePhotoImport(job)
-                }
-            } catch {
-                await MainActor.run {
-                    self.photoImportProgress = nil
-                    self.lastError = error.fullTrace
-                }
-            }
-        }
-    }
-
-    private func continuePhotoImport(_ job: PhotoImportJob) {
-        availabilityTask?.cancel()
-        availabilityTask = nil
-        backgroundTask = nil
-        photoImportProgress = PhotoImportProgressReport(
-            majorPhase: "执行导入",
-            phase: "恢复未完成导入",
-            currentPath: job.importSourcePath,
-            totalItems: job.totalFiles,
-            completedItems: job.completedFiles,
-            photoCount: job.photoCount,
-            matchedRawCount: job.matchedRawCount,
-            unmatchedPhotoCount: job.unmatchedPhotoCount,
-            message: "从第 \(job.completedFiles + 1) 个文件继续，共 \(job.totalFiles) 个"
-        )
-        lastError = nil
-        executePhotoImport(job)
-    }
-
-    private func executePhotoImport(_ job: PhotoImportJob) {
-        let database = database
-        let scanner = scanner
-        let derivativeStorageURL = derivativeStorageURL
-        let ledgerContext = makeScanLedgerContext()
-        Task.detached(priority: .userInitiated) {
-            var batchID: UUID?
-            do {
-                let createdBatchID = try database.createImportBatch(sourcePath: job.targetPath, deviceID: currentDeviceID())
-                batchID = createdBatchID
-                var importedAssets = 0
-                var newLocations = 0
-                try await FileOperations().runPhotoImportJob(
-                    job: job,
-                    database: database,
-                    scanner: scanner,
-                    derivativeRoot: derivativeStorageURL,
-                    batchID: createdBatchID,
-                    ledgerContext: ledgerContext,
-                    progress: { job, item in
-                        let pending = (try? database.pendingPhotoImportItems(jobID: job.id).count) ?? 0
-                        let completed = max(0, job.totalFiles - pending)
-                        await MainActor.run {
-                            self.photoImportProgress = PhotoImportProgressReport(
-                                majorPhase: "执行导入",
-                                phase: "复制并写入资料库",
-                                currentPath: item.sourcePath,
-                                totalItems: job.totalFiles,
-                                completedItems: min(completed, job.totalFiles),
-                                photoCount: job.photoCount,
-                                matchedRawCount: job.matchedRawCount,
-                                unmatchedPhotoCount: job.unmatchedPhotoCount,
-                                message: "照片 \(job.photoCount) 张，已匹配 RAW \(job.matchedRawCount) 张"
-                            )
-                        }
-                    },
-                    didPersist: { result in
-                        if result.insertedAsset {
-                            importedAssets += 1
-                        } else if result.insertedLocation {
-                            newLocations += 1
-                        }
-                        Task { @MainActor in
-                            self.enqueueDerivativeCandidates(result.derivativeCandidates)
-                        }
-                    }
-                )
-
-                try database.markSourceDirectoryScanned(path: job.targetPath)
-                if let rawRootPath = job.targetRawRootPath {
-                    try database.upsertSourceDirectory(path: rawRootPath, storageKind: job.storageKind)
-                }
-                if let batchID {
-                    try database.finishImportBatch(batchID, status: "finished")
-                }
-                let sourceDirectories = try database.sourceDirectories()
-                let indexedBrowseFolders = try database.browseFolders()
-                let interruptedScanPath = try database.latestInterruptedScanPath()
-                await MainActor.run {
-                    self.sourceDirectories = sourceDirectories
-                    self.indexedBrowseFolders = indexedBrowseFolders
-                    self.interruptedScanPath = interruptedScanPath
-                    self.photoImportProgress = nil
-                    if importedAssets > 0 || newLocations > 0 {
-                        self.scanReport = ScanReport(importedAssets: importedAssets, newLocations: newLocations)
-                    }
-                    self.refresh()
-                    self.startAvailabilityRefreshInBackground()
-                    self.scheduleAutomaticSync(reason: "导入完成")
-                }
-            } catch {
-                try? database.failPhotoImportJob(id: job.id, error: error)
-                if let batchID {
-                    try? database.finishImportBatch(batchID, status: "failed")
-                }
-                await MainActor.run {
-                    self.photoImportProgress = nil
-                    self.lastError = error.fullTrace
-                }
-            }
-        }
-    }
-
-    func resumeInterruptedFolderMoveIfNeeded() {
-        guard blockingTask == nil else { return }
-        do {
-            guard let job = try database.unfinishedFolderMoveJob() else { return }
-            continueFolderMove(job, parentID: parentSourceID(for: job.destinationParentPath, excluding: job.sourceDirectoryID))
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    func topLevelMoveTargets(excluding source: SourceDirectory) -> [SourceDirectory] {
-        SourceDirectoryTreeBuilder
-            .topLevelSources(in: sourceDirectories)
-            .filter { $0.id != source.id }
-    }
-
-    func chooseDerivativeMigrationLocation() {
-        guard !isBusy else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.message = "选择预览图迁移目标位置"
-        if panel.runModal() == .OK, let url = panel.url {
-            migrateDerivativeStorage(to: url.appendingPathComponent("PhotoAssetManagerDerivatives", isDirectory: true))
-        }
-    }
-
-    func clearDerivativeStorageLocation() {
-        guard !isBusy else { return }
-        setDerivativeStorageURL(nil)
-    }
-
-    func resumeInterruptedScan() {
-        guard !isBusy else { return }
-        guard let interruptedScanPath else { return }
-        let url = URL(fileURLWithPath: interruptedScanPath)
-        let storageKind: StorageKind = interruptedScanPath.hasPrefix("/Volumes/") ? .nas : .local
-        if storageKind == .nas {
-            nasRoot = url
-        }
-        scan(url, storageKind: storageKind)
     }
 
     func refresh() {
-        do {
-            let page = try database.queryAssets(filter: filter, limit: assetPageSize + 1)
-            assets = Array(page.prefix(assetPageSize))
-            hasMoreAssets = page.count > assetPageSize
-            sourceDirectories = try database.sourceDirectories()
-            indexedBrowseFolders = try database.browseFolders()
-            if selectedAssetID == nil || !assets.contains(where: { $0.id == selectedAssetID }) {
-                selectedAssetID = assets.first?.id
-            }
-            selectedAssetIDs.formIntersection(Set(assets.map(\.id)))
-            if let selectedAssetID, selectedAssetIDs.isEmpty {
-                selectedAssetIDs = [selectedAssetID]
-            }
-            if assetSelectionAnchorID == nil || !assets.contains(where: { $0.id == assetSelectionAnchorID }) {
-                assetSelectionAnchorID = selectedAssetID
-            }
-            loadSelectedFiles()
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    func refreshCounts() {
-        do {
-            counts = try database.countsByStatus()
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    func loadMoreAssets() {
-        guard hasMoreAssets else { return }
-        do {
-            let page = try database.queryAssets(filter: filter, limit: assetPageSize + 1, offset: assets.count)
-            assets.append(contentsOf: page.prefix(assetPageSize))
-            hasMoreAssets = page.count > assetPageSize
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    func loadMoreAssetsIfNeeded(currentAssetID: UUID) {
-        guard hasMoreAssets else { return }
-        guard let currentIndex = assets.firstIndex(where: { $0.id == currentAssetID }) else { return }
-        guard assets.distance(from: currentIndex, to: assets.endIndex) <= assetLoadAheadThreshold else { return }
-        loadMoreAssets()
-    }
-
-    func selectAsset(_ asset: Asset, modifiers: EventModifiers) {
-        let isRangeSelection = modifiers.contains(.shift)
-        let isToggleSelection = modifiers.contains(.command)
-
-        if isRangeSelection, let anchor = assetSelectionAnchorID,
-           let anchorIndex = assets.firstIndex(where: { $0.id == anchor }),
-           let selectedIndex = assets.firstIndex(where: { $0.id == asset.id }) {
-            let bounds = min(anchorIndex, selectedIndex)...max(anchorIndex, selectedIndex)
-            selectedAssetIDs = Set(assets[bounds].map(\.id))
-        } else if isToggleSelection {
-            if selectedAssetIDs.contains(asset.id), selectedAssetIDs.count > 1 {
-                selectedAssetIDs.remove(asset.id)
-            } else {
-                selectedAssetIDs.insert(asset.id)
-            }
-            assetSelectionAnchorID = asset.id
-        } else {
-            selectedAssetIDs = [asset.id]
-            assetSelectionAnchorID = asset.id
-        }
-
-        if selectedAssetIDs.contains(asset.id) {
-            selectedAssetID = asset.id
-        } else {
-            selectedAssetID = selectedAssetIDs.sorted { $0.uuidString < $1.uuidString }.first
-        }
-        loadSelectedFiles()
-    }
-
-    func selectAdjacentAsset(_ direction: AssetSelectionDirection) {
-        guard !isBusy else { return }
-        guard !assets.isEmpty else { return }
-
-        if direction == .next,
-           let selectedAssetID,
-           assets.last?.id == selectedAssetID,
-           hasMoreAssets {
-            loadMoreAssets()
-        }
-
-        let currentIndex = selectedAssetID.flatMap { id in
-            assets.firstIndex { $0.id == id }
-        }
-        let targetIndex: Int
-        switch direction {
-        case .previous:
-            targetIndex = max((currentIndex ?? 0) - 1, assets.startIndex)
-        case .next:
-            targetIndex = min((currentIndex ?? -1) + 1, assets.index(before: assets.endIndex))
-        }
-        selectAsset(assets[targetIndex], modifiers: [])
-    }
-
-    func setSelectedAssetRating(_ rating: Int) {
-        guard !isBusy else { return }
-        guard let asset = selectedAsset else { return }
-        let updatedRating = max(0, min(5, rating))
-        do {
-            let commandLayer = syncCommandLayerFactory()
-            try database.updateAssetMetadataAndAppendLedger(
-                asset: updatedAsset(asset) { draft in
-                    draft.rating = updatedRating
-                },
-                libraryID: syncLibraryID,
-                deviceID: SyncDeviceID(currentDeviceID()),
-                currentWallTimeMilliseconds: Self.currentWallTimeMilliseconds()
-            ) { sequence, time in
-                commandLayer.makeRatingOperation(
-                    assetID: asset.id,
-                    rating: updatedRating,
-                    deviceSequence: sequence,
-                    time: time
-                )
-            }
-            refresh()
-            scheduleAutomaticSync(reason: "评分已更新")
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    func setSelectedAssetFlagState(_ flagState: AssetFlagState) {
-        guard !isBusy else { return }
-        guard let asset = selectedAsset else { return }
-        do {
-            let commandLayer = syncCommandLayerFactory()
-            try database.updateAssetMetadataAndAppendLedger(
-                asset: updatedAsset(asset) { draft in
-                    draft.flagState = flagState
-                },
-                libraryID: syncLibraryID,
-                deviceID: SyncDeviceID(currentDeviceID()),
-                currentWallTimeMilliseconds: Self.currentWallTimeMilliseconds()
-            ) { sequence, time in
-                commandLayer.makeFlagOperation(
-                    assetID: asset.id,
-                    flagState: flagState,
-                    deviceSequence: sequence,
-                    time: time
-                )
-            }
-            refresh()
-            scheduleAutomaticSync(reason: "旗标已更新")
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    func setSelectedAssetColorLabel(_ colorLabel: AssetColorLabel?) {
-        guard !isBusy else { return }
-        guard let asset = selectedAsset else { return }
-        do {
-            let commandLayer = syncCommandLayerFactory()
-            try database.updateAssetMetadataAndAppendLedger(
-                asset: updatedAsset(asset) { draft in
-                    draft.colorLabel = colorLabel
-                },
-                libraryID: syncLibraryID,
-                deviceID: SyncDeviceID(currentDeviceID()),
-                currentWallTimeMilliseconds: Self.currentWallTimeMilliseconds()
-            ) { sequence, time in
-                commandLayer.makeColorLabelOperation(
-                    assetID: asset.id,
-                    colorLabel: colorLabel,
-                    deviceSequence: sequence,
-                    time: time
-                )
-            }
-            refresh()
-            scheduleAutomaticSync(reason: "颜色标签已更新")
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    func setSelectedAssetTags(_ tags: [String]) {
-        guard !isBusy else { return }
-        guard let asset = selectedAsset else { return }
-        let normalizedTags = Self.normalizeTags(tags)
-        do {
-            let commandLayer = syncCommandLayerFactory()
-            let currentTags = Set(asset.tags)
-            let nextTags = Set(normalizedTags)
-            let add = nextTags.subtracting(currentTags)
-            let remove = currentTags.subtracting(nextTags)
-            try database.updateAssetMetadataAndAppendLedger(
-                asset: updatedAsset(asset) { draft in
-                    draft.tags = normalizedTags
-                },
-                libraryID: syncLibraryID,
-                deviceID: SyncDeviceID(currentDeviceID()),
-                currentWallTimeMilliseconds: Self.currentWallTimeMilliseconds()
-            ) { sequence, time in
-                commandLayer.makeTagsOperation(
-                    assetID: asset.id,
-                    add: add,
-                    remove: remove,
-                    deviceSequence: sequence,
-                    time: time
-                )
-            }
-            refresh()
-            scheduleAutomaticSync(reason: "标签已更新")
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    func startAvailabilityRefreshInBackground(force: Bool = false) {
-        pendingAvailabilityRefresh = true
-        pendingAvailabilityRefreshForce = pendingAvailabilityRefreshForce || force
-        guard startupNASMountSucceeded else {
-            backgroundTask = BackgroundTaskReport(
-                title: "后台任务",
-                phase: "等待 NAS 挂载",
-                message: "启动挂载完成后再校验文件状态。",
-                isFinished: true
-            )
-            refreshBackgroundQueueItems()
-            return
-        }
-        queueBackgroundTask(.availabilityRefresh)
-    }
-
-    private func beginAvailabilityRefreshInBackground(force: Bool) {
-        guard availabilityTask == nil else { return }
-        backgroundTask = BackgroundTaskReport(title: "后台任务", phase: "准备校验文件状态", message: "应用可以继续使用")
-        refreshBackgroundQueueItems()
-        availabilityTask = Task { [weak self] in
-            guard let self else { return }
+        loadTask?.cancel()
+        loadGeneration += 1
+        let generation = loadGeneration
+        guard let client else { isLoading = false; return }
+        query.cursor = nil
+        var requestedQuery = query
+        requestedQuery.showHidden = !hiddenDirectoryFilterEnabled
+        isLoading = true
+        lastError = nil
+        loadTask = Task {
+            defer { finishLoading(generation: generation) }
             do {
-                guard try shouldRunAvailabilityRefresh(force: force) else {
-                    backgroundTask = BackgroundTaskReport(
-                        title: "后台任务",
-                        phase: "文件状态最近已校验",
-                        message: "已跳过本次启动全量校验",
-                        isFinished: true
-                    )
-                    refreshBackgroundQueueItems()
-                    availabilityTask = nil
-                    finishBackgroundQueueTask(.availabilityRefresh)
-                    return
-                }
-                refreshCounts()
-                let targets = try database.availabilityCheckTargets()
-                backgroundTask = BackgroundTaskReport(
-                    title: "后台任务",
-                    phase: targets.isEmpty ? "没有需要校验的文件" : "校验文件状态",
-                    totalItems: targets.count,
-                    message: "应用可以继续使用"
-                )
-                refreshBackgroundQueueItems()
-
-                let batchSize = 250
-                var completed = 0
-                for batch in targets.chunked(size: batchSize) {
-                    guard !Task.isCancelled else { return }
-                    let updates = await Self.checkAvailability(batch)
-                    try database.updateFileAvailability(updates)
-                    completed += batch.count
-                    backgroundTask = BackgroundTaskReport(
-                        title: "后台任务",
-                        phase: "校验文件状态",
-                        currentPath: batch.last?.path ?? "",
-                        totalItems: targets.count,
-                        completedItems: completed,
-                        message: "应用可以继续使用"
-                    )
-                    refreshBackgroundQueueItems()
-                    await Task.yield()
-                }
-
-                try database.markAvailabilityRefreshCompleted(at: Date())
-                refresh()
-                refreshCounts()
-                backgroundTask = BackgroundTaskReport(
-                    title: "后台任务",
-                    phase: "文件状态校验完成",
-                    totalItems: targets.count,
-                    completedItems: targets.count,
-                    message: "资产状态已更新",
-                    isFinished: true
-                )
-                refreshBackgroundQueueItems()
-            } catch {
-                lastError = error.fullTrace
-                backgroundTask = BackgroundTaskReport(
-                    title: "后台任务",
-                    phase: "文件状态校验失败",
-                    message: error.localizedDescription,
-                    isFinished: true
-                )
-                refreshBackgroundQueueItems()
-            }
-            availabilityTask = nil
-            finishBackgroundQueueTask(.availabilityRefresh)
-        }
-    }
-
-    func forceAvailabilityRefreshInBackground() {
-        startAvailabilityRefreshInBackground(force: true)
-    }
-
-    /// 外部移动文件夹后，批量更新 DB 中匹配前缀的 source/fi 路径，并重建索引（避免 stale 旧路径残留）。
-    /// 例如 oldPrefix="/Volumes/home/Photos" , newPrefix="/Volumes/myphoto/和川专属"
-    func bulkUpdatePathsAfterExternalMove(oldPrefix: String, newPrefix: String) throws {
-        try database.bulkUpdatePathsForMovedFolder(oldPrefix: oldPrefix, newPrefix: newPrefix)
-        sourceDirectories = try database.sourceDirectories()
-        indexedBrowseFolders = try database.browseFolders()
-        refresh()
-        // 通知用户可能需要刷新 NAS 挂载或重新扫描以更新 fi 可用性
-    }
-
-    func fillMissingCaptureTimes() {
-        guard !isBusy else { return }
-        let sources = sourceDirectories.filter(\.isTracked)
-        guard !sources.isEmpty else {
-            backgroundTask = BackgroundTaskReport(
-                title: "工具",
-                phase: "没有可扫描的文件夹",
-                message: "请先添加照片文件夹。",
-                isFinished: true
-            )
-            return
-        }
-
-        isScanning = true
-        scanReport = ScanReport()
-        blockingTask = BlockingTaskReport(
-            title: "工具",
-            phase: "补齐拍摄时间",
-            totalItems: sources.count,
-            message: "正在全库扫描照片元数据，缺失时使用文件创建时间。"
-        )
-        lastError = nil
-
-        let database = database
-        let scanner = scanner
-        let derivativeStorageURL = derivativeStorageURL
-        let ledgerContext = makeScanLedgerContext()
-        Task {
-            var completedSources = 0
-            var errors: [String] = []
-            for source in sources {
-                guard !Task.isCancelled else { break }
-                let completedBeforeSource = completedSources
-                let sourceURL = URL(fileURLWithPath: source.path, isDirectory: true)
-                blockingTask = BlockingTaskReport(
-                    title: "工具",
-                    phase: "补齐拍摄时间",
-                    currentPath: source.path,
-                    totalItems: sources.count,
-                    completedItems: completedBeforeSource,
-                    message: "正在全库扫描照片元数据，缺失时使用文件创建时间。"
-                )
-                let report = await scanner.scanDirectory(
-                    sourceURL,
-                    storageKind: source.storageKind,
-                    derivativeRoot: derivativeStorageURL,
-                    database: database,
-                    ledgerContext: ledgerContext
-                ) { [weak self] report in
-                    self?.scanReport = report
-                    self?.blockingTask = BlockingTaskReport(
-                        title: "工具",
-                        phase: report.phase.isEmpty ? "补齐拍摄时间" : report.phase,
-                        currentPath: report.currentPath.isEmpty ? source.path : report.currentPath,
-                        totalItems: report.totalFiles > 0 ? report.totalFiles : sources.count,
-                        completedItems: report.totalFiles > 0 ? report.scannedFiles : completedBeforeSource,
-                        skippedItems: report.skippedExistingFiles,
-                        message: "正在扫描 \(source.path)"
-                    )
-                } didPersist: { [weak self] result in
-                    self?.enqueueDerivativeCandidates(result.derivativeCandidates)
-                }
-                errors.append(contentsOf: report.errors)
-                completedSources += 1
-                try? database.markSourceDirectoryScanned(path: source.path)
-            }
-
-            isScanning = false
-            sourceDirectories = (try? database.sourceDirectories()) ?? sourceDirectories
-            indexedBrowseFolders = (try? database.browseFolders()) ?? indexedBrowseFolders
-            refresh()
-            refreshCounts()
-            blockingTask = nil
-            backgroundTask = BackgroundTaskReport(
-                title: "工具",
-                phase: errors.isEmpty ? "拍摄时间整理完成" : "拍摄时间整理完成，部分文件失败",
-                totalItems: sources.count,
-                completedItems: completedSources,
-                message: errors.isEmpty ? "已完成全库扫描" : "有 \(errors.count) 个错误，请查看错误详情。",
-                isFinished: true
-            )
-            if !errors.isEmpty {
-                lastError = errors.joined(separator: "\n\n")
-            }
-            scheduleAutomaticSync(reason: "拍摄时间整理完成")
-        }
-    }
-
-    private func shouldRunAvailabilityRefresh(force: Bool) throws -> Bool {
-        if force { return true }
-        guard let lastRefresh = try database.lastAvailabilityRefreshAt() else { return true }
-        return Date().timeIntervalSince(lastRefresh) >= availabilityRefreshInterval
-    }
-
-    func sourcesNeedingStartupOrganization() throws -> [SourceDirectory] {
-        let repairPaths = try database.sourceDirectoryPathsNeedingBrowseGraphRepair()
-        return sourceDirectories.filter { source in
-            source.isTracked && (source.lastScannedAt == nil || repairPaths.contains(source.path))
-        }
-    }
-
-    func startStartupLibraryOrganizationIfNeeded() {
-        guard blockingTask == nil else { return }
-        guard startupOrganizationTask == nil else { return }
-        let sources: [SourceDirectory]
-        do {
-            sources = try sourcesNeedingStartupOrganization()
-        } catch {
-            lastError = error.fullTrace
-            return
-        }
-
-        isScanning = true
-        scanReport = ScanReport()
-        lastError = nil
-        blockingTask = BlockingTaskReport(
-            title: "系统整理中",
-            phase: "挂载 NAS 来源",
-            totalItems: max(sourceDirectories.filter { $0.storageKind == .nas }.count, sources.count),
-            message: "正在挂载已登记的 NAS 照片来源。"
-        )
-
-        startupOrganizationTask = Task { [weak self] in
-            guard let self else { return }
-            var completedSources = 0
-            var scanErrors: [String] = []
-            var shouldClearBlockingTask = true
-            let ledgerContext = makeScanLedgerContext()
-            defer {
-                isScanning = false
-                if shouldClearBlockingTask {
-                    blockingTask = nil
-                }
-                startupOrganizationTask = nil
-                runNextBackgroundQueueTaskIfNeeded()
-            }
-
-            do {
-                let mountReport = await mountNASRootsAtStartup()
-                guard !mountReport.hasFailures else {
-                    shouldClearBlockingTask = false
-                    blockingTask = BlockingTaskReport(
-                        title: "系统整理中",
-                        phase: "NAS 挂载未完成",
-                        totalItems: mountReport.checkedRootCount,
-                        completedItems: mountReport.alreadyAvailableRoots.count + mountReport.mountedRoots.count,
-                        message: "请确认 NAS 可访问后重启应用，暂不扫描或校验文件状态。"
-                    )
-                    startupNASMountSucceeded = false
-                    return
-                }
-                startupNASMountSucceeded = true
-
-                guard !sources.isEmpty else {
-                    refresh()
-                    startAvailabilityRefreshInBackground()
-                    scheduleAutomaticSync(reason: "启动整理完成")
-                    return
-                }
-
-                try database.rebuildBrowseGraph()
-                sourceDirectories = try database.sourceDirectories()
-                indexedBrowseFolders = try database.browseFolders()
-
-                for source in sources {
-                    guard !Task.isCancelled else { throw CancellationError() }
-                    let completedBeforeSource = completedSources
-                    let sourceURL = URL(fileURLWithPath: source.path, isDirectory: true)
-                    blockingTask = BlockingTaskReport(
-                        title: "系统整理中",
-                        phase: "正在整理照片索引",
-                        currentPath: source.path,
-                        totalItems: sources.count,
-                        completedItems: completedBeforeSource,
-                        message: "正在整理 \(source.path)"
-                    )
-
-                    let report = await scanner.scanDirectory(
-                        sourceURL,
-                        storageKind: source.storageKind,
-                        derivativeRoot: derivativeStorageURL,
-                        database: database,
-                        ledgerContext: ledgerContext
-                    ) { [weak self] report in
-                        self?.scanReport = report
-                        self?.blockingTask = BlockingTaskReport(
-                            title: "系统整理中",
-                            phase: report.phase.isEmpty ? "正在整理照片索引" : report.phase,
-                            currentPath: report.currentPath.isEmpty ? source.path : report.currentPath,
-                            totalItems: sources.count,
-                            completedItems: completedBeforeSource,
-                            skippedItems: report.skippedFiles,
-                            message: self?.startupOrganizationMessage(sourcePath: source.path, report: report) ?? "正在整理 \(source.path)"
-                        )
-                    } didPersist: { [weak self] result in
-                        self?.enqueueDerivativeCandidates(result.derivativeCandidates)
-                    }
-
-                    scanReport = report
-                    scanErrors.append(contentsOf: report.errors)
-                    try database.markSourceDirectoryScanned(path: source.path)
-                    try database.clearInterruptedBatches(sourcePath: source.path)
-                    completedSources += 1
-                    sourceDirectories = try database.sourceDirectories()
-                    indexedBrowseFolders = try database.browseFolders()
-                    blockingTask?.completedItems = completedSources
-                    await Task.yield()
-                }
-
-                interruptedScanPath = try database.latestInterruptedScanPath()
-                try database.rebuildBrowseGraph()
-                sourceDirectories = try database.sourceDirectories()
-                indexedBrowseFolders = try database.browseFolders()
-                if !scanErrors.isEmpty {
-                    lastError = scanErrors.joined(separator: "\n\n")
-                }
-                refresh()
-                startAvailabilityRefreshInBackground()
-                scheduleAutomaticSync(reason: "启动整理完成")
-            } catch is CancellationError {
-            } catch {
-                lastError = error.fullTrace
-            }
-        }
-    }
-
-    private func mountNASRootsAtStartup() async -> NASMountReport {
-        blockingTask = BlockingTaskReport(
-            title: "系统整理中",
-            phase: "挂载 NAS 来源",
-            totalItems: sourceDirectories.filter { $0.storageKind == .nas }.count + (derivativeStorageURL == nil ? 0 : 1),
-            message: "正在挂载已登记的 NAS 照片来源。"
-        )
-        let report = await nasMountManager.mountNASRootsIfNeeded(for: sourceDirectories, derivativeStorageURL: derivativeStorageURL)
-        blockingTask = BlockingTaskReport(
-            title: "系统整理中",
-            phase: report.hasFailures ? "NAS 挂载未完成" : "NAS 挂载完成",
-            totalItems: report.checkedRootCount,
-            completedItems: report.alreadyAvailableRoots.count + report.mountedRoots.count,
-            message: report.hasFailures ? "仍有 NAS 来源不可访问。" : "NAS 来源已可访问，继续启动整理。"
-        )
-        return report
-    }
-
-    private func startupOrganizationMessage(sourcePath: String, report: ScanReport) -> String {
-        if report.totalFiles > 0 {
-            return "正在整理 \(sourcePath)，已扫描 \(report.scannedFiles) / \(report.totalFiles) 个候选文件。"
-        }
-        if report.discoveredFiles > 0 {
-            return "正在整理 \(sourcePath)，已发现 \(report.discoveredFiles) 个候选文件。"
-        }
-        return "正在整理 \(sourcePath)"
-    }
-
-    func setStatusFilter(_ status: AssetStatus?) {
-        filter.status = status
-        refresh()
-    }
-
-    func setMinimumRatingFilter(_ rating: Int) {
-        filter.minimumRating = max(0, min(5, rating))
-        refresh()
-    }
-
-    func setFlaggedOnlyFilter(_ flaggedOnly: Bool) {
-        filter.flaggedOnly = flaggedOnly
-        refresh()
-    }
-
-    func toggleColorLabelFilter(_ colorLabel: AssetColorLabel) {
-        if filter.colorLabels.contains(colorLabel) {
-            filter.colorLabels.remove(colorLabel)
-        } else {
-            filter.colorLabels.insert(colorLabel)
-        }
-        refresh()
-    }
-
-    func setSortOrder(_ sortOrder: LibrarySortOrder) {
-        filter.sortOrder = sortOrder
-        refresh()
-    }
-
-    func selectFolder(path: String) {
-        let normalizedPath = Self.normalizedDirectoryPath(path)
-        PerformanceLog.event("folder-selection-click", detail: normalizedPath)
-        let selectionID = UUID()
-        let selection = BrowseSelection(
-            nodeID: UUID(),
-            kind: .folder,
-            path: normalizedPath,
-            displayName: URL(fileURLWithPath: normalizedPath, isDirectory: true).lastPathComponent,
-            scope: filter.browseSelection?.scope ?? .recursive
-        )
-        filter.browseSelection = selection
-        pendingBrowseSelection = selection
-        folderSelectionID = selectionID
-        blockingTask = BlockingTaskReport(
-            title: "正在打开文件夹",
-            phase: "正在打开",
-            currentPath: normalizedPath,
-            message: "已选中该文件夹，正在加载照片。"
-        )
-        assets = []
-        selectedAssetID = nil
-        selectedAssetIDs = []
-        assetSelectionAnchorID = nil
-        selectedFiles = []
-        hasMoreAssets = false
-        lastError = nil
-
-        folderSelectionTask?.cancel()
-        folderSelectionTask = Task(priority: .userInitiated) { [weak self] in
-            await Task.yield()
-            guard !Task.isCancelled else { return }
-            await self?.finishSelectingFolder(path: normalizedPath, scope: selection.scope, selectionID: selectionID)
-        }
-    }
-
-    func clearBrowseSelection() {
-        folderSelectionTask?.cancel()
-        folderSelectionID = nil
-        pendingBrowseSelection = nil
-        filter.browseSelection = nil
-        refresh()
-    }
-
-    func setBrowseScope(_ scope: BrowseScope) {
-        guard var selection = filter.browseSelection else { return }
-        selection.scope = scope
-        filter.browseSelection = selection
-        pendingBrowseSelection = selection
-        refresh()
-        pendingBrowseSelection = nil
-    }
-
-    private func finishSelectingFolder(path: String, scope: BrowseScope, selectionID: UUID) async {
-        defer {
-            if folderSelectionID == selectionID {
-                pendingBrowseSelection = nil
-                blockingTask = nil
-                folderSelectionTask = nil
-                folderSelectionID = nil
-            }
-        }
-
-        do {
-            let databasePath = databasePath
-            let filterSnapshot = filter
-            let assetPageSize = assetPageSize
-            let result = try await Task.detached(priority: .userInitiated) { () throws -> FolderSelectionLoadResult in
+                let page = try await client.assets(query: requestedQuery)
+                let summary = try await client.counts(showHidden: requestedQuery.showHidden)
                 try Task.checkCancellation()
-                return try PerformanceLog.measure("folder-selection-load") {
-                    let readDatabase = try SQLiteDatabase(path: databasePath, migrateSchema: false, readOnly: true)
-                    let normalizedPath = SourceDirectoryTreeBuilder.normalizedDirectoryPath(path)
-                    let node = try readDatabase.browseFolder(path: normalizedPath)
-                    let selection = BrowseSelection(
-                        nodeID: node?.id ?? UUID(),
-                        kind: node?.kind ?? .folder,
-                        path: node?.displayPath ?? normalizedPath,
-                        displayName: node?.displayName ?? URL(fileURLWithPath: normalizedPath, isDirectory: true).lastPathComponent,
-                        scope: scope
-                    )
-                    var filtered = filterSnapshot
-                    filtered.browseSelection = selection
-                    let page = try readDatabase.queryAssets(filter: filtered, limit: assetPageSize + 1)
-                    let assets = Array(page.prefix(assetPageSize))
-                    let selectedAssetID = assets.first?.id
-                    let selectedFiles = try selectedAssetID.map { try readDatabase.fileInstances(assetID: $0) } ?? []
-                    return FolderSelectionLoadResult(
-                        selection: selection,
-                        assets: assets,
-                        selectedAssetID: selectedAssetID,
-                        selectedFiles: selectedFiles,
-                        hasMoreAssets: page.count > assetPageSize
-                    )
-                }
-            }.value
-            guard folderSelectionID == selectionID else { return }
-            filter.browseSelection = result.selection
-            assets = result.assets
-            selectedAssetID = result.selectedAssetID
-            selectedAssetIDs = result.selectedAssetID.map { [$0] } ?? []
-            assetSelectionAnchorID = result.selectedAssetID
-            selectedFiles = result.selectedFiles
-            hasMoreAssets = result.hasMoreAssets
-        } catch is CancellationError {
-        } catch {
-            guard folderSelectionID == selectionID else { return }
-            lastError = error.fullTrace
-        }
-    }
-
-    func loadSelectedFiles() {
-        guard let selectedAssetID else {
-            selectedFiles = []
-            return
-        }
-        do {
-            selectedFiles = try database.fileInstances(assetID: selectedAssetID)
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    func update(asset: Asset) {
-        do {
-            try persistAssetMetadata(asset)
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    private func persistAssetMetadata(_ asset: Asset) throws {
-        try database.updateAssetMetadata(asset: asset)
-        refresh()
-    }
-
-    private func updatedAsset(_ asset: Asset, mutate: (inout Asset) -> Void) -> Asset {
-        var copy = asset
-        mutate(&copy)
-        return copy
-    }
-
-    private func persistSelectedAssetMetadata(_ mutate: (inout Asset) -> Void) throws {
-        guard var asset = selectedAsset else { return }
-        mutate(&asset)
-        try persistAssetMetadata(asset)
-    }
-
-    private static func normalizeTags(_ tags: [String]) -> [String] {
-        var seen: Set<String> = []
-        var normalized: [String] = []
-        for tag in tags {
-            let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
-            normalized.append(trimmed)
-        }
-        return normalized
-    }
-
-    private static func currentWallTimeMilliseconds() -> Int64 {
-        Int64(Date().timeIntervalSince1970 * 1000)
-    }
-
-    func archiveSelected() {
-        guard !isBusy else { return }
-        guard let asset = selectedAsset else { return }
-        guard let root = preferredNASRoot() else {
-            lastError = "没有可用的 NAS 文件夹。请先添加一个 /Volumes 下的文件夹。"
-            return
-        }
-        archive(asset: asset, nasRoot: root)
-    }
-
-    func syncSelected() {
-        guard !isBusy else { return }
-        guard let asset = selectedAsset else { return }
-        guard let root = preferredNASRoot() else {
-            lastError = "没有可用的 NAS 文件夹。请先添加一个 /Volumes 下的文件夹。"
-            return
-        }
-        sync(asset: asset, nasRoot: root)
-    }
-
-    func recordExportForSelected() {
-        guard !isBusy else { return }
-        guard let asset = selectedAsset else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowsMultipleSelection = true
-        panel.message = "选择这个资产导出的 JPEG、PNG 或 TIFF"
-        if panel.runModal() == .OK {
-            do {
-                for url in panel.urls {
-                    try database.insertExport(assetID: asset.id, exportURL: url, sourceVersionID: nil)
-                    try database.writeOperation(action: "record_export", source: asset.primaryPath, destination: url.path, status: "success", detail: "记录导出文件")
-                }
-                refresh()
+                guard generation == loadGeneration else { return }
+                assets = page.items
+                total = page.total
+                nextCursor = page.nextCursor
+                counts = summary
+                selectedIDs.formIntersection(Set(assets.map(\.id)))
             } catch {
-                lastError = error.fullTrace
+                if !Task.isCancelled && generation == loadGeneration { lastError = Self.describe(error) }
             }
         }
     }
 
-    func reveal(file: FileInstance) {
-        fileOperations.reveal(file)
+    func setPaginationVisible(_ visible: Bool) {
+        paginationVisible = visible
+        if visible { loadMoreIfNeeded() }
     }
 
-    func open(file: FileInstance) {
-        fileOperations.open(file)
+    private func loadMoreIfNeeded() {
+        guard paginationVisible, lastError == nil else { return }
+        loadMore()
     }
 
-    func moveAssets(_ assetIDs: [UUID], to target: FolderMoveTarget) {
-        guard !isBusy else { return }
-        let assetIDs = Array(Set(assetIDs)).sorted { $0.uuidString < $1.uuidString }
-        guard !assetIDs.isEmpty else { return }
-        availabilityTask?.cancel()
-        availabilityTask = nil
-        backgroundTask = nil
-        blockingTask = BlockingTaskReport(
-            title: "移动文件",
-            phase: "准备移动",
-            currentPath: target.path,
-            totalItems: assetIDs.count,
-            message: "准备移动 \(assetIDs.count) 个资产的文件到 \(target.path)"
-        )
+    private func finishLoading(generation: Int) {
+        guard generation == loadGeneration else { return }
+        isLoading = false
+        loadMoreIfNeeded()
+    }
+
+    func loadMore() {
+        guard let client, let cursor = nextCursor, !isLoading else { return }
+        let generation = loadGeneration
+        var requestedQuery = query
+        requestedQuery.cursor = cursor
+        requestedQuery.showHidden = !hiddenDirectoryFilterEnabled
+        isLoading = true
         lastError = nil
-
-        let database = database
-        Task.detached(priority: .userInitiated) {
+        loadTask = Task {
+            defer { finishLoading(generation: generation) }
             do {
-                let plan = try FileOperations().buildAssetFileMovePlan(
-                    assetIDs: assetIDs,
-                    destinationTarget: target,
-                    database: database
-                )
-                await MainActor.run {
-                    self.blockingTask = BlockingTaskReport(
-                        title: "移动文件",
-                        phase: "复制、校验并删除源文件",
-                        currentPath: target.path,
-                        totalItems: plan.count,
-                        message: "移动 \(plan.count) 个文件到 \(target.path)"
-                    )
-                }
-                try await FileOperations().moveAssetFiles(items: plan, database: database) { item, index in
-                    await MainActor.run {
-                        self.blockingTask = BlockingTaskReport(
-                            title: "移动文件",
-                            phase: "复制、校验并删除源文件",
-                            currentPath: item.sourcePath,
-                            totalItems: plan.count,
-                            completedItems: index,
-                            message: "\(item.sourcePath) -> \(item.destinationPath)"
-                        )
-                    }
-                }
-                let sourceDirectories = try database.sourceDirectories()
-                let indexedBrowseFolders = try database.browseFolders()
-                await MainActor.run {
-                    self.sourceDirectories = sourceDirectories
-                    self.indexedBrowseFolders = indexedBrowseFolders
-                    self.blockingTask = nil
-                    self.refresh()
-                    self.startAvailabilityRefreshInBackground()
-                }
+                let page = try await client.assets(query: requestedQuery)
+                try Task.checkCancellation()
+                guard generation == loadGeneration else { return }
+                let known = Set(assets.map(\.id))
+                assets.append(contentsOf: page.items.filter { !known.contains($0.id) })
+                total = page.total
+                nextCursor = page.nextCursor
             } catch {
-                await MainActor.run {
-                    self.blockingTask = nil
-                    self.lastError = error.fullTrace
-                }
+                if !Task.isCancelled && generation == loadGeneration { lastError = Self.describe(error) }
             }
         }
     }
 
-    func deleteAssets(_ assetIDs: [UUID]) {
-        guard !isBusy else { return }
-        let assetIDs = Array(Set(assetIDs)).sorted { $0.uuidString < $1.uuidString }
-        guard !assetIDs.isEmpty else { return }
-        availabilityTask?.cancel()
-        availabilityTask = nil
-        backgroundTask = nil
-        blockingTask = BlockingTaskReport(
-            title: "删除照片",
-            phase: "移入共享回收站",
-            totalItems: assetIDs.count,
-            message: "准备为 \(assetIDs.count) 个资产记录回收站操作"
-        )
+    func select(_ id: UUID, extending: Bool) {
+        guard assets.contains(where: { $0.id == id }) else { return }
+        if extending {
+            if selectedIDs.contains(id) { selectedIDs.remove(id) } else { selectedIDs.insert(id) }
+        } else { selectedIDs = [id] }
+    }
+
+    func selectAdjacent(_ offset: Int) {
+        guard !assets.isEmpty else { return }
+        let index = assets.firstIndex { selectedIDs.contains($0.id) } ?? 0
+        selectedIDs = [assets[min(max(index + offset, 0), assets.count - 1)].id]
+    }
+
+    func updateSelected(_ patch: KeepsAssetPatch) {
+        mutateSelected { client, id in try await client.updateAsset(id: id, patch: patch) }
+    }
+
+    func trashSelected() { mutateSelected(refreshDirectories: true) { client, id in try await client.trashAsset(id: id) } }
+    func restoreSelected() { mutateSelected(refreshDirectories: true) { client, id in try await client.restoreAsset(id: id) } }
+
+    private func mutateSelected(refreshDirectories: Bool = false, _ mutation: @escaping @Sendable (KeepsClient, UUID) async throws -> KeepsAsset) {
+        guard let client, !isMutating, !selectedIDs.isEmpty else { return }
+        let ids = selectedIDs
+        let generation = loadGeneration
+        isMutating = true
         lastError = nil
-
-        do {
-            let commandLayer = syncCommandLayerFactory()
-            try commandLayer.moveAssetsToTrash(assetIDs, reason: "deleted_from_library")
-            sourceDirectories = try database.sourceDirectories()
-            indexedBrowseFolders = try database.browseFolders()
-            blockingTask = nil
-            refresh()
-            startAvailabilityRefreshInBackground()
-            scheduleAutomaticSync(reason: "已移入共享回收站")
-        } catch {
-            blockingTask = nil
-            lastError = error.fullTrace
-        }
-    }
-
-    func restoreAssetsFromTrash(_ assetIDs: [UUID]) {
-        guard !isBusy else { return }
-        let assetIDs = Array(Set(assetIDs)).sorted { $0.uuidString < $1.uuidString }
-        guard !assetIDs.isEmpty else { return }
-        availabilityTask?.cancel()
-        availabilityTask = nil
-        backgroundTask = nil
-        blockingTask = BlockingTaskReport(
-            title: "恢复照片",
-            phase: "从共享回收站恢复",
-            totalItems: assetIDs.count,
-            message: "准备恢复 \(assetIDs.count) 个资产"
-        )
-        lastError = nil
-
-        do {
-            let commandLayer = syncCommandLayerFactory()
-            try commandLayer.restoreAssetsFromTrash(assetIDs)
-            sourceDirectories = try database.sourceDirectories()
-            indexedBrowseFolders = try database.browseFolders()
-            blockingTask = nil
-            refresh()
-            startAvailabilityRefreshInBackground()
-            scheduleAutomaticSync(reason: "已从共享回收站恢复")
-        } catch {
-            blockingTask = nil
-            lastError = error.fullTrace
-        }
-    }
-
-    private func archive(asset: Asset, nasRoot: URL) {
-        do {
-            try fileOperations.archive(asset: asset, files: selectedFiles, nasRoot: nasRoot, database: database)
-            refresh()
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    private func sync(asset: Asset, nasRoot: URL) {
-        do {
-            try fileOperations.syncChanges(asset: asset, files: selectedFiles, nasRoot: nasRoot, database: database)
-            refresh()
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    private func startFolderMove(_ source: FolderMoveSource, destinationParentPath: String, parentID: UUID?) {
-        var source = source
-        if source.sourceDirectoryID == nil {
-            source.sourceDirectoryID = parentSourceID(for: source.path, excluding: nil)
-        }
-        blockingTask = BlockingTaskReport(
-            title: "移动文件夹",
-            phase: "准备移动",
-            currentPath: source.path,
-            message: "\(source.path) -> \(destinationParentPath)"
-        )
-        lastError = nil
-
-        let database = database
-        Task.detached(priority: .userInitiated) { [source, destinationParentPath, parentID, database] in
-            do {
-                let destinationParent = URL(fileURLWithPath: destinationParentPath, isDirectory: true)
-                let plan = try FileOperations().buildFolderMovePlan(source: source, destinationParent: destinationParent, database: database)
-                let job = try database.createFolderMoveJob(
-                    source: source,
-                    destinationParentPath: destinationParentPath,
-                    destinationPath: plan.destination.path,
-                    items: plan.items
-                )
-                await MainActor.run {
-                    self.continueFolderMove(job, parentID: parentID)
-                }
-            } catch {
-                await MainActor.run {
-                    self.blockingTask = nil
-                    self.lastError = error.fullTrace
-                }
-            }
-        }
-    }
-
-    private func trashFolderAfterEmptyScan(_ source: FolderMoveSource) {
-        blockingTask = BlockingTaskReport(
-            title: "彻底删除文件夹",
-            phase: "扫描文件夹",
-            currentPath: source.path,
-            message: "正在确认文件夹内没有任何文件。"
-        )
-        lastError = nil
-
-        let database = database
-        Task.detached(priority: .userInitiated) { [source, database] in
-            do {
-                try FileOperations().deleteEmptyFolderTree(at: URL(fileURLWithPath: source.path, isDirectory: true), storageKind: source.storageKind)
-                try database.removeBrowseFolderTree(path: source.path)
-                if let sourceDirectoryID = source.sourceDirectoryID {
-                    try database.removeSourceDirectory(id: sourceDirectoryID)
-                }
-                let sourceDirectories = try database.sourceDirectories()
-                let indexedBrowseFolders = try database.browseFolders()
-                await MainActor.run {
-                    self.sourceDirectories = sourceDirectories
-                    self.indexedBrowseFolders = indexedBrowseFolders
-                    self.blockingTask = nil
-                    self.clearBrowseSelectionIfNeeded(removedPath: source.path)
-                    self.refresh()
-                }
-            } catch {
-                await MainActor.run {
-                    self.blockingTask = nil
-                    self.lastError = error.fullTrace
-                }
-            }
-        }
-    }
-
-    private func finishFolderRemovalRefresh() {
-        sourceDirectories = (try? database.sourceDirectories()) ?? sourceDirectories
-        indexedBrowseFolders = (try? database.browseFolders()) ?? indexedBrowseFolders
-        refresh()
-    }
-
-    private func clearBrowseSelectionIfNeeded(removedPath: String) {
-        let normalizedPath = Self.normalizedDirectoryPath(removedPath)
-        if let selection = filter.browseSelection {
-            let selectedPath = Self.normalizedDirectoryPath(selection.path)
-            if selectedPath == normalizedPath || selectedPath.hasPrefix(normalizedPath + "/") {
-                clearBrowseSelection()
-            }
-        }
-    }
-
-    private func continueFolderMove(_ job: FolderMoveJob, parentID: UUID?) {
-        availabilityTask?.cancel()
-        availabilityTask = nil
-        backgroundTask = nil
-        blockingTask = BlockingTaskReport(
-            title: "移动文件夹",
-            phase: "准备移动",
-            currentPath: job.sourcePath,
-            totalItems: job.totalFiles,
-            completedItems: job.completedFiles,
-            message: "\(job.sourcePath) -> \(job.destinationPath)"
-        )
-        lastError = nil
-
-        let database = database
-        Task.detached(priority: .userInitiated) {
-            do {
-                try await FileOperations().moveFolder(job: job, database: database) { job, item in
-                    let pending = (try? database.pendingFolderMoveItems(jobID: job.id).count) ?? job.totalFiles
-                    let completed = max(0, job.totalFiles - pending)
-                    await MainActor.run {
-                        self.blockingTask = BlockingTaskReport(
-                            title: "移动文件夹",
-                            phase: "复制、校验并删除源文件",
-                            currentPath: item.sourcePath,
-                            totalItems: job.totalFiles,
-                            completedItems: min(completed, job.totalFiles),
-                            message: "\(item.sourcePath) -> \(item.destinationPath)"
-                        )
-                    }
-                }
-                await MainActor.run {
-                    self.blockingTask = BlockingTaskReport(
-                        title: "移动文件夹",
-                        phase: "更新索引",
-                        currentPath: job.destinationPath,
-                        totalItems: job.totalFiles,
-                        completedItems: job.totalFiles,
-                        message: "\(job.sourcePath) -> \(job.destinationPath)"
-                    )
-                }
-                try database.rewriteFolderMovePaths(job: job, parentID: parentID)
-                let sourceDirectories = try database.sourceDirectories()
-                let indexedBrowseFolders = try database.browseFolders()
-                let interruptedScanPath = try database.latestInterruptedScanPath()
-                await MainActor.run {
-                    self.sourceDirectories = sourceDirectories
-                    self.indexedBrowseFolders = indexedBrowseFolders
-                    self.interruptedScanPath = interruptedScanPath
-                    self.blockingTask = nil
-                    self.refresh()
-                    self.startStartupLibraryOrganizationIfNeeded()
-                }
-            } catch {
-                try? database.failFolderMoveJob(id: job.id, error: error)
-                await MainActor.run {
-                    self.blockingTask = nil
-                    self.lastError = error.fullTrace
-                }
-            }
-        }
-    }
-
-    private func scanSources(_ sources: [SourceDirectory]) {
-        guard !isBusy else { return }
-        guard !sources.isEmpty else { return }
         Task {
-            for source in sources {
-                await MainActor.run {
-                    scan(URL(fileURLWithPath: source.path), storageKind: source.storageKind)
-                }
-                while await MainActor.run(body: { isScanning }) {
-                    try? await Task.sleep(nanoseconds: 200_000_000)
-                }
-            }
-        }
-    }
-
-    private func setDerivativeStorageURL(_ url: URL?) {
-        do {
-            if let url {
-                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-            }
-            try database.setDerivativeStoragePath(url?.path)
-            derivativeStorageURL = url
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    private func setHasselbladRawRootURL(_ url: URL?) {
-        do {
-            if let url {
-                var isDirectory: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-                    throw FileOperationError.sourceFolderMissing(url)
-                }
-            }
-            try database.setHasselbladRawRootPath(url?.path)
-            hasselbladRawRootURL = url
-        } catch {
-            lastError = error.fullTrace
-        }
-    }
-
-    nonisolated private static func photoImportPlanningMessage(phase: String, completed: Int, total: Int) -> String {
-        switch phase {
-        case "扫描照片":
-            if total > 0 {
-                return "已发现 \(total) 张可导入照片（读取元数据中）"
-            }
-            if completed > 0 {
-                return "正在扫描导入文件夹，已发现 \(completed) 张照片"
-            }
-            return "正在扫描导入文件夹，统计可导入照片"
-        case "索引 RAW":
-            if total > 0 {
-                return "已索引 \(total) 个 RAW 文件"
-            }
-            if completed > 0 {
-                return "正在读取 RAW 元数据，已索引 \(completed) 个"
-            }
-            return "正在索引 RAW 文件夹，读取元数据"
-        case "匹配 RAW":
-            if total > 0 {
-                return "正在匹配 RAW：\(completed) / \(total)"
-            }
-            return "正在按文件名和拍摄信息匹配 RAW"
-        case "整理导入列表":
-            if total > 0 {
-                return "正在整理导入列表：\(completed) / \(total)"
-            }
-            return "正在整理导入列表，检查目标路径冲突"
-        default:
-            return ""
-        }
-    }
-
-    nonisolated private static func mergeScanReports(_ lhs: ScanReport, _ rhs: ScanReport) -> ScanReport {
-        var merged = lhs
-        merged.totalFiles += rhs.totalFiles
-        merged.discoveredFiles += rhs.discoveredFiles
-        merged.scannedFiles += rhs.scannedFiles
-        merged.skippedFiles += rhs.skippedFiles
-        merged.skippedExistingFiles += rhs.skippedExistingFiles
-        merged.importedAssets += rhs.importedAssets
-        merged.newLocations += rhs.newLocations
-        merged.errors.append(contentsOf: rhs.errors)
-        if !rhs.phase.isEmpty {
-            merged.phase = rhs.phase
-        }
-        if !rhs.currentPath.isEmpty {
-            merged.currentPath = rhs.currentPath
-        }
-        return merged
-    }
-
-    private func migrateDerivativeStorage(to destinationRoot: URL) {
-        blockingTask = BlockingTaskReport(title: "迁移预览图", phase: "准备迁移", currentPath: destinationRoot.path)
-        migrationReport = nil
-        Task {
-            await Task.yield()
-            try? await Task.sleep(nanoseconds: 120_000_000)
+            defer { isMutating = false }
+            var completed = 0
             do {
-                try FileManager.default.createDirectory(at: destinationRoot.appendingPathComponent("previews", isDirectory: true), withIntermediateDirectories: true)
-                let previews = try database.previewFileInstances()
-                blockingTask?.totalItems = previews.count
-                blockingTask?.phase = previews.isEmpty ? "没有可迁移预览图" : "复制并校验"
-                await Task.yield()
-                var copied = 0
-                var skippedMissing = 0
-                for (index, preview) in previews.enumerated() {
-                    let source = URL(fileURLWithPath: preview.path)
-                    blockingTask?.currentPath = source.path
-                    blockingTask?.completedItems = index
-                    blockingTask?.skippedItems = skippedMissing
-                    guard FileManager.default.fileExists(atPath: source.path) else {
-                        skippedMissing += 1
-                        blockingTask?.completedItems = index + 1
-                        blockingTask?.skippedItems = skippedMissing
-                        blockingTask?.message = "已迁移 \(copied)，跳过 \(skippedMissing)"
-                        await Task.yield()
-                        continue
-                    }
-                    let destination = destinationRoot
-                        .appendingPathComponent("previews", isDirectory: true)
-                        .appendingPathComponent(source.lastPathComponent)
-                    if !FileManager.default.fileExists(atPath: destination.path) {
-                        try FileManager.default.copyItem(at: source, to: destination)
-                    }
-                    let sourceHash = try FileHasher.sha256(url: source)
-                    let destinationHash = try FileHasher.sha256(url: destination)
-                    guard sourceHash == destinationHash else {
-                        throw FileOperationError.hashMismatch(source: sourceHash, destination: destinationHash)
-                    }
-                    let size = try Int64(destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
-                    try database.updateFileInstanceLocation(id: preview.id, path: destination.path, hash: destinationHash, sizeBytes: size)
-                    copied += 1
-                    blockingTask?.completedItems = index + 1
-                    blockingTask?.message = "已迁移 \(copied)，跳过 \(skippedMissing)"
-                    await Task.yield()
+                for id in ids {
+                    let updated = try await mutation(client, id)
+                    if generation == loadGeneration, let index = assets.firstIndex(where: { $0.id == id }) { assets[index] = updated }
+                    completed += 1
                 }
-                try database.setDerivativeStoragePath(destinationRoot.path)
-                derivativeStorageURL = destinationRoot
-                migrationReport = "预览图迁移完成：\(copied) 个已迁移，\(skippedMissing) 个源文件缺失。旧文件未删除。"
-                blockingTask = nil
-                refresh()
-            } catch {
-                blockingTask = nil
-                lastError = error.fullTrace
-            }
+                if generation == loadGeneration { refresh(); if refreshDirectories { refreshNavigation() } }
+            } catch { if generation == loadGeneration { lastError = "已完成 \(completed)/\(ids.count) 项。\n" + Self.describe(error) } }
         }
     }
 
-    @MainActor
-    func rebuildAllPreviews() {
-        guard let derivativeRoot = derivativeStorageURL else {
-            previewRebuildReport = "未设置预览图存储位置，无法重建。"
-            return
-        }
-        guard !isBusy else { return }
-
-        blockingTask = BlockingTaskReport(
-            title: "重建所有预览 (1200px)",
-            phase: "准备中",
-            currentPath: "",
-            totalItems: 0,
-            completedItems: 0,
-            message: "正在收集原片信息..."
-        )
-        previewRebuildReport = nil
-
-        Task {
-            await performRebuildAllPreviews(derivativeRoot: derivativeRoot)
-        }
+    func refreshPreview(id: UUID) async throws -> URL {
+        guard let client else { throw KeepsAPIError.invalidConfiguration }
+        return try await client.refreshPreview(assetID: id)
     }
 
-    @MainActor
-    func repairPreviewSyncState() {
-        guard !isBusy, !isSyncing else { return }
-
-        let configuration = SyncClientConfiguration.load()
-        syncConfiguration = configuration
-        guard configuration.baseURL != nil else {
-            lastSyncSummary = "未配置自动同步，无法修复预览同步状态"
-            return
-        }
-
-        lastSyncSummary = "预览同步状态修复已排队"
-        syncProgressTask = BackgroundTaskReport(
-            title: "修复预览同步状态",
-            phase: "排队",
-            message: "将检查本地预览与云端声明投影，并补传缺失项。"
-        )
-        pendingAutomaticSync = true
-        pendingAutomaticSyncReason = "修复预览同步状态"
-        queueBackgroundTask(.automaticSync)
+    static func describe(_ error: Error) -> String {
+        String(reflecting: error) + "\n" + error.localizedDescription
     }
-
-    @MainActor
-    func repairPreviewSyncStateFromLaunchArgument() {
-        let timestamp = DateCoding.encode(Date())
-        try? database.execute(
-            """
-            INSERT INTO app_settings (key, value)
-            VALUES ('preview_sync_repair_launch_requested_at', '\(timestamp)')
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """
-        )
-        repairPreviewSyncState()
-    }
-
-    private func performRebuildAllPreviews(derivativeRoot: URL) async {
-        let db = database
-        let scanner = PhotoScanner()
-        let configuration = SyncClientConfiguration.load()
-        let remoteClient = configuration.baseURL.map {
-            SyncControlPlaneHTTPClient(baseURL: $0, authentication: configuration.requestAuthentication)
-        }
-        do {
-            let originals = try await Task.detached(priority: .utility) {
-                try db.originalFileInstances()
-            }.value
-
-            var byAsset: [UUID: [FileInstance]] = [:]
-            for fi in originals {
-                byAsset[fi.assetID, default: []].append(fi)
-            }
-            let assetIDs = Array(byAsset.keys).sorted(by: { $0.uuidString < $1.uuidString })
-            let total = assetIDs.count
-
-            await MainActor.run {
-                blockingTask?.totalItems = total
-                blockingTask?.phase = "生成 1200px 预览"
-                blockingTask?.message = "共 \(total) 个资产，开始重建..."
-            }
-
-            var uploadCandidates: [ScannedDerivativeUploadCandidate] = []
-            var generated = 0
-            var skipped = 0
-            var errs = 0
-            var remoteDeleted = 0
-            var remoteDeleteErrors = 0
-            var firstRemoteDeleteError: String?
-
-            for (idx, assetID) in assetIDs.enumerated() {
-                let insts = byAsset[assetID] ?? []
-                var chosen: FileInstance?
-                var srcURL: URL?
-                for inst in insts {
-                    let u = URL(fileURLWithPath: inst.path)
-                    if FileManager.default.fileExists(atPath: u.path) {
-                        chosen = inst
-                        srcURL = u
-                        break
-                    }
-                }
-
-                await MainActor.run {
-                    blockingTask?.currentPath = srcURL?.lastPathComponent ?? "资产 \(assetID.uuidString.prefix(8))"
-                    blockingTask?.completedItems = idx
-                }
-
-                guard let chosenInst = chosen, let source = srcURL else {
-                    skipped += 1
-                    continue
-                }
-
-                do {
-                    let origHash = chosenInst.contentHash
-                    if let previewURL = try scanner.generateDisplayPreview(
-                        source: source,
-                        originalContentHash: origHash,
-                        derivativeRoot: derivativeRoot,
-                        forceRegenerate: true
-                    ) {
-                        let pHash = try FileHasher.sha256(url: previewURL)
-                        let sz = Int64(try previewURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
-
-                        let removedDerivatives = try await Task.detached(priority: .utility) {
-                            try db.replaceAssetPreview(assetID: assetID, url: previewURL, hash: pHash, sizeBytes: sz)
-                        }.value
-
-                        if let remoteClient {
-                            for removed in removedDerivatives {
-                                do {
-                                    try await remoteClient.deleteDerivative(
-                                        libraryID: configuration.libraryID,
-                                        assetID: removed.assetID,
-                                        role: removed.role
-                                    )
-                                    remoteDeleted += 1
-                                } catch {
-                                    remoteDeleteErrors += 1
-                                    if firstRemoteDeleteError == nil {
-                                        firstRemoteDeleteError = error.fullTrace
-                                    }
-                                }
-                            }
-                        }
-
-                        uploadCandidates.append(ScannedDerivativeUploadCandidate(assetID: assetID, role: .preview, fileURL: previewURL))
-                        generated += 1
-                    }
-                } catch {
-                    errs += 1
-                }
-            }
-
-            await MainActor.run {
-                for cand in uploadCandidates {
-                    pendingPreviewUploads[cand.assetID] = cand
-                }
-                blockingTask?.phase = "完成"
-                blockingTask?.completedItems = total
-                blockingTask?.message = "本地重建完成：\(generated) 个 1200px 预览。跳过 \(skipped)，错误 \(errs)，云端清理 \(remoteDeleted)，云端错误 \(remoteDeleteErrors)。已排队上传。"
-
-                previewRebuildReport = "重建完成：生成了 \(generated) 个 1200px 预览图。DB 已清理旧衍生图投影；云端已清理 \(remoteDeleted) 个旧 derivative 对象，失败 \(remoteDeleteErrors) 个；新预览已排队上传并声明。建议重启应用以刷新内存缓存和 UI。"
-                if let firstRemoteDeleteError {
-                    lastError = firstRemoteDeleteError
-                }
-
-                scheduleAutomaticSync(reason: "预览重建", immediate: true)
-
-                // 稍后关闭 blocking 界面
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                    self?.blockingTask = nil
-                }
-            }
-        } catch {
-            await MainActor.run {
-                blockingTask = nil
-                lastError = error.fullTrace
-                previewRebuildReport = "重建失败：\(error.localizedDescription)"
-            }
-        }
-    }
-
-    private func preferredNASRoot() -> URL? {
-        if let nasRoot {
-            return nasRoot
-        }
-        return sourceDirectories
-            .filter { $0.storageKind == .nas }
-            .map { nasRootURL(for: URL(fileURLWithPath: $0.path)) }
-            .first
-    }
-
-    private func storageKind(for url: URL) -> StorageKind {
-        url.path.hasPrefix("/Volumes/") ? .nas : .local
-    }
-
-    private func nasRootURL(for url: URL) -> URL {
-        let components = url.pathComponents
-        guard components.count >= 3, components[1] == "Volumes" else {
-            return url
-        }
-        return URL(fileURLWithPath: "/" + components[1] + "/" + components[2], isDirectory: true)
-    }
-
-    private func parentSourceID(for path: String, excluding sourceID: UUID?) -> UUID? {
-        let normalizedPath = Self.normalizedDirectoryPath(path)
-        return sourceDirectories
-            .filter { sourceID == nil || $0.id != sourceID }
-            .filter { source in
-                let sourcePath = Self.normalizedDirectoryPath(source.path)
-                return normalizedPath == sourcePath || normalizedPath.hasPrefix(sourcePath + "/")
-            }
-            .max { $0.path.count < $1.path.count }?
-            .id
-    }
-
-    private func isLibraryPath(_ path: String) -> Bool {
-        let normalizedPath = Self.normalizedDirectoryPath(path)
-        return sourceDirectories.contains { source in
-            let sourcePath = Self.normalizedDirectoryPath(source.path)
-            return normalizedPath == sourcePath || normalizedPath.hasPrefix(sourcePath + "/")
-        }
-    }
-
-    private func makeScanLedgerContext() -> ScannedFileLedgerContext {
-        ScannedFileLedgerContext(
-            libraryID: syncLibraryID,
-            deviceID: SyncDeviceID(currentDeviceID()),
-            actorID: NSUserName()
-        )
-    }
-
-    private func enqueueDerivativeCandidates(_ candidates: [ScannedDerivativeUploadCandidate]) {
-        guard !candidates.isEmpty else { return }
-        for candidate in candidates where candidate.role == .preview {
-            pendingPreviewUploads[candidate.assetID] = candidate
-        }
-    }
-
-    private func mergePendingPreviewUploads(_ candidates: [ScannedDerivativeUploadCandidate]) {
-        for candidate in candidates where candidate.role == .preview {
-            pendingPreviewUploads[candidate.assetID] = candidate
-        }
-    }
-
-    private func scheduleAutomaticSync(reason: String, immediate: Bool = false) {
-        pendingAutomaticSync = true
-        pendingAutomaticSyncReason = reason
-
-        syncDebounceTask?.cancel()
-        let delay = immediate ? 0 : automaticSyncDebounceNanoseconds
-        syncDebounceTask = Task { [weak self] in
-            guard let self else { return }
-            if delay > 0 {
-                try? await Task.sleep(nanoseconds: delay)
-            }
-            await self.enqueueAutomaticSyncIfNeeded()
-        }
-        refreshBackgroundQueueItems()
-    }
-
-    private func enqueueAutomaticSyncIfNeeded() async {
-        guard pendingAutomaticSync else { return }
-        queueBackgroundTask(.automaticSync)
-    }
-
-    private func beginAutomaticSyncIfNeeded() {
-        guard pendingAutomaticSync else {
-            finishBackgroundQueueTask(.automaticSync)
-            return
-        }
-        guard activeSyncTask == nil else { return }
-        pendingAutomaticSync = false
-        let reason = pendingAutomaticSyncReason
-        let queuedPreviews = Array(pendingPreviewUploads.values)
-        pendingPreviewUploads.removeAll()
-
-        activeSyncTask = Task { [weak self] in
-            guard let self else { return }
-            await self.performAutomaticSync(reason: reason, queuedPreviews: queuedPreviews)
-            await MainActor.run {
-                self.activeSyncTask = nil
-                self.finishBackgroundQueueTask(.automaticSync)
-                if self.pendingAutomaticSync {
-                    self.scheduleAutomaticSync(reason: self.pendingAutomaticSyncReason, immediate: true)
-                }
-            }
-        }
-    }
-
-    private func performAutomaticSync(
-        reason: String,
-        queuedPreviews: [ScannedDerivativeUploadCandidate]
-    ) async {
-        let configuration = SyncClientConfiguration.load()
-        syncConfiguration = configuration
-
-        guard let baseURL = configuration.baseURL else {
-            mergePendingPreviewUploads(queuedPreviews)
-            syncProgressTask = nil
-            refreshBackgroundQueueItems()
-            lastSyncSummary = queuedPreviews.isEmpty ? "未配置自动同步" : "未配置自动同步，待上传预览图已保留"
-            return
-        }
-
-        isSyncing = true
-        lastSyncSummary = "自动同步中"
-        syncProgressTask = BackgroundTaskReport(
-            title: "自动同步",
-            phase: "准备同步",
-            message: "正在统计待补传预览图和 ledger 队列。"
-        )
-        refreshBackgroundQueueItems()
-
-        let database = database
-        let libraryID = syncLibraryID
-        let peerID = configuration.peerID.isEmpty ? syncPeerID : configuration.peerID
-        let authentication = configuration.requestAuthentication
-
-        do {
-            let outcome = try await Task.detached(priority: .utility) {
-                let didBootstrap = try Self.bootstrapLedgerIfNeeded(database: database, libraryID: libraryID)
-                var allPreviews = queuedPreviews
-                allPreviews.append(contentsOf: try Self.pendingPreviewSyncCandidates(database: database))
-
-                let client = SyncControlPlaneHTTPClient(
-                    baseURL: baseURL,
-                    authentication: authentication
-                )
-                let commandLayer = SyncCommandLayer(
-                    libraryID: libraryID,
-                    deviceID: SyncDeviceID(currentDeviceID()),
-                    actorID: NSUserName(),
-                    database: database
-                )
-                let uploadSummary = try await Self.uploadPreviewCandidates(
-                    allPreviews,
-                    libraryID: libraryID,
-                    database: database,
-                    controlPlane: client,
-                    commandLayer: commandLayer,
-                    progressReporter: { progress in
-                        Task { @MainActor in
-                            self.syncProgressTask = Self.syncProgressReport(for: progress)
-                            self.refreshBackgroundQueueItems()
-                        }
-                    }
-                )
-                let service = SyncService(
-                    libraryID: libraryID,
-                    peerID: peerID,
-                    database: database,
-                    client: client,
-                    progressReporter: { progress in
-                        Task { @MainActor in
-                            self.syncProgressTask = Self.syncProgressReport(for: progress)
-                            self.refreshBackgroundQueueItems()
-                        }
-                    }
-                )
-                try await service.sync()
-                return AutomaticSyncOutcome(
-                    didBootstrap: didBootstrap,
-                    uploadedPreviews: uploadSummary.uploadedCount,
-                    failedPreviews: uploadSummary.failedCandidates,
-                    pendingLedgerUploads: try database.pendingLedgerUploadCount()
-                )
-            }.value
-
-            mergePendingPreviewUploads(outcome.failedPreviews)
-            if !outcome.failedPreviews.isEmpty {
-                pendingAutomaticSync = true
-                pendingAutomaticSyncReason = "重试预览图上传"
-            }
-            isSyncing = false
-            syncProgressTask = BackgroundTaskReport(
-                title: "自动同步",
-                phase: "同步完成",
-                message: Self.syncSummaryText(reason: reason, outcome: outcome),
-                isFinished: true
-            )
-            refreshBackgroundQueueItems()
-            lastSyncSummary = Self.syncSummaryText(
-                reason: reason,
-                outcome: outcome
-            )
-        } catch {
-            mergePendingPreviewUploads(queuedPreviews)
-            pendingAutomaticSync = true
-            pendingAutomaticSyncReason = reason
-            isSyncing = false
-            syncProgressTask = nil
-            refreshBackgroundQueueItems()
-            lastSyncSummary = "自动同步失败"
-            lastError = error.fullTrace
-        }
-    }
-
-    private func queueBackgroundTask(_ kind: BackgroundQueueTaskKind) {
-        if currentBackgroundQueueTaskKind != kind && !queuedBackgroundTaskKinds.contains(kind) {
-            if let insertionIndex = queuedBackgroundTaskKinds.firstIndex(where: { $0.priority > kind.priority }) {
-                queuedBackgroundTaskKinds.insert(kind, at: insertionIndex)
-            } else {
-                queuedBackgroundTaskKinds.append(kind)
-            }
-        }
-        refreshBackgroundQueueItems()
-        runNextBackgroundQueueTaskIfNeeded()
-    }
-
-    private func runNextBackgroundQueueTaskIfNeeded() {
-        guard currentBackgroundQueueTaskKind == nil else {
-            refreshBackgroundQueueItems()
-            return
-        }
-        guard blockingTask == nil, !isScanning else {
-            refreshBackgroundQueueItems()
-            return
-        }
-        guard !queuedBackgroundTaskKinds.isEmpty else {
-            refreshBackgroundQueueItems()
-            return
-        }
-
-        let next = queuedBackgroundTaskKinds.removeFirst()
-        currentBackgroundQueueTaskKind = next
-        refreshBackgroundQueueItems()
-
-        switch next {
-        case .automaticSync:
-            beginAutomaticSyncIfNeeded()
-        case .availabilityRefresh:
-            let force = pendingAvailabilityRefreshForce
-            pendingAvailabilityRefresh = false
-            pendingAvailabilityRefreshForce = false
-            beginAvailabilityRefreshInBackground(force: force)
-        }
-    }
-
-    private func finishBackgroundQueueTask(_ kind: BackgroundQueueTaskKind) {
-        if currentBackgroundQueueTaskKind == kind {
-            currentBackgroundQueueTaskKind = nil
-        }
-        refreshBackgroundQueueItems()
-        if kind == .availabilityRefresh,
-           pendingAvailabilityRefresh,
-           !queuedBackgroundTaskKinds.contains(.availabilityRefresh) {
-            queueBackgroundTask(.availabilityRefresh)
-            return
-        }
-        runNextBackgroundQueueTaskIfNeeded()
-    }
-
-    private func refreshBackgroundQueueItems() {
-        var items: [BackgroundQueueItem] = []
-        if let currentKind = currentBackgroundQueueTaskKind {
-            items.append(
-                BackgroundQueueItem(
-                    kind: currentKind,
-                    state: .running,
-                    report: currentBackgroundQueueReport(for: currentKind)
-                )
-            )
-        }
-        items.append(
-            contentsOf: queuedBackgroundTaskKinds.map {
-                BackgroundQueueItem(kind: $0, state: .queued, report: $0.queuedReport)
-            }
-        )
-        backgroundQueueItems = items
-    }
-
-    private func currentBackgroundQueueReport(for kind: BackgroundQueueTaskKind) -> BackgroundTaskReport {
-        switch kind {
-        case .automaticSync:
-            return syncProgressTask ?? kind.runningFallbackReport
-        case .availabilityRefresh:
-            return backgroundTask ?? kind.runningFallbackReport
-        }
-    }
-
-    nonisolated private static func bootstrapLedgerIfNeeded(
-        database: SQLiteDatabase,
-        libraryID: String
-    ) throws -> Bool {
-        guard try database.syncMigrationState(libraryID: libraryID) == nil else {
-            return false
-        }
-        guard try database.ledgerEntries(libraryID: libraryID).isEmpty else {
-            return false
-        }
-
-        let bootstrapper = SyncBootstrapper(
-            libraryID: libraryID,
-            deviceID: SyncDeviceID(currentDeviceID()),
-            actorID: "system:migration",
-            database: database
-        )
-        _ = try bootstrapper.bootstrapExistingLibraryToLedger()
-        return true
-    }
-
-    nonisolated private static func pendingPreviewSyncCandidates(database: SQLiteDatabase) throws -> [ScannedDerivativeUploadCandidate] {
-        try database.previewsNeedingDerivativeUpload().map {
-            ScannedDerivativeUploadCandidate(
-                assetID: $0.assetID,
-                role: .preview,
-                fileURL: URL(fileURLWithPath: $0.path)
-            )
-        }
-    }
-
-    nonisolated private static func uploadPreviewCandidates(
-        _ candidates: [ScannedDerivativeUploadCandidate],
-        libraryID: String,
-        database: SQLiteDatabase,
-        controlPlane: SyncControlPlaneHTTPClient,
-        commandLayer: SyncCommandLayer,
-        progressReporter: @escaping @Sendable (AutomaticSyncProgress) -> Void
-    ) async throws -> PreviewUploadOutcome {
-        let deduped = deduplicatePreviewUploadCandidates(candidates)
-        let service = DerivativeUploadService(
-            libraryID: libraryID,
-            commandLayer: commandLayer,
-            controlPlane: controlPlane,
-            uploader: URLSessionDerivativeDataUploader()
-        )
-
-        var uploadedCount = 0
-        var failedCandidates: [ScannedDerivativeUploadCandidate] = []
-        let sortedCandidates = deduped.sorted(by: { $0.assetID.uuidString < $1.assetID.uuidString })
-        let totalCandidates = sortedCandidates.count
-        progressReporter(
-            AutomaticSyncProgress(
-                phase: .uploadingPreviews,
-                completedItems: 0,
-                totalItems: totalCandidates,
-                message: totalCandidates == 0 ? "没有待补传预览图" : "准备补传 \(totalCandidates) 张预览图"
-            )
-        )
-        for (index, candidate) in sortedCandidates.enumerated() {
-            guard candidate.role == .preview else { continue }
-            guard FileManager.default.fileExists(atPath: candidate.fileURL.path) else {
-                progressReporter(
-                    AutomaticSyncProgress(
-                        phase: .uploadingPreviews,
-                        completedItems: index + 1,
-                        totalItems: totalCandidates,
-                        message: "跳过缺失预览图 \(index + 1) / \(totalCandidates)"
-                    )
-                )
-                continue
-            }
-
-            do {
-                let fileSize = try Int64(candidate.fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
-                let fileObject = FileObjectID(
-                    contentHash: try FileHasher.sha256(url: candidate.fileURL),
-                    sizeBytes: fileSize,
-                    role: .preview
-                )
-                let existingDerivative = try database.derivatives(assetID: candidate.assetID).first {
-                    $0.role == .preview && $0.fileObject == fileObject
-                }
-                if existingDerivative != nil {
-                    progressReporter(
-                        AutomaticSyncProgress(
-                            phase: .uploadingPreviews,
-                            completedItems: index + 1,
-                            totalItems: totalCandidates,
-                            message: "预览图已存在 \(index + 1) / \(totalCandidates)"
-                        )
-                    )
-                    continue
-                }
-
-                try await service.uploadDerivative(
-                    assetID: candidate.assetID,
-                    role: .preview,
-                    localFile: candidate.fileURL,
-                    pixelSize: try pixelSize(for: candidate.fileURL)
-                )
-                uploadedCount += 1
-                progressReporter(
-                    AutomaticSyncProgress(
-                        phase: .uploadingPreviews,
-                        completedItems: index + 1,
-                        totalItems: totalCandidates,
-                        message: "已补传 \(uploadedCount) 张预览图"
-                    )
-                )
-            } catch {
-                failedCandidates.append(candidate)
-                progressReporter(
-                    AutomaticSyncProgress(
-                        phase: .uploadingPreviews,
-                        completedItems: index + 1,
-                        totalItems: totalCandidates,
-                        message: "补传失败 \(failedCandidates.count) / \(totalCandidates)"
-                    )
-                )
-            }
-        }
-
-        return PreviewUploadOutcome(
-            uploadedCount: uploadedCount,
-            failedCandidates: failedCandidates
-        )
-    }
-
-    nonisolated static func deduplicatePreviewUploadCandidates(
-        _ candidates: [ScannedDerivativeUploadCandidate]
-    ) -> [ScannedDerivativeUploadCandidate] {
-        var merged: [UUID: ScannedDerivativeUploadCandidate] = [:]
-        merged.reserveCapacity(candidates.count)
-        for candidate in candidates where candidate.role == .preview {
-            // 待补传列表来自内存队列和数据库投影，后者出现时应覆盖前者，避免重复 key 触发断言。
-            merged[candidate.assetID] = candidate
-        }
-        return Array(merged.values)
-    }
-
-    nonisolated private static func pixelSize(for fileURL: URL) throws -> PixelSize {
-        guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
-              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-              let width = properties[kCGImagePropertyPixelWidth] as? Int,
-              let height = properties[kCGImagePropertyPixelHeight] as? Int,
-              width > 0,
-              height > 0 else {
-            throw FileOperationError.cannotWrite(fileURL)
-        }
-        return PixelSize(width: width, height: height)
-    }
-
-    nonisolated private static func syncSummaryText(reason: String, outcome: AutomaticSyncOutcome) -> String {
-        var parts: [String] = []
-        if outcome.didBootstrap {
-            parts.append("已补齐初始 ledger")
-        }
-        if outcome.uploadedPreviews > 0 {
-            parts.append("上传 \(outcome.uploadedPreviews) 张预览图")
-        }
-        if !outcome.failedPreviews.isEmpty {
-            parts.append("待重试 \(outcome.failedPreviews.count) 张预览图")
-        }
-        if outcome.pendingLedgerUploads == 0 {
-            parts.append("ledger 已上传")
-        } else {
-            parts.append("剩余 \(outcome.pendingLedgerUploads) 条待上传")
-        }
-        let detail = parts.joined(separator: " · ")
-        return detail.isEmpty ? "\(reason)完成" : "\(reason) · \(detail)"
-    }
-
-    nonisolated private static func syncProgressReport(for progress: AutomaticSyncProgress) -> BackgroundTaskReport {
-        switch progress.phase {
-        case .uploadingPreviews:
-            return BackgroundTaskReport(
-                title: "自动同步",
-                phase: "补传预览图",
-                totalItems: progress.totalItems,
-                completedItems: progress.completedItems,
-                message: progress.message
-            )
-        case .uploadingLedger:
-            return BackgroundTaskReport(
-                title: "自动同步",
-                phase: "上传 ledger",
-                totalItems: progress.totalItems,
-                completedItems: progress.completedItems,
-                message: progress.message
-            )
-        case .pullingRemoteLedger:
-            return BackgroundTaskReport(
-                title: "自动同步",
-                phase: "拉取远端变更",
-                message: progress.message
-            )
-        }
-    }
-
-    nonisolated private static func syncProgressReport(for progress: SyncServiceProgress) -> BackgroundTaskReport {
-        switch progress.phase {
-        case .uploadingLedger:
-            return BackgroundTaskReport(
-                title: "自动同步",
-                phase: "上传 ledger",
-                totalItems: progress.totalItems,
-                completedItems: progress.completedItems,
-                message: progress.message
-            )
-        case .pullingRemoteLedger:
-            return BackgroundTaskReport(
-                title: "自动同步",
-                phase: "拉取远端变更",
-                message: progress.message
-            )
-        }
-    }
-
-    nonisolated private static func backfillLedger(
-        database: SQLiteDatabase,
-        libraryID: String,
-        deviceID: SyncDeviceID,
-        actorID: String,
-        progressReporter: @escaping @Sendable (SyncBootstrapProgress) -> Void
-    ) throws -> LedgerBackfillOutcome {
-        let migrationState = try database.syncMigrationState(libraryID: libraryID)
-        let existingLedgerCount = try database.ledgerEntries(libraryID: libraryID).count
-
-        if let migrationState, migrationState.status == .completed {
-            let pendingPreviews = try database.previewsNeedingDerivativeUpload().count
-            return LedgerBackfillOutcome(
-                phase: "同步 ledger 已补齐",
-                message: Self.ledgerBackfillMessage(
-                    createdOperationCount: 0,
-                    ledgerHighWatermark: migrationState.ledgerHighWatermark,
-                    projectionVerified: migrationState.projectionVerified,
-                    pendingPreviewCount: pendingPreviews,
-                    alreadyCompleted: true
-                ),
-                syncSummary: Self.ledgerBackfillSummary(
-                    pendingPreviewCount: pendingPreviews,
-                    projectionVerified: migrationState.projectionVerified
-                ),
-                ledgerHighWatermark: migrationState.ledgerHighWatermark
-            )
-        }
-
-        if migrationState == nil, existingLedgerCount > 0 {
-            throw NSError(
-                domain: "Keeps",
-                code: 2001,
-                userInfo: [
-                    NSLocalizedDescriptionKey: "当前资料库已经存在 \(existingLedgerCount) 条 ledger 记录，不能再做初始 backfill。请直接继续自动同步，或先人工检查 migration 状态。"
-                ]
-            )
-        }
-
-        let result = try SyncBootstrapper(
-            libraryID: libraryID,
-            deviceID: deviceID,
-            actorID: actorID,
-            database: database,
-            progressReporter: progressReporter
-        ).bootstrapExistingLibraryToLedger()
-        let pendingPreviews = try database.previewsNeedingDerivativeUpload().count
-        return LedgerBackfillOutcome(
-            phase: "同步 ledger 补齐完成",
-            message: Self.ledgerBackfillMessage(
-                createdOperationCount: result.createdOperationCount,
-                ledgerHighWatermark: result.ledgerHighWatermark,
-                projectionVerified: result.projectionVerified,
-                pendingPreviewCount: pendingPreviews,
-                alreadyCompleted: false
-            ),
-            syncSummary: Self.ledgerBackfillSummary(
-                pendingPreviewCount: pendingPreviews,
-                projectionVerified: result.projectionVerified
-            ),
-            ledgerHighWatermark: result.ledgerHighWatermark
-        )
-    }
-
-    nonisolated private static func ledgerBackfillMessage(
-        createdOperationCount: Int,
-        ledgerHighWatermark: Int,
-        projectionVerified: Bool,
-        pendingPreviewCount: Int,
-        alreadyCompleted: Bool
-    ) -> String {
-        var parts: [String] = []
-        if alreadyCompleted {
-            parts.append("初始 ledger 已存在")
-        } else {
-            parts.append("新增 \(createdOperationCount) 条初始操作")
-        }
-        parts.append("当前水位 \(ledgerHighWatermark) 条")
-        parts.append(projectionVerified ? "projection 校验通过" : "projection 校验未通过")
-        if pendingPreviewCount > 0 {
-            parts.append("待自动上传 \(pendingPreviewCount) 张预览图")
-        }
-        return parts.joined(separator: "，")
-    }
-
-    nonisolated private static func ledgerBackfillSummary(
-        pendingPreviewCount: Int,
-        projectionVerified: Bool
-    ) -> String {
-        var parts = ["已补齐初始 ledger"]
-        if projectionVerified {
-            parts.append("projection 已校验")
-        }
-        if pendingPreviewCount > 0 {
-            parts.append("待上传 \(pendingPreviewCount) 张预览图")
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    @MainActor
-    private static func blockingTaskReport(for progress: SyncBootstrapProgress) -> BlockingTaskReport {
-        switch progress {
-        case .countingSourceFacts:
-            return BlockingTaskReport(
-                title: "工具",
-                phase: "统计资料库",
-                message: "正在确认需要补齐的资产和文件位置。"
-            )
-        case .loadingSnapshots(let assetCount, let fileCount):
-            return BlockingTaskReport(
-                title: "工具",
-                phase: "生成初始快照",
-                totalItems: assetCount + fileCount,
-                completedItems: 0,
-                message: "准备把 \(assetCount) 个资产和 \(fileCount) 个文件位置写入同步 ledger。"
-            )
-        case .writingLedger(let totalOperations):
-            return BlockingTaskReport(
-                title: "工具",
-                phase: "写入 ledger",
-                totalItems: totalOperations,
-                completedItems: totalOperations,
-                message: "初始快照已写入本地同步 ledger，正在做最终校验。"
-            )
-        case .verifyingProjection(let totalOperations):
-            return BlockingTaskReport(
-                title: "工具",
-                phase: "校验投影",
-                totalItems: totalOperations,
-                completedItems: totalOperations,
-                message: "正在 replay ledger，确认补齐后的投影与当前资料库一致。"
-            )
-        }
-    }
-
-    private static func applicationSupport() throws -> URL {
-        let supportRoot = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let keepsRoot = supportRoot.appendingPathComponent("Keeps", isDirectory: true)
-        let legacyRoot = supportRoot.appendingPathComponent("PhotoAssetManager", isDirectory: true)
-
-        if !FileManager.default.fileExists(atPath: keepsRoot.path),
-           FileManager.default.fileExists(atPath: legacyRoot.appendingPathComponent("Library.sqlite").path) {
-            return legacyRoot
-        }
-
-        try FileManager.default.createDirectory(at: keepsRoot, withIntermediateDirectories: true)
-        return keepsRoot
-    }
-
-    private static func normalizedDirectoryPath(_ path: String) -> String {
-        guard path.count > 1 else { return path }
-        return path.hasSuffix("/") ? String(path.dropLast()) : path
-    }
-
-    nonisolated private static func checkAvailability(_ targets: [AvailabilityCheckTarget]) async -> [FileAvailabilityUpdate] {
-        await Task.detached(priority: .utility) {
-            targets.map { target in
-                FileAvailabilityUpdate(
-                    id: target.id,
-                    availability: FileManager.default.fileExists(atPath: target.path) ? .online : .missing
-                )
-            }
-        }.value
-    }
-}
-
-private struct AutomaticSyncOutcome: Sendable {
-    var didBootstrap: Bool
-    var uploadedPreviews: Int
-    var failedPreviews: [ScannedDerivativeUploadCandidate]
-    var pendingLedgerUploads: Int
-}
-
-private struct PreviewUploadOutcome: Sendable {
-    var uploadedCount: Int
-    var failedCandidates: [ScannedDerivativeUploadCandidate]
-}
-
-private enum AutomaticSyncProgressPhase: Sendable {
-    case uploadingPreviews
-    case uploadingLedger
-    case pullingRemoteLedger
-}
-
-private struct AutomaticSyncProgress: Sendable {
-    var phase: AutomaticSyncProgressPhase
-    var completedItems: Int
-    var totalItems: Int
-    var message: String
-}
-
-private struct LedgerBackfillOutcome: Sendable {
-    var phase: String
-    var message: String
-    var syncSummary: String
-    var ledgerHighWatermark: Int
-}
-
-private extension Array {
-    func chunked(size: Int) -> [[Element]] {
-        precondition(size > 0, "chunk size must be positive")
-        return stride(from: 0, to: count, by: size).map { start in
-            Array(self[start..<Swift.min(start + size, count)])
-        }
-    }
-}
-
-struct FolderSelectionLoadResult: Sendable {
-    var selection: BrowseSelection
-    var assets: [Asset]
-    var selectedAssetID: UUID?
-    var selectedFiles: [FileInstance]
-    var hasMoreAssets: Bool
 }

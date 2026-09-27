@@ -1,0 +1,294 @@
+import AppKit
+import SwiftUI
+import KeepsAPI
+
+struct DirectoryOutlineView: NSViewRepresentable {
+    @ObservedObject var library: LibraryStore
+
+    func makeCoordinator() -> Coordinator { Coordinator(library: library) }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let outline = DirectoryOutline()
+        outline.contextMenuForItem = { [weak coordinator = context.coordinator] item in
+            coordinator?.contextMenu(for: item)
+        }
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("directory"))
+        outline.addTableColumn(column)
+        outline.outlineTableColumn = column
+        outline.headerView = nil
+        outline.rowHeight = 30
+        outline.indentationPerLevel = 14
+        outline.style = .plain
+        outline.backgroundColor = NSColor(white: 0.17, alpha: 1)
+        outline.appearance = NSAppearance(named: .darkAqua)
+        outline.allowsEmptySelection = true
+        outline.dataSource = context.coordinator
+        outline.delegate = context.coordinator
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.scrollerStyle = .overlay
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.documentView = outline
+        context.coordinator.outline = outline
+        context.coordinator.update()
+        return scroll
+    }
+
+    func updateNSView(_ view: NSScrollView, context: Context) {
+        context.coordinator.library = library
+        context.coordinator.update()
+    }
+
+    final class DirectoryOutline: NSOutlineView {
+        var contextMenuForItem: ((Any) -> NSMenu?)?
+
+        override func menu(for event: NSEvent) -> NSMenu? {
+            let index = row(at: convert(event.locationInWindow, from: nil))
+            guard index >= 0, let item = item(atRow: index) else { return nil }
+            return contextMenuForItem?(item)
+        }
+    }
+
+    final class DirectoryCell: NSTableCellView {
+        let spinner = NSProgressIndicator()
+        let countLabel = NSTextField(labelWithString: "")
+        private let icon = NSImageView()
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            let label = NSTextField(labelWithString: "")
+            label.lineBreakMode = .byTruncatingMiddle
+            label.font = .systemFont(ofSize: 12)
+            countLabel.font = .systemFont(ofSize: 11)
+            countLabel.alignment = .right
+            countLabel.textColor = .secondaryLabelColor
+            countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+            countLabel.toolTip = "已索引照片，包含子目录，不含回收站"
+            icon.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.isDisplayedWhenStopped = false
+            for view in [label, countLabel, icon, spinner] {
+                view.translatesAutoresizingMaskIntoConstraints = false
+                addSubview(view)
+            }
+            textField = label; imageView = icon
+            NSLayoutConstraint.activate([
+                icon.leadingAnchor.constraint(equalTo: leadingAnchor), icon.centerYAnchor.constraint(equalTo: centerYAnchor), icon.widthAnchor.constraint(equalToConstant: 16),
+                spinner.leadingAnchor.constraint(equalTo: icon.leadingAnchor), spinner.centerYAnchor.constraint(equalTo: centerYAnchor), spinner.widthAnchor.constraint(equalToConstant: 16), spinner.heightAnchor.constraint(equalToConstant: 16),
+                label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6), label.centerYAnchor.constraint(equalTo: centerYAnchor),
+                countLabel.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 6), countLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4), countLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
+            ])
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+        func configure(_ directory: KeepsNavigationDirectory, loading: Bool, hidden: Bool = false) {
+            icon.image = NSImage(systemSymbolName: hidden ? "folder.badge.minus" : "folder", accessibilityDescription: hidden ? "隐藏目录" : "目录")
+            textField?.stringValue = directory.name
+            countLabel.stringValue = String(directory.photoCount)
+            toolTip = directory.path + (hidden ? "（隐藏目录：仅进入此目录或其子目录时显示内容）" : "")
+            icon.isHidden = loading
+            spinner.isHidden = !loading
+            if loading { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        }
+    }
+
+    @MainActor final class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
+        final class Node: NSObject {
+            let path: String
+            init(_ path: String) { self.path = path }
+        }
+        final class StatusNode: NSObject {
+            let parent: String
+            init(_ parent: String) { self.parent = parent }
+        }
+        final class RetryButton: NSButton { var path = "" }
+
+        var library: LibraryStore
+        weak var outline: NSOutlineView?
+        private var nodes: [String: Node] = [:]
+        private var statusNodes: [String: StatusNode] = [:]
+        private var roots: [KeepsNavigationDirectory] = []
+        private var children: [String: [KeepsNavigationDirectory]] = [:]
+        private var errors: [String: String] = [:]
+        private var loading: Set<String> = []
+        private var generation = -1
+        private var galleryLoadingPath: String?
+        private var hiddenPaths: Set<String> = []
+        private var updating = false
+
+        init(library: LibraryStore) { self.library = library }
+
+        private func node(_ path: String) -> Node {
+            if let existing = nodes[path] { return existing }
+            let created = Node(path); nodes[path] = created; return created
+        }
+        private func status(_ path: String) -> StatusNode {
+            if let existing = statusNodes[path] { return existing }
+            let created = StatusNode(path); statusNodes[path] = created; return created
+        }
+        private func directory(_ path: String) -> KeepsNavigationDirectory? {
+            roots.first { $0.path == path } ?? children.values.lazy.flatMap { $0 }.first { $0.path == path }
+        }
+
+        func update() {
+            guard let outline else { return }
+            updating = true
+            defer { updating = false }
+            let hiddenChanged = hiddenPaths != library.hiddenDirectoryPaths
+            hiddenPaths = library.hiddenDirectoryPaths
+            let oldRoots = roots
+            let oldChildren = children
+            let oldErrors = errors
+            let oldLoading = loading
+            let oldGalleryLoadingPath = galleryLoadingPath
+            galleryLoadingPath = library.isLoading ? library.query.directory : nil
+            let reset = generation != library.navigationGeneration
+            roots = library.directories
+            children = library.directoryChildren
+            errors = library.directoryErrors
+            loading = library.loadingDirectories
+            generation = library.navigationGeneration
+            let origin = outline.enclosingScrollView?.contentView.bounds.origin
+            if reset {
+                nodes = [:]; statusNodes = [:]
+                outline.reloadData()
+            } else if oldRoots.map(\.path) != roots.map(\.path) {
+                let difference = roots.map(\.path).difference(from: oldRoots.map(\.path))
+                outline.beginUpdates()
+                for change in difference {
+                    switch change {
+                    case .remove(let index, _, _): outline.removeItems(at: IndexSet(integer: index), inParent: nil, withAnimation: [])
+                    case .insert(let index, _, _): outline.insertItems(at: IndexSet(integer: index), inParent: nil, withAnimation: [])
+                    }
+                }
+                outline.endUpdates()
+            }
+            let changed = Set(oldChildren.keys).union(children.keys).union(oldErrors.keys).union(errors.keys).union(oldLoading).union(loading)
+            for path in changed where oldChildren[path] != children[path] || oldErrors[path] != errors[path] || oldLoading.contains(path) != loading.contains(path) {
+                if let item = nodes[path], outline.row(forItem: item) >= 0 { outline.reloadItem(item, reloadChildren: true) }
+            }
+            for path in Set([oldGalleryLoadingPath, galleryLoadingPath].compactMap { $0 }) where oldGalleryLoadingPath != galleryLoadingPath {
+                if let item = nodes[path] { outline.reloadItem(item) }
+            }
+            for root in roots where oldRoots.first(where: { $0.path == root.path }) != root {
+                if let item = nodes[root.path] { outline.reloadItem(item) }
+            }
+            for path in library.expandedPaths.sorted(by: { $0.count < $1.count }) {
+                let item = node(path)
+                if outline.row(forItem: item) >= 0, !outline.isItemExpanded(item) { outline.expandItem(item) }
+            }
+            if let path = library.query.directory, let item = nodes[path], outline.row(forItem: item) >= 0 {
+                let row = outline.row(forItem: item)
+                if outline.selectedRow != row { outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
+            } else if outline.selectedRow != -1 { outline.deselectAll(nil) }
+            if !reset, let origin, let scroll = outline.enclosingScrollView {
+                scroll.contentView.scroll(to: origin)
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+            if hiddenChanged {
+                for row in 0..<outline.numberOfRows {
+                    if let item = outline.item(atRow: row) { outline.reloadItem(item) }
+                }
+            }
+            let valid = Set(roots.map(\.path) + children.values.flatMap { $0.map(\.path) })
+            nodes = nodes.filter { valid.contains($0.key) }
+            statusNodes = statusNodes.filter { valid.contains($0.key) }
+        }
+
+        func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+            guard let item else { return roots.count }
+            guard let item = item as? Node else { return 0 }
+            return children[item.path].map { $0.count + (errors[item.path] == nil ? 0 : 1) } ?? 1
+        }
+        func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+            guard let item = item as? Node else { return node(roots[index].path) }
+            if let values = children[item.path], index < values.count { return node(values[index].path) }
+            return status(item.path)
+        }
+        func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
+            guard let item = item as? Node else { return false }
+            return children[item.path].map { !$0.isEmpty || errors[item.path] != nil } ?? (directory(item.path)?.hasChildren == true)
+        }
+        func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool { item is Node }
+        func outlineViewItemDidExpand(_ notification: Notification) {
+            guard !updating, let item = notification.userInfo?["NSObject"] as? Node else { return }
+            library.setDirectoryExpanded(item.path, expanded: true)
+        }
+        func outlineViewItemDidCollapse(_ notification: Notification) {
+            guard !updating, let item = notification.userInfo?["NSObject"] as? Node else { return }
+            library.setDirectoryExpanded(item.path, expanded: false)
+        }
+        func outlineViewSelectionDidChange(_ notification: Notification) {
+            guard !updating, let outline, let item = outline.item(atRow: outline.selectedRow) as? Node else { return }
+            if library.query.directory != item.path { library.showLibrary(directory: item.path) }
+        }
+        func contextMenu(for item: Any) -> NSMenu? {
+            guard let node = item as? Node, let outline else { return nil }
+            let menu = NSMenu()
+            if outline.isExpandable(node) {
+                let expanded = outline.isItemExpanded(node)
+                let entry = menu.addItem(withTitle: expanded ? "折叠" : "展开", action: #selector(toggleDirectory(_:)), keyEquivalent: "")
+                entry.target = self
+                entry.representedObject = node
+            }
+            for (title, action) in [("刷新子目录", #selector(refreshDirectory(_:))), ("复制服务器路径", #selector(copyDirectoryPath(_:)))] {
+                let entry = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+                entry.target = self
+                entry.representedObject = node
+            }
+            menu.addItem(.separator())
+            let explicitlyHidden = library.hiddenDirectoryPaths.contains(node.path)
+            let entry = menu.addItem(withTitle: explicitlyHidden ? "取消隐藏目录" : "设为隐藏目录", action: #selector(toggleHiddenDirectory(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = node
+            entry.isEnabled = !library.isUpdatingHiddenDirectory
+            menu.autoenablesItems = false
+            if library.isDirectoryHidden(node.path), !explicitlyHidden {
+                let inherited = menu.addItem(withTitle: "已继承父目录的隐藏设置", action: nil, keyEquivalent: "")
+                inherited.isEnabled = false
+            }
+            return menu
+        }
+
+        @objc private func toggleHiddenDirectory(_ sender: NSMenuItem) {
+            guard let node = sender.representedObject as? Node else { return }
+            library.setDirectoryHidden(node.path, hidden: !library.hiddenDirectoryPaths.contains(node.path))
+        }
+
+        @objc private func toggleDirectory(_ sender: NSMenuItem) {
+            guard let node = sender.representedObject as? Node, let outline else { return }
+            if outline.isItemExpanded(node) { outline.collapseItem(node) }
+            else { outline.expandItem(node) }
+        }
+
+        @objc private func refreshDirectory(_ sender: NSMenuItem) {
+            guard let node = sender.representedObject as? Node else { return }
+            library.loadChildren(of: node.path, refresh: true)
+        }
+
+        @objc private func copyDirectoryPath(_ sender: NSMenuItem) {
+            guard let node = sender.representedObject as? Node else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(node.path, forType: .string)
+        }
+
+        @objc private func retry(_ sender: RetryButton) { library.loadChildren(of: sender.path, refresh: true) }
+
+        func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
+            if let item = item as? StatusNode {
+                if let error = errors[item.parent] {
+                    let button = RetryButton(title: "加载失败 · 重试", target: self, action: #selector(retry(_:)))
+                    button.path = item.parent; button.isBordered = false; button.toolTip = error
+                    return button
+                }
+                return NSTextField(labelWithString: "正在加载…")
+            }
+            guard let item = item as? Node, let directory = directory(item.path) else { return nil }
+            let identifier = NSUserInterfaceItemIdentifier("directory-cell")
+            let cell = outlineView.makeView(withIdentifier: identifier, owner: self) as? DirectoryCell ?? DirectoryCell(frame: .zero)
+            cell.identifier = identifier
+            cell.configure(directory, loading: loading.contains(item.path) || galleryLoadingPath == item.path, hidden: library.isDirectoryHidden(item.path))
+            return cell
+        }
+    }
+}

@@ -1,0 +1,13 @@
+**
+!server/
+!server/Cargo.toml
+!server/Cargo.lock
+!server/src/
+!server/src/**
+!control_plane/
+!control_plane/pyproject.toml
+!control_plane/uv.lock
+!control_plane/control_plane/
+!control_plane/control_plane/**
+**/__pycache__/
+**/*.pyc

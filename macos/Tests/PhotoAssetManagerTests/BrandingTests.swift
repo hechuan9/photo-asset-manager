@@ -16,8 +16,8 @@ struct BrandingTests {
 
         #expect(packageScript.contains(".build/app/Keeps.app"))
         #expect(packageScript.contains("\"$MACOS_DIR/Keeps\""))
-        #expect(iosPackageScript.contains("KeepsIOS.xcarchive"))
-        #expect(iosPackageScript.contains("KeepsIOS.ipa"))
+        #expect(iosPackageScript.contains("testflight.sh"))
+        #expect(iosPackageScript.contains("ios archive"))
     }
 
     @Test func iOSProjectUsesKeepsDisplayNameAndBundleID() throws {

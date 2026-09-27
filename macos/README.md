@@ -1,72 +1,43 @@
-# Keeps
+# Keeps macOS
 
-本地优先的 macOS 照片资产管理器原型。
+Keeps 是 NAS 照片服务的原生 SwiftUI 客户端。NAS 承担照片扫描、索引、元数据修改、预览生成和任务持久化；macOS 仅保留界面状态和网络图片缓存。
 
-## 当前能力
+在 Keeps → 设置（⌘,）的 Server 页面填写 Keeps Server 的 HTTP/HTTPS 地址、资料库名称和服务访问令牌。通过服务器鉴权和资料库查询验证后才保存并切换连接；失败时保留原来的连接。地址与资料库保留在 UserDefaults，凭据保存在 Keychain；旧连接偏好会自动迁移。NAS 不可用时显示请求错误，不切换本地数据库。
 
-- 添加多个照片文件夹，并通过刷新扫描清单。
-- 从库外照片文件夹导入到已登记资料库目标；导入只复制并校验，不删除来源照片。
-- 解析基础 EXIF：拍摄时间、机身、镜头。
-- 可迁移缩略图保存位置；不会为了生成预览而额外创建预览 JPEG。
-- 用 SHA-256 内容 hash 和元数据指纹识别重复位置。
-- 使用 SQLite 建立资产、文件实例、版本、导入批次和操作日志。
-- 区分本地工作副本、NAS 权威副本、导入来源和缓存。
-- 支持按文件名、路径、相机、扩展名、评分、标签和目录筛选。
-- 支持评分、精选、标签编辑。
-- 支持完整文件夹浏览模式：每个文件夹和子文件夹都可选中查看照片，并可在菜单栏切换“仅当前文件夹”或“包含子文件夹”。
-- 支持一键归档到 NAS、同步导出或 sidecar 类变更、记录导出文件。
-- 归档和同步时拒绝覆盖目标文件，复制前后校验 hash，并写入操作日志。
-- 支持多个文件夹；文件夹列表就是扫描清单，可刷新或移除单个文件夹记录。
-- 扫描时会尽量读取嵌入 XMP/EXIF 或同名 `.xmp` sidecar 中的评分。
-- RAW 和同名 JPG 会尽量归到同一个资产；已有 JPG 会直接作为可浏览图使用。
-- RAW 和同名 JPG 可同时作为原片位置存在，但每个资产只保留一个缩略图记录。
-- 支持从照片右键菜单把选中资产移入共享回收站；该操作只写入同步 ledger 和本地投影状态，不删除、移动或覆盖磁盘照片。
-- 支持通过菜单栏从共享回收站恢复选中资产。
-- 新增同步 ledger 基础层：本地评分、精选、标签、共享回收站和归档 receipt 走 append-only 业务事件，SQLite 只作为本机 UI 投影。
-- 支持把现有 Mac SQLite 库 bootstrap 成幂等 ledger 初始快照，迁移只表达当前事实，不 replay 历史 SQL。
-- 衍生图采用 NAS control-plane authoritative / 本地 cache 模型：1200px 预览图作为长期 NAS derivative，原片、RAW 和 sidecar canonical 不进入 `/myphoto/keeps`。
+- 统一 HTTP 资料库：默认全部照片，支持精选与回收站；不依赖 SMB 挂载，也没有本地暂存资料库。
+- 目录与图库之间可拖动调整宽度；目录滚动条采用自动隐藏的浮层样式。
+- 图库滚动到底部自动加载下一页，加载过程中到达底部也会在当前请求完成后继续。
+- 服务器来源目录按需展开浏览，原生 NSOutlineView 目录树按需展开，包括空目录，支持键盘导航及保留展开状态的刷新；搜索、评分、颜色、标签筛选和排序。
+- 多选照片，修改评分、精选、颜色和标签。
+- 共享回收站与恢复，只改变服务器资产状态，不删除原片。
+- 服务端目录追踪、扫描、任务状态与失败重试；路径相对于服务器原片根目录。
+- 使用 NAS 生成的预览图，不在客户端扫描、解析或生成照片衍生图。
 
-## 构建
+目录导航依赖服务端 `/libraries/{libraryID}/navigation` API；来源管理与扫描通过“管理来源与任务”访问。Mac 不枚举本机文件，目录导航失败不阻止已索引照片查询。上传尚未实现。
 
-```bash
-swift build
+```sh
+swift test --package-path ../shared
+swift test
+bash scripts/package_app.sh
 ```
 
-## 打包 macOS App
+共享 HTTP 契约和 DTO 位于 `../shared` 的 KeepsAPI 包，macOS 与 iOS 使用同一份实现。
 
-```bash
-./scripts/package_app.sh
-open .build/app/Keeps.app
+## TestFlight 分发
+
+正式测试分发使用 `Keeps.xcodeproj` 的共享 `Keeps` scheme，自动签名团队为 `3TZ6RCL8NE`，Bundle ID 保持 `local.keeps`。工程直接编译现有源文件并引用 `../shared` 的 KeepsAPI，不维护第二份客户端实现。版本号和构建号统一在 `Version.xcconfig` 修改，每次上传递增构建号。
+
+在仓库根目录执行：
+
+```sh
+bash scripts/testflight.sh macos archive
+bash scripts/testflight.sh macos upload
 ```
 
-应用数据库默认存放在：
+归档保存在 `macos/.build/testflight/Keeps.xcarchive`，包含 Apple Silicon 与 Intel 架构。上传需要 Xcode 已登录具有团队发布权限的账号，以及 App Store Connect 中对应的 macOS App 记录。归档成功不代表 TestFlight 已处理完成。
 
-```text
-~/Library/Application Support/Keeps
-```
+发行版开启 App Sandbox、Hardened Runtime 和出站网络权限；客户端只通过 HTTP/HTTPS 访问 NAS，不需要本机照片访问权限。Keychain 仅保存当前应用凭据，不启用跨应用 Keychain sharing。首次切换到沙盒版本需在设置中确认服务地址、资料库与令牌；本地开发版的偏好和旧签名凭据不保证自动迁移。
 
-## 使用建议
+`bash scripts/package_app.sh` 继续用于本机调试，生成 ad hoc 签名应用，不用于 TestFlight。SwiftPM 测试入口保持不变。
 
-先添加一个或多个照片文件夹，让已有原片进入索引。`/Volumes` 下的文件夹会自动视为 NAS 存储，归档和同步会使用对应的卷根目录。
-
-启动后应用会在后台尝试挂载已登记的 NAS 卷根目录，例如已有来源 `/Volumes/photo/照片` 时会尝试挂载 `smb://chuan_nas.local/photo`。如果 NAS 主机名不同，可设置：
-
-```bash
-defaults write Keeps nasSMBHost "your-nas-host.local"
-```
-
-NAS 挂载未完成时，后台文件状态校验会跳过这一轮，避免把离线 NAS 上的原片误标成缺失。文件状态全量校验有 24 小时启动节流；旧库首次升级会先建立校验水位，避免第一次打开就遍历全库。工具栏里的“校验文件状态”可手动强制刷新。
-
-左侧文件夹区可直接选中文件夹查看照片；菜单栏的“文件夹”菜单可切换只看当前文件夹直属照片，或包含所有子文件夹照片。“全部资产”会退出文件夹浏览并回到全库。
-
-移除文件夹只会改变数据库里的扫描配置，不会删除已入库资产、文件位置或磁盘照片。缩略图位置未设置时，新扫描不会生成额外缩略图；有 JPG 的资产会直接用 JPG 浏览。迁移缩略图只复制、校验并更新数据库路径，不删除旧文件。
-
-删除照片当前不是物理删除操作，不等同于“移除文件夹”或停止追踪。必须先在资产网格右键选择删除，再在确认弹窗中确认；确认后资产进入共享回收站并从默认视图隐藏，磁盘上的照片文件保持原样。第一版不自动执行原片物理清除。
-
-多设备同步基础层使用业务事件 ledger，而不是同步本地 SQL。评分、精选、标签、回收站、导入原片声明、归档请求和原片归档 receipt 都记录为 append-only operation；`assets`、`file_instances`、共享回收站和归档状态是 replay 后的本地投影。NAS control-plane 保存 ledger、设备游标、预览图和归档 receipt，原片仍以单一 NAS/server 作为 canonical store。
-
-已有 Mac 库迁移到同步架构时，会生成一次 `system:migration` actor 的 bootstrap ledger 快照，包括资产 metadata、标签、文件位置以及已有 thumbnail/preview derivative 指针。bootstrap operation 使用稳定 ID，重复运行必须幂等；如果同一稳定 operation ID 的 payload 变化，迁移会失败并要求人工处理。迁移状态记录在本地 watermark 中，只有 ledger replay 校验通过后才标记完成。
-
-如果希望在接入 remote control-plane 前先手动完成这一步，可在应用里使用“工具 -> 补齐同步 Ledger”或同步状态面板里的“补齐 ledger”。它只会把当前 SQLite 事实补成初始 ledger 快照，不会删除、移动或覆盖任何照片文件；后续配置好自动同步后，历史缩略图也会继续按数据库状态补传。
-
-预览图的二进制内容不写入 ledger。ledger 只记录 `DerivativeDeclared` 业务事件和对象指针；本地路径只表示 cache 命中，cache miss 时按控制面返回的 derivative metadata 下载到本地 cache。cache 可清理和重建，清理 cache 不写 ledger，也不得触碰原片目录。
+隐藏目录：目录右键选择“设为隐藏目录”或“取消隐藏目录”；子目录继承父目录的隐藏设置。“显示 → 过滤隐藏目录内容”默认开启，全库、精选、回收站和搜索均由服务端排除隐藏照片。进入隐藏目录或其子目录后可查看，独立标记的隐藏后代仍需进入后查看。目录入口保留，菜单可关闭过滤。此功能不加密原片、不提供密码锁。

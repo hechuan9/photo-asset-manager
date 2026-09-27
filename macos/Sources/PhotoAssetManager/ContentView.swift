@@ -1,2371 +1,450 @@
 import SwiftUI
-
-private enum AppPalette {
-    static let sidebarBackground = Color(nsColor: NSColor(name: nil) { appearance in
-        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return isDark
-            ? NSColor(calibratedRed: 0.13, green: 0.15, blue: 0.16, alpha: 1)
-            : NSColor(calibratedRed: 0.95, green: 0.96, blue: 0.96, alpha: 1)
-    })
-
-    static let folderText = Color(nsColor: NSColor(name: nil) { appearance in
-        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return isDark
-            ? NSColor(calibratedWhite: 0.82, alpha: 1)
-            : NSColor(calibratedWhite: 0.24, alpha: 1)
-    })
-}
-
-private enum BackgroundTaskBarMetrics {
-    static let height: CGFloat = 34
-}
+import KeepsAPI
 
 struct ContentView: View {
     @EnvironmentObject private var library: LibraryStore
+    @State private var showsTasks = false
+    @FocusState private var galleryFocused: Bool
+
+    @State private var showsSidebar = true
+    @State private var showsInspector = false
+    @State private var showsFilters = false
+    @State private var showsSources = false
+    @State private var thumbnailSize = 190.0
+    @State private var detailMode = false
 
     var body: some View {
         VStack(spacing: 0) {
-            AppTopToolbar()
+            topBar
             Divider()
-            NavigationSplitView {
-                SidebarView()
-                    .navigationSplitViewColumnWidth(min: 220, ideal: 250)
-            } content: {
-                AssetBrowserView()
-                    .navigationSplitViewColumnWidth(min: 520, ideal: 760)
-            } detail: {
-                DetailView()
-                    .navigationSplitViewColumnWidth(min: 320, ideal: 420)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            BackgroundTaskBar()
-                .frame(height: BackgroundTaskBarMetrics.height)
-        }
-        .sheet(isPresented: Binding(
-            get: { library.isPhotoImportDialogPresented },
-            set: { library.isPhotoImportDialogPresented = $0 }
-        )) {
-            PhotoImportDialog(
-                close: {
-                    library.closePhotoImportDialog()
-                }
-            )
-        }
-        .sheet(isPresented: Binding(
-            get: { library.photoImportProgress != nil },
-            set: { _ in }
-        )) {
-            if let progress = library.photoImportProgress {
-                PhotoImportProgressDialog(progress: progress)
-                    .interactiveDismissDisabled(true)
-            }
-        }
-        .sheet(isPresented: Binding(
-            get: { library.blockingTask != nil },
-            set: { _ in }
-        )) {
-            if let task = library.blockingTask {
-                BlockingTaskProgressView(task: task)
-                    .interactiveDismissDisabled(true)
-            }
-        }
-        .alert("操作失败", isPresented: Binding(
-            get: { library.lastError != nil },
-            set: { if !$0 { library.lastError = nil } }
-        )) {
-            Button("关闭", role: .cancel) {}
-        } message: {
-            Text(library.lastError ?? "")
-        }
-    }
-}
-
-struct AppTopToolbar: View {
-    @EnvironmentObject private var library: LibraryStore
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Button {
-                library.beginPhotoImport()
-            } label: {
-                Label("导入照片", systemImage: "square.and.arrow.down")
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(library.isBusy)
-
-            Button {
-                library.chooseAndAddFolders(scanImmediately: false)
-            } label: {
-                Label("添加文件夹", systemImage: "plus")
-            }
-            .disabled(library.isBusy)
-
-            Button {
-                library.forceAvailabilityRefreshInBackground()
-            } label: {
-                Label("校验文件状态", systemImage: "checkmark.shield")
-            }
-            .disabled(library.isBusy)
-
-            PreviewStoragePopover()
-
-            Divider()
-                .frame(height: 18)
-
-            Button("归档到 NAS") {
-                library.archiveSelected()
-            }
-            .disabled(library.selectedAsset == nil || library.isBusy)
-
-            Button("同步变更") {
-                library.syncSelected()
-            }
-            .disabled(library.selectedAsset == nil || library.isBusy)
-
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity)
-        .background(.bar)
-    }
-}
-
-struct PhotoImportDialog: View {
-    @EnvironmentObject private var library: LibraryStore
-    var close: () -> Void
-
-    @State private var importSourceURL: URL?
-    @State private var rawSourceURL: URL?
-    @State private var targetPath = ""
-    @State private var targetRawPath = ""
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("导入照片")
-                .font(.headline)
-
-            PhotoImportFolderRow(
-                title: "导入文件夹",
-                path: importSourceURL?.path,
-                isDisabled: library.isBusy,
-                choose: {
-                    importSourceURL = library.chooseImportDirectory(message: "选择要导入的照片文件夹")
-                }
-            )
-
-            PhotoImportFolderRow(
-                title: "RAW 文件夹",
-                path: rawSourceURL?.path,
-                placeholder: "可选；导入时按文件名和元数据自动匹配",
-                isDisabled: library.isBusy,
-                choose: {
-                    rawSourceURL = library.chooseImportDirectory(message: "选择 RAW 文件所在文件夹")
-                }
-            )
-
-            PhotoImportFolderRow(
-                title: "目标文件夹",
-                path: targetPath.isEmpty ? nil : targetPath,
-                isDisabled: library.isBusy,
-                choose: {
-                    if let url = library.chooseImportDirectory(message: "选择导入目标文件夹") {
-                        targetPath = url.path
+            HStack(spacing: 0) {
+                HSplitView {
+                    if showsSidebar {
+                        sidebar.frame(minWidth: 200, idealWidth: 268, maxWidth: 480)
                     }
+                    workspace.frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
                 }
-            )
-
-            PhotoImportFolderRow(
-                title: "目标 RAW 文件夹",
-                path: targetRawPath.isEmpty ? nil : targetRawPath,
-                placeholder: "选择 RAW 文件夹后必填",
-                isDisabled: library.isBusy || rawSourceURL == nil,
-                choose: {
-                    if let url = library.chooseImportDirectory(message: "选择 RAW 导入目标文件夹") {
-                        targetRawPath = url.path
-                    }
+                if showsInspector {
+                    Divider()
+                    inspector.frame(width: 292)
                 }
-            )
-
-            HStack {
-                Spacer()
-                Button("取消", role: .cancel) {
-                    close()
-                }
-                Button("开始导入") {
-                    guard let configuration = currentConfiguration else { return }
-                    library.importPhotoFolder(configuration: configuration)
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(!canStartImport)
+                Divider()
+                inspectorRail
             }
         }
-        .frame(width: 620, height: 380, alignment: .leading)
-        .padding(18)
-        .onAppear {
-            restoreSavedPathsIfNeeded()
+        .ignoresSafeArea(.container, edges: .top)
+        .background(WorkspaceStyle.canvas)
+        .foregroundStyle(WorkspaceStyle.text)
+        .preferredColorScheme(.dark)
+        .tint(WorkspaceStyle.accent)
+        .sheet(isPresented: $showsTasks, onDismiss: { if showsSources { library.refreshNavigation() }; library.refresh() }) {
+            if let client = library.client { NASTasksView(client: client) }
         }
-        .onChange(of: rawSourceURL) { _, newValue in
-            if newValue == nil {
-                targetRawPath = ""
-            }
-        }
+        .task { library.refresh() }
+        .onChange(of: library.query) { _, _ in library.refresh() }
+        .onChange(of: library.query.directory) { _, _ in detailMode = false }
+        .onChange(of: showsSources) { _, visible in if visible { library.refreshNavigation() } }
     }
 
-    private var canStartImport: Bool {
-        guard !library.isBusy, importSourceURL != nil, !targetPath.isEmpty else { return false }
-        if rawSourceURL != nil && targetRawPath.isEmpty { return false }
-        return true
-    }
-
-    private func restoreSavedPathsIfNeeded() {
-        let preferences = library.photoImportPreferences
-        if importSourceURL == nil {
-            importSourceURL = library.restoredPhotoImportURL(for: preferences.importSourcePath)
-        }
-        if rawSourceURL == nil {
-            rawSourceURL = library.restoredPhotoImportURL(for: preferences.rawSourcePath)
-        }
-        if targetPath.isEmpty, let path = preferences.targetPath,
-           library.restoredPhotoImportURL(for: path) != nil {
-            targetPath = path
-        }
-        if targetRawPath.isEmpty {
-            if let path = preferences.targetRawPath,
-               library.restoredPhotoImportURL(for: path) != nil {
-                targetRawPath = path
-            } else if let defaultRawRoot = library.hasselbladRawRootURL?.path {
-                targetRawPath = defaultRawRoot
-            }
-        }
-    }
-
-    private var currentConfiguration: PhotoImportConfiguration? {
-        guard let importSourceURL, !targetPath.isEmpty else { return nil }
-        if rawSourceURL != nil && targetRawPath.isEmpty { return nil }
-        return PhotoImportConfiguration(
-            importSource: importSourceURL,
-            rawSource: rawSourceURL,
-            target: library.photoImportTarget(for: targetPath),
-            targetRawRoot: targetRawPath.isEmpty ? nil : URL(fileURLWithPath: targetRawPath, isDirectory: true)
-        )
-    }
-}
-
-struct PhotoImportFolderRow: View {
-    var title: String
-    var path: String?
-    var placeholder: String = "未选择"
-    var isDisabled: Bool
-    var choose: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            HStack(spacing: 8) {
-                Text(path ?? placeholder)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                    .foregroundStyle(path == nil ? .secondary : .primary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Button("选择...") {
-                    choose()
-                }
-                .disabled(isDisabled)
-            }
-        }
-    }
-}
-
-struct PhotoImportProgressDialog: View {
-    var progress: PhotoImportProgressReport
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("导入照片")
-                .font(.title3)
-                .fontWeight(.semibold)
-
-            if !progress.majorPhase.isEmpty {
-                Text(progress.majorPhase)
-                    .font(.headline)
-            }
-
-            if progress.totalItems > 0 {
-                ProgressView(value: Double(progress.completedItems), total: Double(progress.totalItems))
-                Text("\(progress.completedItems) / \(progress.totalItems)")
-                    .foregroundStyle(.secondary)
-            } else {
-                ProgressView()
-            }
-
-            Text(progress.phase)
-                .fontWeight(.medium)
-
-            if progress.photoCount > 0 {
-                Text("照片 \(progress.photoCount) 张，已匹配 RAW \(progress.matchedRawCount) 张")
-                if progress.unmatchedPhotoCount > 0 {
-                    Text("未匹配 RAW \(progress.unmatchedPhotoCount) 张")
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            if !progress.message.isEmpty {
-                Text(progress.message)
-                    .foregroundStyle(.secondary)
-            }
-
-            if !progress.currentPath.isEmpty {
-                Text(progress.currentPath)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(3)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-            }
-
-            Text("导入进行中，请保持应用打开。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(width: 480)
-        .padding(24)
-    }
-}
-
-struct BackgroundTaskBar: View {
-    @EnvironmentObject private var library: LibraryStore
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Divider()
+    private var topBar: some View {
+        HStack(spacing: 20) {
+            railButton("显示或隐藏目录", icon: "sidebar.left", selected: showsSidebar) { showsSidebar.toggle() }
+            Text("Keeps").font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary)
+            Spacer(minLength: 12)
             HStack(spacing: 10) {
-                if let task = library.visibleBackgroundTaskReport {
-                    if task.isFinished {
-                        Image(systemName: "checkmark.circle")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Text(task.displayTicket)
-                        .lineLimit(1)
-                    if task.totalItems > 0 {
-                        ProgressView(value: Double(task.completedItems), total: Double(task.totalItems))
-                            .frame(width: 160)
-                        Text("\(task.completedItems) / \(task.totalItems)")
-                            .foregroundStyle(.secondary)
-                    }
-                    if !task.message.isEmpty {
-                        Text(task.message)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    if !task.currentPath.isEmpty {
-                        Text(task.currentPath)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    if !library.queuedBackgroundQueueItems.isEmpty {
-                        Text("后续 \(library.queuedBackgroundQueueItems.count) 项")
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    Image(systemName: "checkmark.circle")
-                        .foregroundStyle(.secondary)
-                    Text("就绪")
-                        .foregroundStyle(.secondary)
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("搜索文件名、相机或标签", text: $library.query.q)
+                    .textFieldStyle(.plain)
+                if !library.query.q.isEmpty {
+                    Button { library.query.q = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain).help("清除搜索")
                 }
-                Spacer()
             }
-            .font(.caption)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity)
-            .background(.bar)
+            .font(.system(size: 13)).padding(.horizontal, 12).frame(height: 32)
+            .background(WorkspaceStyle.field, in: RoundedRectangle(cornerRadius: 4))
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.08)))
+            .frame(maxWidth: 620)
+            Button { showsFilters.toggle() } label: { Image(systemName: "line.3.horizontal.decrease").frame(width: 28, height: 28) }
+                .buttonStyle(.plain).help("显示或隐藏筛选")
+            Button { library.refresh(); if showsSources { library.refreshNavigation() } } label: {
+                Image(systemName: "arrow.clockwise").frame(width: 28, height: 28)
+            }.buttonStyle(.plain).help("刷新资料库").disabled(library.client == nil)
+            SettingsLink { Image(systemName: "gearshape").frame(width: 28, height: 28) }
+                .buttonStyle(.plain).help("设置")
         }
+        .padding(.leading, 84).padding(.trailing, 16).frame(height: 44).background(WorkspaceStyle.panel)
     }
-}
 
-struct BlockingTaskProgressView: View {
-    var task: BlockingTaskReport
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(task.title)
-                .font(.title3)
-                .fontWeight(.semibold)
-
-            if task.totalItems > 0 {
-                ProgressView(value: Double(task.completedItems), total: Double(task.totalItems))
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("资料库").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                .padding(.horizontal, 16).padding(.bottom, 8)
+            scopeButton("全部照片", count: library.counts?.all, trashed: false, picked: false)
+            scopeButton("精选", count: library.counts?.picked, trashed: false, picked: true)
+            scopeButton("回收站", count: library.counts?.trashed, trashed: true, picked: false)
+            Divider().padding(.vertical, 20).padding(.horizontal, 16)
+            Button { showsSources.toggle() } label: {
                 HStack {
-                    Text("\(task.completedItems) / \(task.totalItems)")
+                    Image(systemName: showsSources ? "chevron.down" : "chevron.right").font(.system(size: 10))
+                    Text("服务器来源").font(.system(size: 12, weight: .semibold))
                     Spacer()
-                    Text(percentText)
+                    if library.isLoadingNavigation { ProgressView().controlSize(.mini) }
+                }.padding(.horizontal, 16).frame(height: 34)
+            }.buttonStyle(.plain).help("浏览服务器上的来源目录，无需挂载")
+            if showsSources {
+                DirectoryOutlineView(library: library).padding(.horizontal, 6)
+                if let error = library.navigationError {
+                    WorkspaceErrorView(title: "来源暂时不可用", details: error).padding(12)
+                    Button("重试来源") { library.refreshNavigation() }.padding(.horizontal, 12)
                 }
-                .foregroundStyle(.secondary)
-            } else {
-                ProgressView()
-                Text("正在准备...")
-                    .foregroundStyle(.secondary)
-            }
+            } else { Spacer() }
+            Divider()
+            Button { showsTasks = true } label: {
+                Label("管理来源与任务", systemImage: "server.rack")
+                    .font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading).padding(16)
+            }.buttonStyle(.plain).disabled(library.client == nil)
+        }.padding(.top, 12).background(WorkspaceStyle.panel)
+    }
 
-            if !task.displayTicket.isEmpty {
-                Text(task.displayTicket)
-                    .fontWeight(.medium)
-            }
-
-            if !task.phase.isEmpty {
-                Text(task.phase)
-                    .foregroundStyle(.secondary)
-            }
-
-            if !task.currentPath.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("当前文件")
-                        .foregroundStyle(.secondary)
-                    Text(task.currentPath)
-                        .lineLimit(3)
-                        .textSelection(.enabled)
+    private var workspace: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Text(library.locationTitle).font(.system(size: 18, weight: .semibold)).lineLimit(1).help(library.locationTitle)
+                Spacer(minLength: 8)
+                if library.configuration != nil, library.lastError == nil, !library.isLoading {
+                    Text("\(library.total) 张照片").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
+            }.padding(.horizontal, 16).frame(height: 52)
+            if showsFilters { filters; Divider() }
+            galleryContent.frame(maxWidth: .infinity, maxHeight: .infinity)
+            if let error = library.lastError, !library.assets.isEmpty {
+                WorkspaceErrorView(title: "请求失败", details: error)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(10)
             }
-
-            if !task.message.isEmpty {
-                Text(task.message)
-                    .foregroundStyle(.secondary)
-            }
-
-            Text("任务进行中，请保持应用打开。其它操作会等这个任务结束后再继续。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            bottomBar
         }
-        .frame(width: 460)
-        .padding(24)
     }
 
-    private var percentText: String {
-        guard task.totalItems > 0 else { return "0%" }
-        let percent = Int((Double(task.completedItems) / Double(task.totalItems) * 100).rounded())
-        return "\(percent)%"
+    @ViewBuilder private var galleryContent: some View {
+        if library.configuration == nil {
+            ContentUnavailableView {
+                Label("连接 Keeps Server", systemImage: "server.rack")
+            } description: { Text("在应用设置中连接 Keeps Server，浏览和整理照片。") }
+            actions: { SettingsLink { Text("打开设置") } }
+        } else if let error = library.lastError, library.assets.isEmpty {
+            ContentUnavailableView {
+                Label("无法加载资料库", systemImage: "network.slash")
+            } description: { WorkspaceErrorView(title: "请检查服务器连接后重试。", details: error) }
+            actions: { Button("重试") { library.refresh() } }
+        } else if library.assets.isEmpty && library.isLoading {
+            ProgressView("正在读取目录内容…").frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if library.assets.isEmpty {
+            ContentUnavailableView("没有符合条件的照片", systemImage: "photo.on.rectangle", description: Text("可调整筛选条件，或在“管理来源与任务”中添加服务器目录并扫描。"))
+        } else {
+            gallery
+        }
     }
-}
 
-struct SidebarView: View {
-    @EnvironmentObject private var library: LibraryStore
-    @State private var expandedFolderNodeIDs: Set<String> = []
-    @State private var pendingMoveSource: FolderMoveSource?
-    @State private var pendingFolderRemovalSource: FolderMoveSource?
-    @State private var pendingAssetFileMoveRequest: AssetFileMoveRequest?
-
-    var body: some View {
-        List(selection: Binding(
-            get: { library.filter.status },
-            set: { library.setStatusFilter($0) }
-        )) {
-            Button {
-                library.setStatusFilter(nil)
-                library.clearBrowseSelection()
-            } label: {
-                Label("全部资产", systemImage: "photo.on.rectangle")
-            }
-            .buttonStyle(.plain)
-
-            Section {
-                if library.sourceDirectories.isEmpty {
-                    Text("还没有文件夹")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(SourceDirectoryTreeBuilder.build(
-                        library.sourceDirectories,
-                        indexedBrowseFolders: library.indexedBrowseFolders,
-                        expandedNodeIDs: expandedFolderNodeIDs
-                    )) { node in
-                        SourceDirectoryNodeRow(
-                            node: node,
-                            interruptedScanPath: library.interruptedScanPath,
-                            isExpanded: expandedFolderNodeIDs.contains(node.id),
-                            isSelected: library.filter.browseSelection?.path == node.path || library.pendingBrowseSelection?.path == node.path,
-                            toggleExpansion: {
-                                if expandedFolderNodeIDs.contains(node.id) {
-                                    expandedFolderNodeIDs.remove(node.id)
-                                } else {
-                                    expandedFolderNodeIDs.insert(node.id)
+    private var gallery: some View {
+        Group {
+            if detailMode, let asset = library.selectedAsset {
+                RemotePreview(asset: asset).padding(24)
+            } else {
+                GeometryReader { geometry in
+                    let rows = JustifiedAssetGridLayout.rows(
+                        aspectRatios: library.assets.map { JustifiedAssetGridLayout.aspectRatio($0.preview) },
+                        availableWidth: max(1, geometry.size.width - 2),
+                        targetHeight: thumbnailSize * 0.78
+                    )
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 1) {
+                            ForEach(rows, id: \.indices.lowerBound) { row in
+                                HStack(spacing: 1) {
+                                    ForEach(row.indices, id: \.self) { index in
+                                        let asset = library.assets[index]
+                                        galleryTile(asset, height: row.height)
+                                    }
                                 }
-                            },
-                            select: {
-                                library.selectFolder(path: node.path)
-                            },
-                            openMoveDialog: { source in
-                                pendingMoveSource = source
-                            },
-                            openRemovalDialog: { source in
-                                pendingFolderRemovalSource = source
-                            },
-                            openAssetMoveConfirmation: { request in
-                                pendingAssetFileMoveRequest = request
                             }
-                        )
+                            if library.nextCursor != nil {
+                                ProgressView()
+                                    .opacity(library.isLoading ? 1 : 0)
+                                    .frame(maxWidth: .infinity)
+                                    .padding()
+                                    .onAppear { library.setPaginationVisible(true) }
+                                    .onDisappear { library.setPaginationVisible(false) }
+                            }
+                        }.padding(1)
                     }
-                }
-            } header: {
-                HStack {
-                    Text("文件夹")
-                    Spacer()
-                    SyncStatusPopover()
-                    Button {
-                        library.scanTrackedSources()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(library.isBusy || library.sourceDirectories.isEmpty)
-                    .help("刷新所有文件夹")
-                    Button {
-                        library.chooseAndAddFolders(scanImmediately: false)
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(library.isBusy)
-                    .help("添加文件夹")
-                }
-            }
-
-            if library.isScanning {
-                Section("扫描中") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if library.scanReport.totalFiles > 0 {
-                            ProgressView(value: Double(library.scanReport.scannedFiles), total: Double(library.scanReport.totalFiles))
-                        } else {
-                            ProgressView()
-                        }
-                        if !library.scanReport.phase.isEmpty {
-                            Text(library.scanReport.phase)
-                                .fontWeight(.medium)
-                        }
-                        if !library.scanReport.currentPath.isEmpty {
-                            Text(library.scanReport.currentPath)
-                                .lineLimit(2)
-                                .foregroundStyle(.secondary)
-                        }
-                        Text("已发现 \(library.scanReport.discoveredFiles) 个候选文件")
-                        if library.scanReport.totalFiles > 0 {
-                            Text("已扫描 \(library.scanReport.scannedFiles) / \(library.scanReport.totalFiles)")
-                        } else {
-                            Text("已扫描 \(library.scanReport.scannedFiles) 个文件")
-                        }
-                        Text("新增 \(library.scanReport.importedAssets)，位置更新 \(library.scanReport.newLocations)")
-                            .foregroundStyle(.secondary)
-                        if library.scanReport.skippedExistingFiles > 0 {
-                            Text("已跳过 \(library.scanReport.skippedExistingFiles) 个已入库文件")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .font(.callout)
-                    .padding(.vertical, 4)
                 }
             }
         }
-        .scrollContentBackground(.hidden)
-        .background(AppPalette.sidebarBackground)
-        .sheet(item: $pendingMoveSource) { source in
-            FolderMoveTargetDialog(
-                source: source,
-                close: {
-                    pendingMoveSource = nil
-                }
-            )
-        }
-        .sheet(item: $pendingFolderRemovalSource) { source in
-            FolderRemovalConfirmationDialog(
-                source: source,
-                close: {
-                    pendingFolderRemovalSource = nil
-                }
-            )
-        }
-        .sheet(item: $pendingAssetFileMoveRequest) { request in
-            AssetFileMoveConfirmationDialog(
-                request: request,
-                close: {
-                    pendingAssetFileMoveRequest = nil
-                }
-            )
-        }
+        .focusable().focused($galleryFocused)
+        .onKeyPress(.leftArrow) { library.selectAdjacent(-1); return .handled }
+        .onKeyPress(.rightArrow) { library.selectAdjacent(1); return .handled }
     }
-}
 
-struct PreviewStoragePopover: View {
-    @EnvironmentObject private var library: LibraryStore
-    @State private var isPresented = false
-
-    var body: some View {
+    private func galleryTile(_ asset: KeepsAsset, height: CGFloat) -> some View {
         Button {
-            isPresented.toggle()
+            galleryFocused = true
+            library.select(asset.id, extending: NSEvent.modifierFlags.contains(.command))
         } label: {
-            Label("预览维护", systemImage: "rectangle.stack")
-        }
-        .buttonStyle(.bordered)
-        .disabled(library.isBusy)
-        .help("预览图维护")
-        .popover(isPresented: $isPresented) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("预览图存储")
-                    .font(.headline)
-
-                Text(library.derivativeStorageURL?.path ?? "未设置，不生成新预览图")
-                    .lineLimit(3)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-
-                if let migrationReport = library.migrationReport {
-                    Text(migrationReport)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                if let rebuildReport = library.previewRebuildReport {
-                    Text(rebuildReport)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                HStack {
-                    Button("迁移到...") {
-                        library.chooseDerivativeMigrationLocation()
-                        isPresented = false
-                    }
-                    .disabled(library.isBusy)
-
-                    if library.derivativeStorageURL != nil {
-                        Button("清除") {
-                            library.clearDerivativeStorageLocation()
-                            isPresented = false
-                        }
-                        .disabled(library.isBusy)
+            RemotePreview(asset: asset)
+                .frame(width: height * JustifiedAssetGridLayout.aspectRatio(asset.preview), height: height)
+                .background(WorkspaceStyle.tile)
+                .overlay(alignment: .bottomLeading) {
+                    if asset.rating > 0 || asset.flagState != "unflagged" {
+                        HStack(spacing: 5) {
+                            if asset.flagState == "picked" { Image(systemName: "flag.fill") }
+                            if asset.flagState == "rejected" { Image(systemName: "xmark") }
+                            if asset.rating > 0 { Text(String(repeating: "★", count: max(0, min(asset.rating, 5)))) }
+                        }.font(.system(size: 10)).padding(5).background(.black.opacity(0.65)).padding(6)
                     }
                 }
-
-                if library.derivativeStorageURL != nil {
-                    Button("重建全部预览 (1200px，一次性)") {
-                        library.rebuildAllPreviews()
-                        isPresented = false
-                    }
-                    .disabled(library.isBusy)
-                    .help("为库中所有可访问原片强制重建 1200px 预览图。会更新本地 DB、清理旧衍生图记录、清理 NAS 端旧对象，并排队上传新版本。大量照片需较长时间，进度条会显示。完成后建议重启应用。")
+                .overlay {
+                    Rectangle().strokeBorder(library.selectedIDs.contains(asset.id) ? WorkspaceStyle.accent : .clear, lineWidth: 2)
                 }
-            }
-            .frame(width: 320, alignment: .leading)
-            .padding(14)
-        }
-    }
-}
-
-struct SyncStatusPopover: View {
-    @EnvironmentObject private var library: LibraryStore
-    @AppStorage(SyncPreferenceKey.baseURL) private var baseURL = ""
-    @AppStorage(SyncPreferenceKey.authMode) private var authModeRawValue = SyncAuthenticationMode.bearer.rawValue
-    @AppStorage(SyncPreferenceKey.accessCredential) private var accessCredential = ""
-    @State private var isPresented = false
-
-    private var authMode: SyncAuthenticationMode {
-        get { SyncAuthenticationMode(rawValue: authModeRawValue) ?? .bearer }
-        nonmutating set { authModeRawValue = newValue.rawValue }
+                .contentShape(Rectangle())
+        }.buttonStyle(.plain).help(asset.originalFilename)
+            .accessibilityLabel(asset.originalFilename)
+            .accessibilityAddTraits(library.selectedIDs.contains(asset.id) ? [.isSelected] : [])
     }
 
-    var body: some View {
-        Button {
-            isPresented.toggle()
-        } label: {
-            Image(systemName: library.hasRemoteSyncConfiguration ? "icloud" : "icloud.slash")
-        }
-        .buttonStyle(.plain)
-        .help("自动同步")
-        .popover(isPresented: $isPresented) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("自动同步")
-                    .font(.headline)
-
-                Text(library.lastSyncSummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                if let currentItem = library.runningBackgroundQueueItem {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("当前任务")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        BackgroundQueueCard(item: currentItem, label: "执行中")
+    private var bottomBar: some View {
+        HStack(spacing: 16) {
+            railButton("网格视图", icon: "square.grid.2x2", selected: !detailMode) { detailMode = false }
+            railButton("单张视图", icon: "rectangle", selected: detailMode) {
+                if library.selectedAsset == nil, let first = library.assets.first { library.select(first.id, extending: false) }
+                detailMode = true
+            }.disabled(library.assets.isEmpty)
+            Divider().frame(height: 16)
+            if !library.selectedIDs.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(1...5, id: \.self) { rating in
+                        Button { library.updateSelected(KeepsAssetPatch(rating: library.selectedAsset?.rating == rating ? 0 : rating)) } label: {
+                            Image(systemName: "star.fill").foregroundStyle(rating <= (library.selectedAsset?.rating ?? 0) ? WorkspaceStyle.text : Color(white: 0.4))
+                        }.buttonStyle(.plain).help("\(rating) 星")
                     }
-                }
-
-                if !library.queuedBackgroundQueueItems.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("后续队列")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        ForEach(Array(library.queuedBackgroundQueueItems.enumerated()), id: \.element.id) { index, item in
-                            BackgroundQueueCard(item: item, label: "等待中", order: index + 1)
-                        }
-                    }
-                }
-
-                TextField("https://control-plane.example.com", text: $baseURL)
-                    .textFieldStyle(.roundedBorder)
-                Picker("认证方式", selection: Binding(
-                    get: { authMode },
-                    set: { authMode = $0 }
-                )) {
-                    ForEach(SyncAuthenticationMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-
-                SecureField("Bearer token（可留空）", text: $accessCredential)
-                    .textFieldStyle(.roundedBorder)
-
-                Text("macOS 会自动把 ledger 和预览图上传到 NAS control plane；不会把原图发给 iOS。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack {
-                    Button("保存") {
-                        library.reloadSyncConfiguration()
-                    }
-
-                    Button("补齐 ledger") {
-                        library.backfillSyncLedger()
-                    }
-                    .disabled(library.isBusy)
-
-                    Button("立即同步") {
-                        library.reloadSyncConfiguration(scheduleSync: false)
-                        library.forceAutomaticSync()
-                    }
-                    .disabled(!library.hasRemoteSyncConfiguration || library.isSyncing)
-                }
+                    Divider().frame(height: 18)
+                    Button { library.updateSelected(KeepsAssetPatch(flagState: library.selectedAsset?.flagState == "picked" ? "unflagged" : "picked")) } label: {
+                        Image(systemName: "flag.fill").foregroundStyle(library.selectedAsset?.flagState == "picked" ? WorkspaceStyle.text : Color(white: 0.4))
+                    }.buttonStyle(.plain).help("留用")
+                }.disabled(library.isMutating)
             }
-            .frame(width: 340, alignment: .leading)
-            .padding(14)
-        }
-    }
-}
-
-struct BackgroundQueueCard: View {
-    var item: BackgroundQueueItem
-    var label: String
-    var order: Int? = nil
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(queueLabel)
-                    .font(.caption2)
-                    .foregroundStyle(order == nil ? .primary : .secondary)
-                Spacer()
-                Text(item.report.title)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-
-            Text(item.report.displayTicket)
-                .font(.caption)
-
-            if item.report.totalItems > 0 {
-                ProgressView(
-                    value: Double(item.report.completedItems),
-                    total: Double(item.report.totalItems)
-                )
-                HStack {
-                    Text(item.report.phase)
-                    Spacer()
-                    Text("\(item.report.completedItems) / \(item.report.totalItems)")
+            Group {
+                if library.isLoading && library.assets.isEmpty { Text("正在读取…") }
+                else if library.configuration != nil && library.lastError == nil {
+                    Text(library.selectedIDs.isEmpty ? "\(library.assets.count) / \(library.total) 张" : "已选 \(library.selectedIDs.count) 张").foregroundStyle(.secondary)
                 }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            } else {
-                if item.state == .running {
-                    ProgressView()
-                }
-                Text(item.report.phase)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-
-            if !item.report.message.isEmpty {
-                Text(item.report.message)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(8)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(.quaternary.opacity(order == nil ? 0.9 : 0.45))
-        )
-    }
-
-    private var queueLabel: String {
-        guard let order else { return label }
-        return "\(label) \(order)"
-    }
-}
-
-struct SourceDirectoryRow: View {
-    @EnvironmentObject private var library: LibraryStore
-    var source: SourceDirectory?
-    var path: String
-    var displayName: String
-    var isTopLevel: Bool = false
-    var interruptedScanPath: String?
-    var showsMenu = true
-    var openRemovalDialog: ((FolderMoveSource) -> Void)?
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Text(displayName)
-                .lineLimit(1)
-                .foregroundStyle(AppPalette.folderText)
-            if isTopLevel {
-                Spacer()
-                Text(path)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .padding(.leading, 4)
-                    .help(path)
             }
             Spacer(minLength: 4)
-            if showsMenu, let source {
-                Menu {
-                    Button("刷新") {
-                        library.scanSource(source)
-                    }
-                    if isInterruptedScanSource {
-                        Button("继续扫描") {
-                            library.resumeInterruptedScan()
-                        }
-                    }
-                    Divider()
-                    Button("移除", role: .destructive) {
-                        openRemovalDialog?(FolderMoveSource(source: source))
-                    }
-                    .disabled(openRemovalDialog == nil)
-                } label: {
-                    Image(systemName: "ellipsis")
-                }
-                .menuStyle(.borderlessButton)
-                .disabled(library.isBusy)
-                .help("文件夹操作")
+            if library.isLoading || library.isMutating { ProgressView().controlSize(.small) }
+            if !detailMode && !showsInspector {
+                Image(systemName: "square.grid.3x3").foregroundStyle(.secondary)
+                Slider(value: $thumbnailSize, in: 130...300).frame(width: 100).help("缩略图大小")
+                    .accessibilityLabel("缩略图大小")
             }
-        }
-        .font(.callout)
-        .padding(.vertical, 1)
+        }.font(.system(size: 11)).padding(.horizontal, 20).frame(height: 46).background(WorkspaceStyle.panel)
     }
 
-    private var isInterruptedScanSource: Bool {
-        guard let interruptedScanPath else { return false }
-        return interruptedScanPath == path || interruptedScanPath.hasPrefix(path + "/")
-    }
-}
-
-struct SourceDirectoryNodeRow: View {
-    @EnvironmentObject private var library: LibraryStore
-    @State private var isHovering = false
-    var node: SourceDirectoryNode
-    var interruptedScanPath: String?
-    var isExpanded: Bool
-    var isSelected: Bool
-    var toggleExpansion: () -> Void
-    var select: () -> Void
-    var openMoveDialog: (FolderMoveSource) -> Void
-    var openRemovalDialog: (FolderMoveSource) -> Void
-    var openAssetMoveConfirmation: (AssetFileMoveRequest) -> Void
-
-    private var moveSource: FolderMoveSource {
-        node.source.map(FolderMoveSource.init(source:)) ?? FolderMoveSource(path: node.path)
+    private var inspector: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("信息").font(.system(size: 16, weight: .semibold)).padding(20)
+            Divider()
+            if let asset = library.selectedAsset { AssetDetailView(asset: asset) }
+            else {
+                VStack(spacing: 12) {
+                    Image(systemName: "info.circle").font(.system(size: 28)).foregroundStyle(.secondary)
+                    Text("选择照片以查看信息").font(.system(size: 12)).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }.background(WorkspaceStyle.panel)
     }
 
-    var body: some View {
-        HStack(alignment: .center, spacing: 4) {
+    private var inspectorRail: some View {
+        VStack {
+            railButton("照片信息", icon: "info.circle", selected: showsInspector) { showsInspector.toggle() }
             Spacer()
-                .frame(width: CGFloat(node.depth) * 10)
-            if node.hasChildren {
-                Button {
-                    toggleExpansion()
-                } label: {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 12, height: 20)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .disabled(library.pendingBrowseSelection != nil)
-            } else {
-                Spacer()
-                    .frame(width: 12)
-            }
-
-            Button(action: select) {
-                SourceDirectoryRow(
-                    source: node.source,
-                    path: node.path,
-                    displayName: node.displayName,
-                    isTopLevel: node.depth == 0,
-                    interruptedScanPath: interruptedScanPath,
-                    showsMenu: false
-                )
-            }
-            .buttonStyle(FolderRowButtonStyle(isSelected: isSelected, isHovering: isHovering))
-            .disabled(library.pendingBrowseSelection != nil)
-            .onHover { hovering in
-                isHovering = hovering
-            }
-        }
-        .contextMenu {
-            FolderActionMenuItems(
-                source: node.source,
-                moveSource: moveSource,
-                interruptedScanPath: interruptedScanPath,
-                nodePath: node.path,
-                openMoveDialog: openMoveDialog,
-                openRemovalDialog: openRemovalDialog
-            )
-        }
-        .dropDestination(for: String.self) { items, _ in
-            guard !library.isBusy,
-                  let assetIDs = items.lazy.compactMap(AssetDragPayload.assetIDs).first,
-                  !assetIDs.isEmpty else {
-                return false
-            }
-            openAssetMoveConfirmation(AssetFileMoveRequest(
-                assetIDs: assetIDs,
-                target: FolderMoveTarget(path: node.path, displayName: node.displayName)
-            ))
-            return true
-        } isTargeted: { targeted in
-            isHovering = targeted
-        }
+        }.padding(.top, 18).frame(width: 48).background(WorkspaceStyle.panel)
     }
-}
 
-struct AssetFileMoveConfirmationDialog: View {
-    @EnvironmentObject private var library: LibraryStore
-    var request: AssetFileMoveRequest
-    var close: () -> Void
+    private func railButton(_ title: String, icon: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 17, weight: .regular))
+                .foregroundStyle(selected ? WorkspaceStyle.accent : WorkspaceStyle.text)
+                .frame(width: 30, height: 30)
+        }.buttonStyle(.plain).help(title).accessibilityLabel(title)
+    }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("移动选中文件？")
-                .font(.headline)
-            Text("将移动 \(request.assetIDs.count) 个选中资产的在线原片、sidecar 和导出文件。移动会先复制并校验 hash，通过后才删除源文件。")
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(request.target.path)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-
+    private var filters: some View {
+        VStack(spacing: 8) {
             HStack {
-                Spacer()
-                Button("取消", role: .cancel) {
-                    close()
+                Picker("评分", selection: $library.query.minRating) {
+                    Text("全部评分").tag(0)
+                    ForEach(1...5, id: \.self) { Text("至少 \($0) 星").tag($0) }
                 }
-                Button("确认移动") {
-                    library.moveAssets(request.assetIDs, to: request.target)
-                    close()
+                Picker("颜色", selection: Binding(get: { library.query.colorLabel ?? "" }, set: { library.query.colorLabel = $0.isEmpty ? nil : $0 })) {
+                    Text("全部颜色").tag("")
+                    ForEach(Array(zip(["red", "yellow", "green", "blue", "purple"], ["红", "黄", "绿", "蓝", "紫"])), id: \.0) { Text($0.1).tag($0.0) }
                 }
-                .keyboardShortcut(.defaultAction)
-                .disabled(library.isBusy)
-            }
-        }
-        .frame(width: 440, alignment: .leading)
-        .padding(18)
-    }
-}
-
-struct AssetDeletionConfirmationDialog: View {
-    @EnvironmentObject private var library: LibraryStore
-    var request: AssetDeletionRequest
-    var close: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("删除选中照片？")
-                .font(.headline)
-            Text("将把 \(request.assetIDs.count) 个选中资产移入共享回收站，并从默认视图隐藏。磁盘上的照片文件会保持原样，不会被删除、移动或覆盖。")
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(minHeight: 72, alignment: .leading)
-
+                Picker("排序", selection: $library.query.sort) {
+                    Text("拍摄时间倒序").tag("capture_desc")
+                    Text("拍摄时间正序").tag("capture_asc")
+                    Text("文件名").tag("filename")
+                    Text("评分倒序").tag("rating_desc")
+                }
+            }.labelsHidden()
             HStack {
-                Spacer()
-                Button("取消", role: .cancel) {
-                    close()
+                TextField("按标签筛选", text: Binding(get: { library.query.tag ?? "" }, set: { library.query.tag = $0.isEmpty ? nil : $0 })).textFieldStyle(.roundedBorder)
+                if library.query.directory != nil {
+                    Toggle("含子目录", isOn: $library.query.recursive).toggleStyle(.checkbox)
                 }
-                Button("确认删除", role: .destructive) {
-                    library.deleteAssets(request.assetIDs)
-                    close()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(library.isBusy)
             }
-        }
-        .frame(width: 520, height: 190, alignment: .leading)
-        .padding(18)
+        }.padding(12)
+    }
+
+    private func scopeButton(_ title: String, count: Int?, trashed: Bool, picked: Bool) -> some View {
+        Button {
+            library.showLibrary(trashed: trashed, picked: picked)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: trashed ? "trash" : (picked ? "flag" : "photo.on.rectangle"))
+                    .frame(width: 18).foregroundStyle(.secondary)
+                Text(title)
+                Spacer()
+                if let count { Text(String(count)).font(.system(size: 11)).foregroundStyle(.secondary) }
+            }
+            .font(.system(size: 13)).padding(.horizontal, 12).frame(height: 36)
+            .background(library.query.directory == nil && library.query.trashed == trashed && (library.query.flagState == "picked") == picked ? WorkspaceStyle.selection : .clear, in: RoundedRectangle(cornerRadius: 4))
+        }.buttonStyle(.plain).padding(.horizontal, 8)
     }
 }
 
-struct FolderRemovalConfirmationDialog: View {
+struct RemotePreview: View {
+    var asset: KeepsAsset
     @EnvironmentObject private var library: LibraryStore
-    var source: FolderMoveSource
-    var close: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("移除文件夹？")
-                .font(.headline)
-            Text("仅移除会把这个文件夹从资料库列表中移除，不检查也不改动磁盘文件。彻底删除会先扫描文件夹；只要发现任何文件，就阻止删除。")
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(source.path)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-
-            HStack {
-                Spacer()
-                Button("取消", role: .cancel) {
-                    close()
-                }
-                Button("仅移除") {
-                    library.removeFolder(source, deleteEmptyFolder: false)
-                    close()
-                }
-                .disabled(library.isBusy || source.sourceDirectoryID == nil)
-                Button("彻底删除", role: .destructive) {
-                    library.removeFolder(source, deleteEmptyFolder: true)
-                    close()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(library.isBusy)
-            }
-        }
-        .frame(width: 460, alignment: .leading)
-        .padding(18)
-    }
-}
-
-private enum AssetDragPayload {
-    private static let prefix = "keeps.assets"
-
-    static func string(assetIDs: [UUID]) -> String {
-        ([prefix] + assetIDs.map(\.uuidString)).joined(separator: "\n")
-    }
-
-    static func assetIDs(from payload: String) -> [UUID]? {
-        let lines = payload.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-        guard lines.first == prefix else { return nil }
-        let ids = lines.dropFirst().compactMap(UUID.init(uuidString:))
-        return ids.isEmpty ? nil : ids
-    }
-}
-
-struct FolderActionMenuItems: View {
-    @EnvironmentObject private var library: LibraryStore
-    var source: SourceDirectory?
-    var moveSource: FolderMoveSource
-    var interruptedScanPath: String?
-    var nodePath: String
-    var openMoveDialog: (FolderMoveSource) -> Void
-    var openRemovalDialog: (FolderMoveSource) -> Void
-
-    var body: some View {
-        if let source {
-            Button("刷新") {
-                library.scanSource(source)
-            }
-            if isInterruptedScanSource {
-                Button("继续扫描") {
-                    library.resumeInterruptedScan()
-                }
-            }
-            Divider()
-        }
-
-        Button("移动到...") {
-            openMoveDialog(moveSource)
-        }
-
-        Divider()
-        Button("移除", role: .destructive) {
-            openRemovalDialog(moveSource)
-        }
-    }
-
-    private var isInterruptedScanSource: Bool {
-        guard let interruptedScanPath else { return false }
-        return interruptedScanPath == nodePath || interruptedScanPath.hasPrefix(nodePath + "/")
-    }
-}
-
-struct FolderMoveTargetDialog: View {
-    @EnvironmentObject private var library: LibraryStore
-    var source: FolderMoveSource
-    var close: () -> Void
-    @State private var currentPath: String?
-    @State private var createdTargets: [FolderMoveTarget] = []
-    @State private var pendingCreateFolderParentPath: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("移动文件夹")
-                .font(.headline)
-            Text(source.path)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-
-            Divider()
-
-            HStack(spacing: 8) {
-                Button("上一级") {
-                    currentPath = parentPath(of: currentPath ?? "")
-                }
-                .disabled(currentPath == nil)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("当前位置")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(currentPath ?? "目标根目录")
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-
-                Spacer()
-
-                Button("添加文件夹") {
-                    pendingCreateFolderParentPath = currentPath
-                }
-                .disabled(currentPath == nil || library.isBusy)
-            }
-
-            if let currentTarget {
-                Button("移动到这里") {
-                    library.moveFolder(source, to: currentTarget)
-                    close()
-                }
-                .disabled(library.isBusy)
-            }
-
-            if childTargets.isEmpty {
-                Text("没有下一级可选目标。")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 120, alignment: .center)
-            } else {
-                List(childTargets) { target in
-                    HStack(spacing: 10) {
-                        Image(systemName: "folder")
-                            .foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(displayName(for: target.path))
-                                .lineLimit(1)
-                            Text(target.path)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                        Spacer()
-                        Button("移动到这里") {
-                            library.moveFolder(source, to: target)
-                            close()
-                        }
-                        .disabled(library.isBusy)
-                        Button("进入") {
-                            currentPath = target.path
-                        }
-                        .disabled(immediateChildren(of: target.path).isEmpty)
-                    }
-                }
-                .frame(minHeight: 240)
-            }
-
-            HStack {
-                Spacer()
-                Button("取消", role: .cancel) {
-                    close()
-                }
-            }
-        }
-        .frame(width: 560, height: 420, alignment: .leading)
-        .padding(18)
-        .sheet(isPresented: Binding(
-            get: { pendingCreateFolderParentPath != nil },
-            set: { if !$0 { pendingCreateFolderParentPath = nil } }
-        )) {
-            if let parentPath = pendingCreateFolderParentPath {
-                FolderCreateDialog(
-                    parentPath: parentPath,
-                    create: { name in
-                        try createFolder(parentPath: parentPath, name: name)
-                    },
-                    cancel: {
-                        pendingCreateFolderParentPath = nil
-                    }
-                )
-            }
-        }
-    }
-
-    private var targets: [FolderMoveTarget] {
-        var targetsByPath: [String: FolderMoveTarget] = [:]
-        for target in library.availableFolderMoveTargets(for: source) + createdTargets {
-            let path = normalizedPath(target.path)
-            targetsByPath[path] = FolderMoveTarget(path: path, displayName: target.displayName)
-        }
-        return targetsByPath.values.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-    }
-
-    private var currentTarget: FolderMoveTarget? {
-        guard let currentPath else { return nil }
-        return targets.first { normalizedPath($0.path) == normalizedPath(currentPath) }
-    }
-
-    private var childTargets: [FolderMoveTarget] {
-        immediateChildren(of: currentPath)
-    }
-
-    private func immediateChildren(of parent: String?) -> [FolderMoveTarget] {
-        let targetPaths = Set(targets.map { normalizedPath($0.path) })
-        return targets.filter { target in
-            let path = normalizedPath(target.path)
-            guard path != normalizedPath(source.path) else { return false }
-            let targetParent = parentPath(of: path)
-            if let parent {
-                return targetParent == normalizedPath(parent)
-            }
-            guard let targetParent else { return true }
-            return !targetPaths.contains(targetParent)
-        }
-        .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-    }
-
-    private func parentPath(of path: String) -> String? {
-        let normalized = normalizedPath(path)
-        guard !normalized.isEmpty, normalized != "/" else { return nil }
-        let parent = URL(fileURLWithPath: normalized, isDirectory: true).deletingLastPathComponent().path
-        return normalizedPath(parent)
-    }
-
-    private func displayName(for path: String) -> String {
-        let normalized = normalizedPath(path)
-        return normalized == "/" ? "/" : URL(fileURLWithPath: normalized, isDirectory: true).lastPathComponent
-    }
-
-    private func normalizedPath(_ path: String) -> String {
-        guard path.count > 1 else { return path }
-        return path.hasSuffix("/") ? String(path.dropLast()) : path
-    }
-
-    private func createFolder(parentPath: String, name: String) throws {
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else { throw FolderCreateError.emptyName }
-        guard !trimmedName.contains("/") else { throw FolderCreateError.nameContainsSeparator }
-
-        let parentURL = URL(fileURLWithPath: normalizedPath(parentPath), isDirectory: true)
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: parentURL.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            throw FolderCreateError.parentUnavailable(parentURL.path)
-        }
-        guard FileManager.default.isWritableFile(atPath: parentURL.path) else {
-            throw FileOperationError.cannotWrite(parentURL)
-        }
-
-        let destinationURL = parentURL.appendingPathComponent(trimmedName, isDirectory: true)
-        if FileManager.default.fileExists(atPath: destinationURL.path) {
-            throw FileOperationError.destinationExists(destinationURL)
-        }
-
-        try FileManager.default.createDirectory(at: destinationURL, withIntermediateDirectories: false)
-        let created = FolderMoveTarget(path: normalizedPath(destinationURL.path), displayName: trimmedName)
-        createdTargets.removeAll { normalizedPath($0.path) == created.path }
-        createdTargets.append(created)
-        currentPath = created.path
-        pendingCreateFolderParentPath = nil
-    }
-}
-
-struct FolderCreateDialog: View {
-    var parentPath: String
-    var create: (String) throws -> Void
-    var cancel: () -> Void
-    @State private var folderName = ""
-    @State private var errorMessage: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("创建文件夹")
-                .font(.headline)
-            Text(parentPath)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-
-            TextField("文件夹名称", text: $folderName)
-                .textFieldStyle(.roundedBorder)
-
-            if let errorMessage {
-                Text(errorMessage)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
-            }
-
-            HStack {
-                Spacer()
-                Button("取消", role: .cancel) {
-                    cancel()
-                }
-                Button("创建") {
-                    do {
-                        try create(folderName)
-                    } catch {
-                        errorMessage = error.fullTrace
-                    }
-                }
-                .keyboardShortcut(.defaultAction)
-            }
-        }
-        .frame(width: 420, alignment: .leading)
-        .padding(18)
-    }
-}
-
-private enum FolderCreateError: LocalizedError {
-    case emptyName
-    case nameContainsSeparator
-    case parentUnavailable(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .emptyName:
-            "文件夹名称不能为空"
-        case .nameContainsSeparator:
-            "文件夹名称不能包含路径分隔符"
-        case .parentUnavailable(let path):
-            "当前目录不可用：\(path)"
-        }
-    }
-}
-
-struct FolderRowButtonStyle: ButtonStyle {
-    var isSelected: Bool
-    var isHovering: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(backgroundColor(isPressed: configuration.isPressed))
-            .overlay {
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(borderColor(isPressed: configuration.isPressed), lineWidth: isSelected || configuration.isPressed ? 1 : 0)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .scaleEffect(configuration.isPressed ? 0.985 : 1.0)
-            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
-    }
-
-    private func backgroundColor(isPressed: Bool) -> Color {
-        if isPressed {
-            return Color.accentColor.opacity(0.24)
-        }
-        if isSelected {
-            return Color.accentColor.opacity(0.16)
-        }
-        if isHovering {
-            return Color.primary.opacity(0.07)
-        }
-        return Color.clear
-    }
-
-    private func borderColor(isPressed: Bool) -> Color {
-        if isPressed || isSelected {
-            return Color.accentColor.opacity(0.55)
-        }
-        return Color.clear
-    }
-}
-
-struct JustifiedAssetRow: Identifiable {
-    let id: UUID
-    let assets: [Asset]
-    let height: CGFloat
-    let aspectRatios: [UUID: CGFloat]
-    let spacing: CGFloat
-
-    func width(for asset: Asset) -> CGFloat {
-        height * (aspectRatios[asset.id] ?? JustifiedAssetGridLayout.defaultAspectRatio)
-    }
-}
-
-enum JustifiedAssetGridLayout {
-    static let defaultAspectRatio: CGFloat = 1.5
-
-    static func rows(
-        assets: [Asset],
-        aspectRatios: [UUID: CGFloat],
-        availableWidth: CGFloat,
-        targetHeight: CGFloat = 168,
-        spacing: CGFloat = 1
-    ) -> [JustifiedAssetRow] {
-        let availableWidth = max(1, availableWidth)
-        var rows: [JustifiedAssetRow] = []
-        var pendingAssets: [Asset] = []
-        var aspectRatioSum: CGFloat = 0
-
-        func appendPendingRow() {
-            guard !pendingAssets.isEmpty, aspectRatioSum > 0 else { return }
-            let spacingWidth = spacing * CGFloat(max(0, pendingAssets.count - 1))
-            let availableImageWidth = max(1, availableWidth - spacingWidth)
-            let rowHeight = availableImageWidth / aspectRatioSum
-            rows.append(JustifiedAssetRow(
-                id: pendingAssets[0].id,
-                assets: pendingAssets,
-                height: rowHeight,
-                aspectRatios: aspectRatios,
-                spacing: spacing
-            ))
-            pendingAssets.removeAll(keepingCapacity: true)
-            aspectRatioSum = 0
-        }
-
-        for asset in assets {
-            let ratio = max(0.2, aspectRatios[asset.id] ?? defaultAspectRatio)
-            pendingAssets.append(asset)
-            aspectRatioSum += ratio
-
-            let spacingWidth = spacing * CGFloat(max(0, pendingAssets.count - 1))
-            let rowWidthAtTargetHeight = aspectRatioSum * targetHeight + spacingWidth
-            if rowWidthAtTargetHeight >= availableWidth {
-                appendPendingRow()
-            }
-        }
-
-        appendPendingRow()
-        return rows
-    }
-}
-
-struct JustifiedAssetGrid: View {
-    var assets: [Asset]
-    var selectedAssetID: UUID?
-    var selectedAssetIDs: Set<UUID>
-    var aspectRatios: [UUID: CGFloat]
-    var availableWidth: CGFloat
-    var select: (Asset, EventModifiers) -> Void
-    var openLoupe: (Asset) -> Void
-    var openAssetDeletionConfirmation: (AssetDeletionRequest) -> Void
-    var loadMore: (UUID) -> Void
-    var updateAspectRatio: (UUID, CGFloat) -> Void
-
-    private let spacing: CGFloat = 1
-    private let targetHeight: CGFloat = 168
-
-    var body: some View {
-        let rows = JustifiedAssetGridLayout.rows(
-            assets: assets,
-            aspectRatios: aspectRatios,
-            availableWidth: max(1, availableWidth - spacing * 2),
-            targetHeight: targetHeight,
-            spacing: spacing
-        )
-
-        LazyVStack(spacing: spacing) {
-            ForEach(rows) { row in
-                HStack(spacing: spacing) {
-                    ForEach(row.assets) { asset in
-                        AssetTile(asset: asset, selected: selectedAssetIDs.contains(asset.id) || asset.id == selectedAssetID) { ratio in
-                            updateAspectRatio(asset.id, ratio)
-                        }
-                        .frame(width: row.width(for: asset), height: row.height)
-                        .overlay {
-                            AssetMouseEventCatcher(
-                                singleClick: {
-                                    let modifiers = ModifierAwareClickView.currentModifiers()
-                                    select(asset, modifiers)
-                                },
-                                doubleClick: {
-                                    openLoupe(asset)
-                                },
-                                deletionAction: {
-                                    openAssetDeletionConfirmation(AssetDeletionRequest(assetIDs: deletionAssetIDs(for: asset)))
-                                },
-                                dragPayload: assetDragPayload(for: asset)
-                            )
-                        }
-                        .onAppear {
-                            loadMore(asset.id)
-                        }
-                        .contextMenu {
-                            Button("删除照片", role: .destructive) {
-                                openAssetDeletionConfirmation(AssetDeletionRequest(assetIDs: deletionAssetIDs(for: asset)))
-                            }
-                        }
-                    }
-                }
-                .frame(width: max(1, availableWidth - spacing * 2), height: row.height, alignment: .leading)
-            }
-        }
-        .padding(spacing)
-    }
-
-    private func assetDragPayload(for asset: Asset) -> String {
-        let draggedIDs = selectedAssetIDs.contains(asset.id) ? Array(selectedAssetIDs) : [asset.id]
-        return AssetDragPayload.string(assetIDs: draggedIDs.sorted { $0.uuidString < $1.uuidString })
-    }
-
-    private func deletionAssetIDs(for asset: Asset) -> [UUID] {
-        let ids = selectedAssetIDs.contains(asset.id) ? Array(selectedAssetIDs) : [asset.id]
-        return ids.sorted { $0.uuidString < $1.uuidString }
-    }
-}
-
-struct AssetMouseEventCatcher: NSViewRepresentable {
-    var singleClick: () -> Void
-    var doubleClick: () -> Void
-    var deletionAction: () -> Void
-    var dragPayload: String
-
-    func makeNSView(context: Context) -> AssetMouseEventView {
-        let view = AssetMouseEventView()
-        view.singleClick = singleClick
-        view.doubleClick = doubleClick
-        view.deletionAction = deletionAction
-        view.dragPayload = dragPayload
-        return view
-    }
-
-    func updateNSView(_ nsView: AssetMouseEventView, context: Context) {
-        nsView.singleClick = singleClick
-        nsView.doubleClick = doubleClick
-        nsView.deletionAction = deletionAction
-        nsView.dragPayload = dragPayload
-    }
-}
-
-final class AssetMouseEventView: NSView, NSDraggingSource {
-    var singleClick: () -> Void = {}
-    var doubleClick: () -> Void = {}
-    var deletionAction: () -> Void = {}
-    var dragPayload = ""
-    private var mouseDownEvent: NSEvent?
-    private var didStartDrag = false
-
-    override func mouseDown(with event: NSEvent) {
-        mouseDownEvent = event
-        didStartDrag = false
-        if event.clickCount >= 2 {
-            doubleClick()
-        }
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        if event.clickCount == 1, !didStartDrag {
-            singleClick()
-        }
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard !didStartDrag, let mouseDownEvent else { return }
-        didStartDrag = true
-
-        let pasteboardItem = NSPasteboardItem()
-        pasteboardItem.setString(dragPayload, forType: .string)
-
-        let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
-        draggingItem.setDraggingFrame(bounds, contents: dragImage())
-        beginDraggingSession(with: [draggingItem], event: mouseDownEvent, source: self)
-    }
-
-    override func rightMouseDown(with event: NSEvent) {
-        let menu = NSMenu()
-        let deleteItem = NSMenuItem(title: "删除照片", action: #selector(deleteFromContextMenu), keyEquivalent: "")
-        deleteItem.target = self
-        menu.addItem(deleteItem)
-        NSMenu.popUpContextMenu(menu, with: event, for: self)
-    }
-
-    @objc private func deleteFromContextMenu() {
-        deletionAction()
-    }
-
-    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
-        .move
-    }
-
-    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
-        true
-    }
-
-    private func dragImage() -> NSImage {
-        let imageSize = NSSize(width: max(bounds.width, 1), height: max(bounds.height, 1))
-        let image = NSImage(size: imageSize)
-        image.lockFocus()
-        NSColor.black.withAlphaComponent(0.3).setFill()
-        NSBezierPath(rect: NSRect(origin: .zero, size: image.size)).fill()
-        image.unlockFocus()
-        return image
-    }
-}
-
-private enum ModifierAwareClickView {
-    @MainActor
-    static func currentModifiers() -> EventModifiers {
-        var modifiers: EventModifiers = []
-        let flags = NSApp.currentEvent?.modifierFlags ?? []
-        if flags.contains(.command) {
-            modifiers.insert(.command)
-        }
-        if flags.contains(.shift) {
-            modifiers.insert(.shift)
-        }
-        return modifiers
-    }
-}
-
-struct AssetBrowserView: View {
-    @EnvironmentObject private var library: LibraryStore
-    @State private var aspectRatios: [UUID: CGFloat] = [:]
-    @State private var loupeAssetID: UUID?
-    @State private var pendingAssetDeletionRequest: AssetDeletionRequest?
-
+    @State private var refreshedURL: URL?
+    @State private var refreshError: String?
     var body: some View {
         Group {
-            if let loupeAssetID, let loupeAsset = library.assets.first(where: { $0.id == loupeAssetID }) {
-                LightroomLoupeView(
-                    asset: loupeAsset,
-                    assets: library.assets,
-                    select: { asset in
-                        library.selectAsset(asset, modifiers: [])
-                        self.loupeAssetID = asset.id
-                    },
-                    close: {
-                        self.loupeAssetID = nil
+            if let url = refreshedURL ?? asset.preview?.downloadURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .empty: ProgressView()
+                    case .success(let image): image.resizable().scaledToFit()
+                    case .failure:
+                        VStack {
+                            Image(systemName: "photo.badge.exclamationmark")
+                            Button("重新载入预览") { Task {
+                                do { refreshedURL = try await library.refreshPreview(id: asset.id); refreshError = nil }
+                                catch { refreshError = LibraryStore.describe(error) }
+                            } }.font(.caption)
+                            if let refreshError { Text(refreshError).font(.caption).foregroundStyle(.red) }
+                        }
+                    @unknown default: EmptyView()
                     }
-                )
+                }
             } else {
-                VStack(spacing: 0) {
-                    FilterBar()
-                    Divider()
-                    if library.assets.isEmpty {
-                        EmptyLibraryView()
-                    } else {
-                        GeometryReader { proxy in
-                            ScrollView {
-                                JustifiedAssetGrid(
-                                    assets: library.assets,
-                                    selectedAssetID: library.selectedAssetID,
-                                    selectedAssetIDs: library.selectedAssetIDs,
-                                    aspectRatios: aspectRatios,
-                                    availableWidth: proxy.size.width,
-                                    select: { asset, modifiers in
-                                        library.selectAsset(asset, modifiers: modifiers)
-                                    },
-                                    openLoupe: { asset in
-                                        library.selectAsset(asset, modifiers: [])
-                                        loupeAssetID = asset.id
-                                    },
-                                    openAssetDeletionConfirmation: { request in
-                                        pendingAssetDeletionRequest = request
-                                    },
-                                    loadMore: { assetID in
-                                        library.loadMoreAssetsIfNeeded(currentAssetID: assetID)
-                                    },
-                                    updateAspectRatio: { assetID, ratio in
-                                        aspectRatios[assetID] = ratio
-                                    }
-                                )
-                            }
-                        }
-                        .background(Color.black)
-                    }
-                }
+                VStack { Image(systemName: "photo"); Text("预览尚未生成").font(.caption) }.foregroundStyle(.secondary)
             }
-        }
-        .sheet(item: $pendingAssetDeletionRequest) { request in
-            AssetDeletionConfirmationDialog(
-                request: request,
-                close: {
-                    pendingAssetDeletionRequest = nil
-                }
-            )
-        }
-    }
-}
-
-struct LightroomLoupeView: View {
-    var asset: Asset
-    var assets: [Asset]
-    var select: (Asset) -> Void
-    var close: () -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Button("返回图库") {
-                    close()
-                }
-                .keyboardShortcut(.escape, modifiers: [])
-                .buttonStyle(.bordered)
-
-                Spacer()
-
-                Text(asset.originalFilename)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-
-            ZStack {
-                Color.black
-                AssetPreviewImage(asset: asset, contentMode: .fit, placeholderSize: 72)
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 16)
-            }
-
-            LoupeFilmstripView(
-                assets: assets,
-                selectedAssetID: asset.id,
-                select: select
-            )
-        }
-        .background(Color.black)
-    }
-}
-
-private enum LoupeFilmstripMetrics {
-    static let thumbnailWidth: CGFloat = 104
-    static let thumbnailHeight: CGFloat = 78
-    static let verticalPadding: CGFloat = 6
-    static let height = thumbnailHeight + verticalPadding * 2
-}
-
-struct LoupeFilmstripView: View {
-    var assets: [Asset]
-    var selectedAssetID: UUID
-    var select: (Asset) -> Void
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 2) {
-                ForEach(assets) { filmstripAsset in
-                    Button {
-                        select(filmstripAsset)
-                    } label: {
-                        ZStack {
-                            Color.black
-                            AssetPreviewImage(asset: filmstripAsset, contentMode: .fit, placeholderSize: 18)
-                        }
-                        .frame(
-                            width: LoupeFilmstripMetrics.thumbnailWidth,
-                            height: LoupeFilmstripMetrics.thumbnailHeight
-                        )
-                        .clipped()
-                        .overlay {
-                            Rectangle()
-                                .stroke(
-                                    filmstripAsset.id == selectedAssetID ? Color.white : Color.clear,
-                                    lineWidth: 2
-                                )
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 2)
-            .padding(.vertical, LoupeFilmstripMetrics.verticalPadding)
-        }
-        .frame(height: LoupeFilmstripMetrics.height)
-        .layoutPriority(1)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.35))
-    }
-}
-
-struct FilterBar: View {
-    @EnvironmentObject private var library: LibraryStore
-    @State private var isFileSearchOpen = false
-    @FocusState private var isFileSearchFocused: Bool
-
-    var body: some View {
-        HStack(spacing: 0) {
-            LightroomRatingFilterGroup(
-                minimumRating: library.filter.minimumRating,
-                setMinimumRating: library.setMinimumRatingFilter
-            )
-            LightroomFilterDivider()
-            LightroomFlagFilterGroup(
-                flaggedOnly: library.filter.flaggedOnly,
-                setFlaggedOnly: library.setFlaggedOnlyFilter
-            )
-            LightroomFilterDivider()
-            LightroomColorLabelFilterGroup(
-                selectedLabels: library.filter.colorLabels,
-                toggleColorLabel: library.toggleColorLabelFilter
-            )
-            LightroomFilterDivider()
-
-            Spacer(minLength: 12)
-
-            Picker("整理顺序", selection: Binding(
-                get: { library.filter.sortOrder },
-                set: { library.setSortOrder($0) }
-            )) {
-                ForEach(LibrarySortOrder.allCases) { sortOrder in
-                    Text(sortOrder.label).tag(sortOrder)
-                }
-            }
-            .pickerStyle(.menu)
-            .frame(width: 150)
-
-            if isFileSearchOpen {
-                TextField("文件搜索", text: $library.filter.searchText)
-                    .textFieldStyle(.plain)
-                    .focused($isFileSearchFocused)
-                    .onAppear {
-                        isFileSearchFocused = true
-                    }
-                    .onSubmit {
-                        library.refresh()
-                    }
-                    .onExitCommand {
-                        isFileSearchFocused = false
-                        isFileSearchOpen = false
-                    }
-                    .padding(.horizontal, 8)
-                    .frame(width: 220, height: 28)
-                    .background(Color.black.opacity(0.22))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                    )
-            } else {
-                Button("文件搜索") {
-                    isFileSearchOpen = true
-                    isFileSearchFocused = true
-                }
-                .buttonStyle(.borderless)
-                .frame(width: 90, height: 28)
-            }
-
-            Button("应用") {
-                library.refresh()
-            }
-            .buttonStyle(.borderless)
-
-            Button("重置") {
-                library.filter = LibraryFilter()
-                isFileSearchFocused = false
-                isFileSearchOpen = false
-                library.refresh()
-            }
-            .buttonStyle(.borderless)
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 44)
-        .background(Color(nsColor: NSColor(calibratedWhite: 0.12, alpha: 1)))
-    }
-}
-
-struct LightroomRatingFilterGroup: View {
-    var minimumRating: Int
-    var setMinimumRating: (Int) -> Void
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Button {
-                setMinimumRating(0)
-            } label: {
-                Image(systemName: "greaterthan.circle.fill")
-                    .foregroundStyle(minimumRating == 0 ? Color.white : Color.secondary)
-            }
-            .buttonStyle(.plain)
-
-            ForEach(1...5, id: \.self) { rating in
-                Button {
-                    setMinimumRating(rating)
-                } label: {
-                    Image(systemName: "star.fill")
-                        .foregroundStyle(rating <= minimumRating ? Color.white : Color.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .frame(width: 142)
-    }
-}
-
-struct LightroomFlagFilterGroup: View {
-    var flaggedOnly: Bool
-    var setFlaggedOnly: (Bool) -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Button {
-                setFlaggedOnly(!flaggedOnly)
-            } label: {
-                Image(systemName: flaggedOnly ? "flag.fill" : "flag")
-                    .foregroundStyle(flaggedOnly ? Color.white : Color.secondary)
-            }
-            .buttonStyle(.plain)
-
-            Image(systemName: "flag")
-                .foregroundStyle(Color.secondary.opacity(0.45))
-            Image(systemName: "flag.slash")
-                .foregroundStyle(Color.secondary.opacity(0.45))
-        }
-        .frame(width: 116)
-    }
-}
-
-struct LightroomColorLabelFilterGroup: View {
-    var selectedLabels: Set<AssetColorLabel>
-    var toggleColorLabel: (AssetColorLabel) -> Void
-
-    var body: some View {
-        HStack(spacing: 7) {
-            ForEach(AssetColorLabel.allCases) { label in
-                Button {
-                    toggleColorLabel(label)
-                } label: {
-                    Circle()
-                        .fill(color(for: label))
-                        .frame(width: 16, height: 16)
-                        .overlay(
-                            Circle()
-                                .stroke(selectedLabels.contains(label) ? Color.white : Color.clear, lineWidth: 2)
-                        )
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(label.label)
-            }
-        }
-        .frame(width: 128)
-    }
-
-    private func color(for label: AssetColorLabel) -> Color {
-        switch label {
-        case .red: Color(red: 0.65, green: 0.22, blue: 0.19)
-        case .yellow: Color(red: 0.66, green: 0.65, blue: 0.22)
-        case .green: Color(red: 0.33, green: 0.55, blue: 0.31)
-        case .blue: Color(red: 0.25, green: 0.42, blue: 0.63)
-        case .purple: Color(red: 0.46, green: 0.29, blue: 0.61)
-        }
-    }
-}
-
-struct LightroomFilterDivider: View {
-    var body: some View {
-        Rectangle()
-            .fill(Color.white.opacity(0.08))
-            .frame(width: 1, height: 44)
-            .padding(.horizontal, 10)
-    }
-}
-
-struct EmptyLibraryView: View {
-    var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "photo.stack")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
-            Text("还没有资产")
-                .font(.title3)
-            Text("先添加文件夹，再用刷新扫描清单。原片不会被移动，索引会记录每个文件位置。")
-                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onChange(of: asset.id) { _, _ in refreshedURL = nil; refreshError = nil }
+        .onChange(of: asset.preview?.version) { _, _ in refreshedURL = nil; refreshError = nil }
     }
 }
 
-struct AssetTile: View {
-    var asset: Asset
-    var selected: Bool
-    var onAspectRatioChange: (CGFloat) -> Void = { _ in }
-
-    var body: some View {
-        ZStack {
-            Rectangle()
-                .fill(Color.black)
-            AssetPreviewImage(
-                asset: asset,
-                contentMode: .fit,
-                placeholderSize: 34,
-                onAspectRatioChange: onAspectRatioChange
-            )
-            .saturation(asset.flagState == .rejected ? 0.0 : 1.0)
-            .brightness(asset.flagState == .rejected ? -0.18 : 0.0)
-            if asset.flagState == .rejected {
-                RejectedAssetOverlay()
-            }
-            AssetFlagBadge(flagState: asset.flagState)
-        }
-        .clipped()
-        .clipShape(RoundedRectangle(cornerRadius: 0))
-        .border(Color(nsColor: .selectedContentBackgroundColor), width: selected ? 3 : 0)
-        .contentShape(Rectangle())
-        .accessibilityLabel(asset.originalFilename)
-    }
-}
-
-struct RejectedAssetOverlay: View {
-    var body: some View {
-        Rectangle()
-            .fill(Color.gray.opacity(0.42))
-    }
-}
-
-struct AssetFlagBadge: View {
-    var flagState: AssetFlagState
-
-    var body: some View {
-        VStack {
-            HStack {
-                Spacer()
-                if flagState != .unflagged {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Color.white)
-                        .frame(width: 20, height: 20)
-                        .background(badgeColor)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                        .padding(5)
-                }
-            }
-            Spacer()
-        }
-    }
-
-    private var systemImage: String {
-        switch flagState {
-        case .unflagged: ""
-        case .picked: "flag.fill"
-        case .rejected: "xmark"
-        }
-    }
-
-    private var badgeColor: Color {
-        switch flagState {
-        case .unflagged: Color.clear
-        case .picked: Color(red: 0.12, green: 0.58, blue: 0.32)
-        case .rejected: Color(red: 0.42, green: 0.42, blue: 0.42)
-        }
-    }
-}
-
-struct AssetPreviewImage: View {
-    var asset: Asset
-    var contentMode: ContentMode
-    var placeholderSize: CGFloat
-    var onAspectRatioChange: (CGFloat) -> Void = { _ in }
-    @StateObject private var loader = ImagePreviewLoader()
-
-    var body: some View {
-        Group {
-            if let image = loader.image {
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: contentMode)
-                    .onAppear {
-                        reportAspectRatio(image.size)
-                    }
-            } else {
-                Image(systemName: "photo")
-                    .font(.system(size: placeholderSize))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .task(id: cacheKey) {
-            await loader.load(previewPath: asset.previewPath, primaryPath: asset.primaryPath, cacheKey: cacheKey)
-        }
-    }
-
-    private var cacheKey: String {
-        asset.previewPath ?? asset.primaryPath ?? asset.id.uuidString
-    }
-
-    private func reportAspectRatio(_ size: NSSize) {
-        guard size.width > 0, size.height > 0 else { return }
-        onAspectRatioChange(size.width / size.height)
-    }
-}
-
-@MainActor
-final class ImagePreviewCache {
-    static let shared = ImagePreviewCache()
-
-    private let cache = NSCache<NSString, NSImage>()
-
-    private init() {
-        cache.countLimit = 600
-    }
-
-    func image(forKey key: String) -> NSImage? {
-        cache.object(forKey: key as NSString)
-    }
-
-    func insert(_ image: NSImage, forKey key: String) {
-        cache.setObject(image, forKey: key as NSString)
-    }
-}
-
-@MainActor
-final class ImagePreviewLoader: ObservableObject {
-    @Published var image: NSImage?
-    private var loadedCacheKey: String?
-    private var decodeTask: Task<NSImage?, Never>?
-
-    deinit {
-        decodeTask?.cancel()
-    }
-
-    func load(previewPath: String?, primaryPath: String?, cacheKey: String) async {
-        guard loadedCacheKey != cacheKey else { return }
-        decodeTask?.cancel()
-        loadedCacheKey = cacheKey
-
-        if let cached = ImagePreviewCache.shared.image(forKey: cacheKey) {
-            image = cached
-            return
-        }
-
-        image = nil
-        let task = Task.detached(priority: .utility) { () -> NSImage? in
-            PerformanceLog.measure("image-preview-decode") {
-                guard !Task.isCancelled else { return nil }
-                if let previewPath, let image = NSImage(contentsOfFile: previewPath) {
-                    return image
-                }
-                guard !Task.isCancelled else { return nil }
-                if let primaryPath {
-                    return ImageRenderer.renderableImage(url: URL(fileURLWithPath: primaryPath))
-                }
-                return nil
-            }
-        }
-        decodeTask = task
-        defer {
-            if Task.isCancelled {
-                task.cancel()
-            }
-        }
-        let loaded = await task.value
-
-        guard !Task.isCancelled, loadedCacheKey == cacheKey else { return }
-        if let loaded {
-            ImagePreviewCache.shared.insert(loaded, forKey: cacheKey)
-        }
-        image = loaded
-    }
-}
-
-struct DetailView: View {
+struct AssetDetailView: View {
     @EnvironmentObject private var library: LibraryStore
-    @State private var draftTags = ""
-
+    var asset: KeepsAsset
+    @State private var tags = ""
     var body: some View {
-        Group {
-            if let asset = library.selectedAsset {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        PreviewHeader(asset: asset)
-                        AssetMetadataEditor(asset: asset, draftTags: $draftTags)
-                        FileInstancesView(fileInstances: library.selectedFiles)
-                    }
-                    .padding(16)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                RemotePreview(asset: asset).frame(height: 164).background(WorkspaceStyle.canvas)
+                Text(asset.originalFilename).font(.headline).textSelection(.enabled)
+                if library.selectedIDs.count > 1 { Text("编辑将应用于所选 \(library.selectedIDs.count) 张照片").font(.caption).foregroundStyle(.secondary) }
+                Text([asset.cameraMake, asset.cameraModel, asset.lensModel].filter { !$0.isEmpty }.joined(separator: " · "))
+                    .font(.caption).textSelection(.enabled)
+                if let captureTime = asset.captureTime { Text(captureTime).font(.caption).foregroundStyle(.secondary) }
+                Picker("评分", selection: Binding(get: { asset.rating }, set: { library.updateSelected(KeepsAssetPatch(rating: $0)) })) {
+                    ForEach(0...5, id: \.self) { Text($0 == 0 ? "未评分" : "\($0) 星").tag($0) }
                 }
-                .onAppear {
-                    draftTags = asset.tags.joined(separator: ", ")
+                Picker("标记", selection: Binding(get: { asset.flagState }, set: { library.updateSelected(KeepsAssetPatch(flagState: $0)) })) {
+                    Text("未标记").tag("unflagged"); Text("留用").tag("picked"); Text("排除").tag("rejected")
                 }
-                .onChange(of: asset.id) {
-                    draftTags = asset.tags.joined(separator: ", ")
+                Picker("颜色", selection: Binding(get: { asset.colorLabel ?? "" }, set: { library.updateSelected(KeepsAssetPatch(colorLabel: $0.isEmpty ? nil : $0, clearColorLabel: $0.isEmpty)) })) {
+                    Text("无").tag("")
+                    ForEach(Array(zip(["red", "yellow", "green", "blue", "purple"], ["红", "黄", "绿", "蓝", "紫"])), id: \.0) { Text($0.1).tag($0.0) }
                 }
-            } else {
-                Text("选择一个资产查看详情")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-    }
-}
-
-struct PreviewHeader: View {
-    var asset: Asset
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(asset.originalFilename)
-                .font(.title3)
-                .fontWeight(.semibold)
-            Text(asset.primaryPath ?? "当前没有可访问原片路径")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-        }
-    }
-}
-
-struct AssetMetadataEditor: View {
-    @EnvironmentObject private var library: LibraryStore
-    var asset: Asset
-    @Binding var draftTags: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("元数据")
-                .font(.headline)
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
-                GridRow {
-                    Text("状态")
-                    Text(asset.status.label)
-                }
-                GridRow {
-                    Text("拍摄时间")
-                    Text(asset.captureTime.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "未知")
-                }
-                GridRow {
-                    Text("相机")
-                    Text([asset.cameraMake, asset.cameraModel].filter { !$0.isEmpty }.joined(separator: " "))
-                }
-                GridRow {
-                    Text("镜头")
-                    Text(asset.lensModel.isEmpty ? "未知" : asset.lensModel)
-                }
-                GridRow {
-                    Text("文件数")
-                    Text("\(asset.fileCount)")
-                }
-            }
-            .font(.callout)
-
-            HStack {
-                Text("评分")
-                Picker("", selection: Binding(
-                    get: { asset.rating },
-                    set: { value in library.setSelectedAssetRating(value) }
-                )) {
-                    ForEach(0...5, id: \.self) { value in
-                        Text(value == 0 ? "未评分" : "\(value) 星").tag(value)
-                    }
-                }
-                .labelsHidden()
-            }
-
-            HStack {
-                Text("标记")
-                Picker("", selection: Binding(
-                    get: { asset.flagState },
-                    set: { value in library.setSelectedAssetFlagState(value) }
-                )) {
-                    ForEach(AssetFlagState.allCases) { flagState in
-                        Text(flagState.label).tag(flagState)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 120)
-            }
-
-            HStack {
-                Text("颜色")
-                Picker("", selection: Binding(
-                    get: { asset.colorLabel },
-                    set: { value in library.setSelectedAssetColorLabel(value) }
-                )) {
-                    Text("无").tag(Optional<AssetColorLabel>.none)
-                    ForEach(AssetColorLabel.allCases) { label in
-                        Text(label.label).tag(Optional(label))
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 120)
-            }
-
-            HStack {
-                TextField("标签，用逗号分隔", text: $draftTags)
-                    .textFieldStyle(.roundedBorder)
+                TextField("标签，以逗号分隔", text: $tags).textFieldStyle(.roundedBorder)
                 Button("保存标签") {
-                    library.setSelectedAssetTags(
-                        draftTags
-                            .split(separator: ",")
-                            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    )
+                    library.updateSelected(KeepsAssetPatch(tags: tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }))
                 }
-            }
+                Divider()
+                if asset.trashed { Button("从回收站恢复") { library.restoreSelected() } }
+                else { Button("移入回收站") { library.trashSelected() } }
+                Text("回收站只改变资产状态，磁盘原片始终保留。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.padding(18).disabled(library.isMutating)
         }
+        .font(.system(size: 12))
+        .task(id: asset.id) { tags = asset.tags.joined(separator: ", ") }
+        .onChange(of: asset.tags) { _, value in tags = value.joined(separator: ", ") }
     }
 }
 
-struct FileInstancesView: View {
+struct ServerSettingsView: View {
     @EnvironmentObject private var library: LibraryStore
-    var fileInstances: [FileInstance]
+    @State private var baseURL = ""
+    @State private var libraryID = "local-library"
+    @State private var credential = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("文件位置")
-                .font(.headline)
-            ForEach(Array(fileInstances.enumerated()), id: \.offset) { _, file in
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(file.fileRole.label)
-                            .fontWeight(.medium)
-                        Text(file.storageKind.label)
-                            .foregroundStyle(.secondary)
-                        Text(file.syncStatus.label)
-                            .foregroundStyle(file.syncStatus == .synced ? Color.secondary : Color.orange)
-                        Spacer()
-                        Button("打开") {
-                            library.open(file: file)
-                        }
-                        .disabled(file.availability != .online)
-                        Button("定位") {
-                            library.reveal(file: file)
-                        }
-                        .disabled(file.availability != .online)
-                    }
-                    Text(file.path)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                    Text("hash \(file.contentHash.isEmpty ? "未记录" : String(file.contentHash.prefix(16))) · \(file.availability.rawValue)")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-                .padding(10)
-                .background(Color(nsColor: .controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+        VStack(alignment: .leading, spacing: 18) {
+            Label("Keeps Server", systemImage: "server.rack").font(.title2)
+            Text("连接运行在 NAS 上的 Keeps Server。照片索引、整理和后台任务由该服务管理。")
+                .font(.callout).foregroundStyle(.secondary)
+            Form {
+                TextField("NAS Server 地址", text: $baseURL, prompt: Text("http://192.168.0.50:2283"))
+                    .accessibilityIdentifier("server-base-url")
+                TextField("资料库", text: $libraryID)
+                    .accessibilityIdentifier("server-library-id")
+                SecureField("服务访问令牌", text: $credential)
+                    .accessibilityIdentifier("server-access-credential")
             }
+            .textFieldStyle(.roundedBorder)
+            .disabled(library.isCheckingConnection)
+            Text("使用 Keeps 服务的 HTTP 或 HTTPS 地址。访问令牌保存在系统 Keychain 中。")
+                .font(.caption).foregroundStyle(.secondary)
+            if let message = library.connectionMessage {
+                Label(message, systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                    .font(.callout).accessibilityIdentifier("server-connection-success")
+            }
+            if let error = library.connectionError {
+                Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                    .accessibilityIdentifier("server-connection-error")
+            }
+            HStack {
+                if library.isCheckingConnection { ProgressView().controlSize(.small); Text("正在验证服务连接…").font(.caption) }
+                Spacer()
+                Button("测试连接") { check(save: false) }
+                Button("验证并保存") { check(save: true) }.keyboardShortcut(.defaultAction)
+            }.disabled(library.isCheckingConnection || baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || libraryID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
+        .padding(24).frame(width: 540)
+        .onAppear {
+            baseURL = library.configuration?.baseURL.absoluteString ?? "http://192.168.0.50:2283"
+            libraryID = library.configuration?.libraryID ?? "local-library"
+            credential = library.configuration?.accessCredential ?? ""
+            library.clearConnectionFeedback()
+        }
+        .onChange(of: baseURL) { _, _ in library.clearConnectionFeedback() }
+        .onChange(of: libraryID) { _, _ in library.clearConnectionFeedback() }
+        .onChange(of: credential) { _, _ in library.clearConnectionFeedback() }
+    }
+
+    private func check(save: Bool) {
+        Task { await library.checkConnection(baseURL: baseURL, libraryID: libraryID, accessCredential: credential, save: save) }
     }
 }

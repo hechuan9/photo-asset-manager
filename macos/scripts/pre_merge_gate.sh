@@ -4,34 +4,21 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+command -v gitleaks >/dev/null 2>&1 || {
+  echo "缺少 gitleaks，请先执行 brew install gitleaks。" >&2
+  exit 1
+}
+
 swift build
 
-FILES_LIST="$(mktemp)"
-trap 'rm -f "$FILES_LIST"' EXIT
+SCAN_DIR="$(mktemp -d)"
+trap 'rm -rf "$SCAN_DIR"' EXIT
+# 扫描当前工作区中的受版本管理及未忽略文件，避免构建产物与已删除文件。
 git ls-files -z --cached --others --exclude-standard \
   | while IFS= read -r -d '' file; do
-      case "$file" in
-        .gitignore|scripts/pre_merge_gate.sh)
-          continue
-          ;;
-      esac
       [[ -f "$file" ]] || continue
-      printf '%s\0' "$file"
-    done > "$FILES_LIST"
+      mkdir -p "$SCAN_DIR/$(dirname "$file")"
+      cp "$file" "$SCAN_DIR/$file"
+    done
 
-if [[ -s "$FILES_LIST" ]]; then
-  MATCHES="$(
-    xargs -0 rg -n -i \
-    "(api[_-]?key|secret|token|password|passwd|private[_-]?key|aws_access_key|aws_secret|authorization|bearer|client_secret|OPENAI_API_KEY|GITHUB_TOKEN|AIza|sk-[A-Za-z0-9]|-----BEGIN)" \
-    -- < "$FILES_LIST" || true
-  )"
-  FILTERED_MATCHES="$(
-    printf '%s\n' "$MATCHES" | rg -v -i \
-      "(Sources/PhotoAssetManager/ContentView.swift:.*(authMode|Bearer token（可留空）)|Sources/PhotoAssetManager/SyncControlPlane.swift:.*|Tests/PhotoAssetManagerTests/SyncLedgerTests.swift:.*)" || true
-  )"
-  if [[ -n "$FILTERED_MATCHES" ]]; then
-    printf '%s\n' "$FILTERED_MATCHES"
-    echo "疑似敏感信息匹配，停止发布。" >&2
-    exit 1
-  fi
-fi
+gitleaks dir "$SCAN_DIR" --redact --no-banner

@@ -1,14 +1,11 @@
 import SwiftUI
+import KeepsAPI
 
 @main
 struct KeepsIOSApp: App {
     @StateObject private var library = IOSLibraryStore()
-
     var body: some Scene {
-        WindowGroup {
-            IOSRootView()
-                .environmentObject(library)
-        }
+        WindowGroup { IOSRootView().environmentObject(library) }
     }
 }
 
@@ -19,271 +16,99 @@ struct IOSRootView: View {
 
     var body: some View {
         NavigationStack {
-            ZStack {
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.02, green: 0.02, blue: 0.03),
-                        Color(red: 0.07, green: 0.08, blue: 0.10)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .ignoresSafeArea()
-
-                VStack(spacing: 0) {
-                    IOSSyncStatusBar(
-                        count: library.assets.count,
-                        summary: library.lastSyncSummary,
-                        isConfigured: library.hasRemoteSyncConfiguration,
-                        isSyncing: library.isSyncing,
-                        lastError: library.lastError
-                    )
-
-                    if library.assets.isEmpty {
-                        IOSGalleryEmptyState(
-                            isConfigured: library.hasRemoteSyncConfiguration,
-                            openSettings: {
-                                showingSettings = true
-                            },
-                            syncNow: {
-                                Task {
-                                    await library.syncNow(statusPrefix: "立即刷新")
-                                }
-                            }
-                        )
-                    } else {
-                        IOSWaterfallGallery()
-                            .environmentObject(library)
-                    }
+            VStack(spacing: 0) {
+                if let error = library.lastError {
+                    Text(error).font(.footnote).foregroundStyle(.red).textSelection(.enabled).padding()
                 }
+                if library.configuration == nil {
+                    ContentUnavailableView {
+                        Label("连接 NAS 图库", systemImage: "externaldrive.connected.to.line.below")
+                    } description: { Text("填写 NAS 服务地址和访问令牌，即可浏览照片。") }
+                    actions: { Button("设置") { showingSettings = true } }
+                } else if library.assets.isEmpty && !library.isLoading {
+                    ContentUnavailableView(library.showingTrash ? "回收站为空" : "没有照片", systemImage: "photo.on.rectangle", description: Text("可以刷新图库，或在 NAS 中添加追踪目录。"))
+                } else {
+                    IOSWaterfallGallery()
+                }
+                if library.isLoading { ProgressView("正在加载 NAS 图库…").padding() }
             }
-            .navigationTitle("图库")
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationTitle(library.showingTrash ? "回收站" : "图库 · \(library.total)")
+            .searchable(text: $library.search, prompt: "搜索照片")
+            .onSubmit(of: .search) { Task { await library.refresh() } }
+            .onChange(of: library.search) { _, value in
+                if value.isEmpty { Task { await library.refresh() } }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Text("\(library.assets.count) 张")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                    Button { library.showingTrash.toggle(); Task { await library.refresh() } } label: {
+                        Label(library.showingTrash ? "图库" : "回收站", systemImage: library.showingTrash ? "photo.on.rectangle" : "trash")
+                    }
                 }
-
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button {
-                        if library.hasRemoteSyncConfiguration {
-                            Task {
-                                await library.syncNow(statusPrefix: "立即刷新")
-                            }
-                        } else {
-                            showingSettings = true
+                    Menu {
+                        Picker("排序", selection: $library.sort) {
+                            Text("拍摄时间降序").tag("capture_desc")
+                            Text("拍摄时间升序").tag("capture_asc")
+                            Text("文件名").tag("filename")
+                            Text("评分").tag("rating_desc")
                         }
-                    } label: {
-                        if library.isSyncing {
-                            ProgressView()
-                                .progressViewStyle(.circular)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                    }
-                    .disabled(library.isSyncing)
-
-                    Button {
-                        showingSettings = true
-                    } label: {
-                        Image(systemName: "slider.horizontal.3")
-                    }
+                    } label: { Image(systemName: "arrow.up.arrow.down") }
+                    Button { Task { await library.refresh() } } label: { Image(systemName: "arrow.clockwise") }
+                    Button { showingSettings = true } label: { Image(systemName: "gearshape") }
                 }
             }
-            .toolbarColorScheme(.dark, for: .navigationBar)
-            .sheet(isPresented: $showingSettings, onDismiss: {
-                library.reloadConfiguration()
-            }) {
-                IOSSyncSettingsView {
+            .onChange(of: library.sort) { _, _ in Task { await library.refresh() } }
+            .sheet(isPresented: $showingSettings) {
+                IOSSettingsView(configuration: library.configuration) {
                     library.reloadConfiguration()
+                    Task { await library.refresh() }
                 }
             }
-            .task {
-                library.loadIfNeeded()
-                if !library.hasRemoteSyncConfiguration {
-                    showingSettings = true
-                }
-            }
-            .onChange(of: scenePhase, initial: true) { _, newPhase in
-                library.loadIfNeeded()
-                library.setAutomaticSyncActive(newPhase == .active)
+            .task { await library.refresh() }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active && library.assets.isEmpty { Task { await library.refresh() } }
             }
         }
     }
 }
 
-struct IOSSyncStatusBar: View {
-    var count: Int
-    var summary: String
-    var isConfigured: Bool
-    var isSyncing: Bool
-    var lastError: String?
-
-    var body: some View {
-        VStack(spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(isConfigured ? "iPhone 本地投影" : "本地缓存模式")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Text("企业内部版")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text(summary)
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(.white)
-                }
-
-                Spacer()
-
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text(isSyncing ? "同步中" : (isConfigured ? "自动拉取 macOS ledger" : "先配置 control plane"))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(isConfigured ? Color(red: 0.79, green: 0.90, blue: 1.0) : Color(red: 1.0, green: 0.84, blue: 0.60))
-                    Text("\(count)")
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                }
-            }
-
-            if let lastError, !lastError.isEmpty {
-                Text(lastError)
-                    .font(.footnote)
-                    .foregroundStyle(Color(red: 1.0, green: 0.74, blue: 0.74))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .lineLimit(3)
-            }
-        }
-        .padding(.horizontal, 18)
-        .padding(.top, 14)
-        .padding(.bottom, 16)
-        .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(Color.white.opacity(0.08))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                )
-        )
-        .padding(.horizontal, 12)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
-    }
-}
-
-struct IOSGalleryEmptyState: View {
-    var isConfigured: Bool
-    var openSettings: () -> Void
-    var syncNow: () -> Void
-
-    var body: some View {
-        VStack(spacing: 18) {
-            Spacer()
-
-            Image(systemName: "square.grid.2x2.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.white.opacity(0.9))
-
-            Text("还没有同步到图库")
-                .font(.system(size: 28, weight: .semibold))
-                .foregroundStyle(.white)
-
-            Text(isConfigured
-                 ? "应用会在前台自动拉取 macOS 已上传的 ledger，并优先显示预览图。"
-                 : "先填 control plane 地址，随后 iPhone 会自动拉取这个只读图库。")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 320)
-
-            Text("（本构建为企业内部发行，仅授权设备）")
-                .font(.system(size: 12, weight: .regular))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 320)
-
-            HStack(spacing: 12) {
-                Button("立即刷新") {
-                    syncNow()
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button("设置") {
-                    openSettings()
-                }
-                .buttonStyle(.bordered)
-            }
-
-            Spacer()
-        }
-        .padding(.horizontal, 24)
-    }
-}
-
-struct IOSSyncSettingsView: View {
+struct IOSSettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @AppStorage(SyncPreferenceKey.baseURL) private var baseURL = ""
-    @AppStorage(SyncPreferenceKey.libraryID) private var libraryID = "local-library"
-    @AppStorage(SyncPreferenceKey.peerID) private var peerID = "control-plane"
-    @AppStorage(SyncPreferenceKey.authMode) private var authModeRawValue = SyncAuthenticationMode.bearer.rawValue
-    @AppStorage(SyncPreferenceKey.accessCredential) private var accessCredential = ""
-
+    @State private var baseURL: String
+    @State private var libraryID: String
+    @State private var token: String
+    @State private var error: String?
     var didSave: () -> Void
 
-    private var authMode: SyncAuthenticationMode {
-        get { SyncAuthenticationMode(rawValue: authModeRawValue) ?? .bearer }
-        nonmutating set { authModeRawValue = newValue.rawValue }
+    init(configuration: KeepsConfiguration?, didSave: @escaping () -> Void) {
+        _baseURL = State(initialValue: configuration?.baseURL.absoluteString ?? "http://192.168.0.50:2283")
+        _libraryID = State(initialValue: configuration?.libraryID ?? "local-library")
+        _token = State(initialValue: configuration?.accessCredential ?? "")
+        self.didSave = didSave
     }
-
     var body: some View {
         NavigationStack {
             Form {
-                Section("Control Plane") {
-                    TextField("https://control-plane.example.com", text: $baseURL)
-                        .textInputAutocapitalization(.never)
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                    TextField("libraryID", text: $libraryID)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    TextField("peerID", text: $peerID)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    Picker("认证方式", selection: Binding(
-                        get: { authMode },
-                        set: { authMode = $0 }
-                    )) {
-                        ForEach(SyncAuthenticationMode.allCases) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    }
-                    SecureField("Bearer token（可留空）", text: $accessCredential)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                Section("NAS 服务") {
+                    TextField("服务地址", text: $baseURL).keyboardType(.URL)
+                    TextField("图库 ID", text: $libraryID)
+                    SecureField("访问令牌", text: $token)
+                }.textInputAutocapitalization(.never).autocorrectionDisabled()
+                Section {
+                    Text("照片、评分、标签和回收站状态由 NAS 保存。此设备仅保存连接设置和可清理的图片缓存。")
+                    Text("移入回收站只隐藏图库记录，原片保持不变。")
                 }
-
-                Section("说明") {
-                    Text("当前 iOS 端只负责同步验证和瀑布流浏览，不会扫描、移动、删除或覆盖任何原片。")
-                    Text("前台会自动拉取 ledger。预览图优先读本地缓存，没有本地缓存时，再通过 derivative metadata 取远端下载链接。")
-                    Text((Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String).map { "企业内部版 \($0)（本构建为企业内部发行，仅授权设备）" } ?? "企业内部版（本构建为企业内部发行，仅授权设备）")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+                if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             }
-            .navigationTitle("同步设置")
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationTitle("连接设置")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") {
-                        dismiss()
-                    }
-                }
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
-                        didSave()
-                        dismiss()
+                        do {
+                            _ = try KeepsSettings.save(baseURLString: baseURL, libraryID: libraryID, accessCredential: token)
+                            didSave(); dismiss()
+                        } catch { self.error = String(reflecting: error) }
                     }
                 }
             }

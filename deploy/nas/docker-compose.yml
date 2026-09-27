@@ -1,39 +1,33 @@
 services:
   control-plane:
+    image: keeps-server:local
     build:
       context: ../..
-      dockerfile: control_plane/Dockerfile.nas
+      dockerfile: server/Dockerfile
     container_name: keeps-control-plane
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     ports:
       - "2283:2283"
     environment:
-      CONTROL_PLANE_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      KEEPS_ACCESS_TOKEN: ${KEEPS_ACCESS_TOKEN:?Set KEEPS_ACCESS_TOKEN to a random secret of at least 32 bytes}
       CONTROL_PLANE_AUTO_CREATE_SCHEMA: ${CONTROL_PLANE_AUTO_CREATE_SCHEMA:-1}
       CONTROL_PLANE_PUBLIC_BASE_URL: ${CONTROL_PLANE_PUBLIC_BASE_URL}
       CONTROL_PLANE_TRUSTED_DEVICE_IDS: ${CONTROL_PLANE_TRUSTED_DEVICE_IDS:-}
-      DERIVATIVE_STORAGE_BACKEND: filesystem
       KEEPS_ROOT: /myphoto/keeps
-      ORIGINAL_ROOT: /myphoto/library
+      ORIGINAL_ROOT: /volume2
+      TZ: ${TZ:-America/New_York}
+      KEEPS_LIBRARY_ID: ${KEEPS_LIBRARY_ID:-local-library}
+      KEEPS_SCAN_INTERVAL_SECONDS: ${KEEPS_SCAN_INTERVAL_SECONDS:-300}
     volumes:
       - ${KEEPS_ROOT}:/myphoto/keeps
-      - ${ORIGINAL_ROOT}:/myphoto/library:ro
-
-  postgres:
-    image: postgres:16-alpine
-    container_name: keeps-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      - ${ORIGINAL_ROOT}:${ORIGINAL_ROOT}:ro
+      - ${RAW_UNPROCESSED_ROOT}:${RAW_UNPROCESSED_ROOT}:ro
+      - ${RAW_PROCESSED_ROOT}:${RAW_PROCESSED_ROOT}:ro
+      - ${PERSONAL_PHOTOS_ROOT}:${PERSONAL_PHOTOS_ROOT}:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
-      interval: 10s
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:2283/healthz"]
+      interval: 30s
       timeout: 5s
-      retries: 5
-    volumes:
-      - ${KEEPS_ROOT}/db/postgres:/var/lib/postgresql/data
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 210s

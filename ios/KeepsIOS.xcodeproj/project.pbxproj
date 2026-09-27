@@ -10,28 +10,15 @@
 		A10000010000000000000001 /* Sources/KeepsIOS/KeepsIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001010000000000000001 /* Sources/KeepsIOS/KeepsIOSApp.swift */; };
 		A10000020000000000000001 /* Sources/KeepsIOS/IOSLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001020000000000000001 /* Sources/KeepsIOS/IOSLibraryStore.swift */; };
 		A10000030000000000000001 /* Sources/KeepsIOS/WaterfallGalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001030000000000000001 /* Sources/KeepsIOS/WaterfallGalleryView.swift */; };
-		A10000040000000000000001 /* ../macos/Sources/PhotoAssetManager/Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001040000000000000001 /* ../macos/Sources/PhotoAssetManager/Models.swift */; };
-		A10000050000000000000001 /* ../macos/Sources/PhotoAssetManager/DateCoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001050000000000000001 /* ../macos/Sources/PhotoAssetManager/DateCoding.swift */; };
-		A10000060000000000000001 /* ../macos/Sources/PhotoAssetManager/PerformanceLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001060000000000000001 /* ../macos/Sources/PhotoAssetManager/PerformanceLog.swift */; };
-		A10000070000000000000001 /* ../macos/Sources/PhotoAssetManager/SQLiteDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001070000000000000001 /* ../macos/Sources/PhotoAssetManager/SQLiteDatabase.swift */; };
-		A10000080000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001080000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncLedger.swift */; };
-		A10000090000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001090000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift */; };
-		A100000A0000000000000001 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A100010A0000000000000001 /* libsqlite3.tbd */; };
 		A100000B0000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A100010C0000000000000001 /* Assets.xcassets */; };
 		A100000C0000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A100010D0000000000000001 /* PrivacyInfo.xcprivacy */; };
+		A20000000000000000000001 /* KeepsAPI in Frameworks */ = {isa = PBXBuildFile; productRef = A20000000000000000000002 /* KeepsAPI */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		A10001010000000000000001 /* Sources/KeepsIOS/KeepsIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/KeepsIOS/KeepsIOSApp.swift; sourceTree = SOURCE_ROOT; };
 		A10001020000000000000001 /* Sources/KeepsIOS/IOSLibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/KeepsIOS/IOSLibraryStore.swift; sourceTree = SOURCE_ROOT; };
 		A10001030000000000000001 /* Sources/KeepsIOS/WaterfallGalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/KeepsIOS/WaterfallGalleryView.swift; sourceTree = SOURCE_ROOT; };
-		A10001040000000000000001 /* ../macos/Sources/PhotoAssetManager/Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../macos/Sources/PhotoAssetManager/Models.swift; sourceTree = SOURCE_ROOT; };
-		A10001050000000000000001 /* ../macos/Sources/PhotoAssetManager/DateCoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../macos/Sources/PhotoAssetManager/DateCoding.swift; sourceTree = SOURCE_ROOT; };
-		A10001060000000000000001 /* ../macos/Sources/PhotoAssetManager/PerformanceLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../macos/Sources/PhotoAssetManager/PerformanceLog.swift; sourceTree = SOURCE_ROOT; };
-		A10001070000000000000001 /* ../macos/Sources/PhotoAssetManager/SQLiteDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../macos/Sources/PhotoAssetManager/SQLiteDatabase.swift; sourceTree = SOURCE_ROOT; };
-		A10001080000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../macos/Sources/PhotoAssetManager/SyncLedger.swift; sourceTree = SOURCE_ROOT; };
-		A10001090000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift; sourceTree = SOURCE_ROOT; };
-		A100010A0000000000000001 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
 		A100010B0000000000000001 /* Keeps.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Keeps.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A100010C0000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = SOURCE_ROOT; };
 		A100010D0000000000000001 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = SOURCE_ROOT; };
@@ -42,7 +29,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A100000A0000000000000001 /* libsqlite3.tbd in Frameworks */,
+				A20000000000000000000001 /* KeepsAPI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -53,7 +40,6 @@
 			isa = PBXGroup;
 			children = (
 				A100001C0000000000000001 /* App */,
-				A100001D0000000000000001 /* SharedCore */,
 				A100001E0000000000000001 /* Frameworks */,
 				A100001F0000000000000001 /* Products */,
 				A100010C0000000000000001 /* Assets.xcassets */,
@@ -71,23 +57,10 @@
 			path = App;
 			sourceTree = "<group>";
 		};
-		A100001D0000000000000001 /* SharedCore */ = {
-			isa = PBXGroup;
-			children = (
-				A10001040000000000000001 /* ../macos/Sources/PhotoAssetManager/Models.swift */,
-				A10001050000000000000001 /* ../macos/Sources/PhotoAssetManager/DateCoding.swift */,
-				A10001060000000000000001 /* ../macos/Sources/PhotoAssetManager/PerformanceLog.swift */,
-				A10001070000000000000001 /* ../macos/Sources/PhotoAssetManager/SQLiteDatabase.swift */,
-				A10001080000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncLedger.swift */,
-				A10001090000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift */,
-			);
-			path = SharedCore;
-			sourceTree = "<group>";
-		};
+
 		A100001E0000000000000001 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
-				A100010A0000000000000001 /* libsqlite3.tbd */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -116,6 +89,7 @@
 			dependencies = (
 			);
 			name = KeepsIOS;
+			packageProductDependencies = (A20000000000000000000002 /* KeepsAPI */,);
 			productName = KeepsIOS;
 			productReference = A100010B0000000000000001 /* Keeps.app */;
 			productType = "com.apple.product-type.application";
@@ -147,6 +121,7 @@
 			productRefGroup = A100001F0000000000000001 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
+			packageReferences = (A20000000000000000000003 /* shared */,);
 			targets = (
 				A10000200000000000000001 /* KeepsIOS */,
 			);
@@ -173,17 +148,17 @@
 				A10000010000000000000001 /* Sources/KeepsIOS/KeepsIOSApp.swift in Sources */,
 				A10000020000000000000001 /* Sources/KeepsIOS/IOSLibraryStore.swift in Sources */,
 				A10000030000000000000001 /* Sources/KeepsIOS/WaterfallGalleryView.swift in Sources */,
-				A10000040000000000000001 /* ../macos/Sources/PhotoAssetManager/Models.swift in Sources */,
-				A10000050000000000000001 /* ../macos/Sources/PhotoAssetManager/DateCoding.swift in Sources */,
-				A10000060000000000000001 /* ../macos/Sources/PhotoAssetManager/PerformanceLog.swift in Sources */,
-				A10000070000000000000001 /* ../macos/Sources/PhotoAssetManager/SQLiteDatabase.swift in Sources */,
-				A10000080000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncLedger.swift in Sources */,
-				A10000090000000000000001 /* ../macos/Sources/PhotoAssetManager/SyncControlPlane.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin XCLocalSwiftPackageReference section */
+        A20000000000000000000003 /* shared */ = {isa = XCLocalSwiftPackageReference; relativePath = ../shared; };
+/* End XCLocalSwiftPackageReference section */
+/* Begin XCSwiftPackageProductDependency section */
+        A20000000000000000000002 /* KeepsAPI */ = {isa = XCSwiftPackageProductDependency; productName = KeepsAPI; };
+/* End XCSwiftPackageProductDependency section */
 /* Begin XCBuildConfiguration section */
 		A10000400000000000000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -226,20 +201,23 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+                ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 3TZ6RCL8NE;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Keeps;
+                INFOPLIST_KEY_NSLocalNetworkUsageDescription = "连接 NAS 照片图库";
+                INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.3.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.hechuan.Keeps;
 				PRODUCT_NAME = Keeps;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -253,20 +231,23 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+                ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 3TZ6RCL8NE;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Keeps;
+                INFOPLIST_KEY_NSLocalNetworkUsageDescription = "连接 NAS 照片图库";
+                INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.3.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.hechuan.Keeps;
 				PRODUCT_NAME = Keeps;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

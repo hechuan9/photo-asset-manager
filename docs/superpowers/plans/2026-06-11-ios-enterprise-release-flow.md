@@ -1,5 +1,7 @@
 # iOS 企业内部发布流程 Implementation Plan
 
+> 历史方案：2026-09-26 已由 TestFlight 内测分发决策替代；当前入口与状态见仓库 README。下文保留历史记录，不作为现行发布约束。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 建立可重复的企业内部 iOS 发布流程，产出 enterprise-signed IPA 并直接部署到用户的 Chuan iPhone（UDID 036DD950-A8BC-5B88-B477-167F1DFB73E1），补齐 AppIcon、Privacy Manifest 和内部版标识，更新文档，所有变更仅限 ios/ + README，严格内部发行（method=enterprise），不触碰照片原文件。

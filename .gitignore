@@ -31,7 +31,11 @@ AGENTS.md
 # Secrets and local environment
 .env
 .env.*
+!deploy/nas/.env.example
 *.pem
 *.p12
 *.mobileprovision
 secrets/
+
+# Rust server
+server/target/
