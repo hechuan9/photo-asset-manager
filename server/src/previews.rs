@@ -218,7 +218,9 @@ impl PreviewStorage {
                     .context("invalid token payload")?,
             )?;
             ensure!(payload["operation"] == operation, "invalid token operation");
-            let expires = payload["expires"].as_u64().context("missing token expiry")?;
+            let expires = payload["expires"]
+                .as_u64()
+                .context("missing token expiry")?;
             validate_object(&payload)?;
             Ok((payload, expires))
         })()

@@ -24,3 +24,9 @@ macOS 与 iOS/iPadOS 共用预览加载器：每个应用 5 GiB 磁盘缓存，�
 - macos 构建 4：`19b01ddf-76e6-4250-af66-47dbd4b56f83`，上传时间 2026-09-26T17:52:41-07:00。
 
 - ios 构建 2：`55b13822-2ea8-4327-8328-952f121f6629`，上传时间 2026-09-26T17:52:36-07:00。
+
+## 发布中发现并修复的问题
+
+首次真实过期链接的客户端验证暴露刷新响应契约缺口：API 只返回 downloadURL 和嵌套 derivative，而新加载器需要同资产预览一致的顶层 width、height、version。服务端已补齐三个字段，保留既有 derivative 字段，并在真实 HTTP 路由回归中逐项与资产 preview 比较。不能用此前仅验证 403 状态码代替换链成功。
+
+首次 CI 同时发现 Rust 格式差异与 CI 旧版 Swift 对跨 actor 默认写入闭包的 Sendable 检查；已执行 rustfmt 并显式标记闭包 @Sendable，本地共享 16 项测试及真实 HTTP 路由回归再次通过。客户端 TestFlight 构建基于 3fe48cb，后续 @Sendable 为静态并发标注，不改变缓存运行行为；刷新响应修复由 NAS 部署提供。

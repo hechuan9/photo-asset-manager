@@ -457,7 +457,13 @@ async fn derivative_metadata(
             return Ok(Value::Null);
         };
         let url = state.previews.download_url(&derivative["objectRef"])?;
-        Ok(json!({"derivative":derivative,"downloadURL":url}))
+        Ok(json!({
+            "downloadURL": url,
+            "width": derivative["pixelSize"]["width"],
+            "height": derivative["pixelSize"]["height"],
+            "version": derivative["fileObject"]["contentHash"],
+            "derivative": derivative
+        }))
     })
     .await?;
     if result.is_null() {

@@ -143,7 +143,7 @@ public actor PreviewCache {
         }
         entries[key] = entry
     }
-    func store(_ data: Data, key: String, write: (Data, URL) throws -> Void = { try $0.write(to: $1, options: .atomic) }) throws {
+    func store(_ data: Data, key: String, write: @Sendable (Data, URL) throws -> Void = { try $0.write(to: $1, options: .atomic) }) throws {
         try prepare()
         guard data.count <= limit else { return }
         try trim()

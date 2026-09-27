@@ -312,6 +312,9 @@ async fn nas_generated_preview_is_downloaded_by_signed_url() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{metadata}");
+    assert_eq!(metadata["width"], asset["preview"]["width"]);
+    assert_eq!(metadata["height"], asset["preview"]["height"]);
+    assert_eq!(metadata["version"], asset["preview"]["version"]);
     let path = metadata["downloadURL"]
         .as_str()
         .unwrap()
