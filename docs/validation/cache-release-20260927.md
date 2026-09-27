@@ -30,3 +30,11 @@ macOS 与 iOS/iPadOS 共用预览加载器：每个应用 5 GiB 磁盘缓存，�
 首次真实过期链接的客户端验证暴露刷新响应契约缺口：API 只返回 downloadURL 和嵌套 derivative，而新加载器需要同资产预览一致的顶层 width、height、version。服务端已补齐三个字段，保留既有 derivative 字段，并在真实 HTTP 路由回归中逐项与资产 preview 比较。不能用此前仅验证 403 状态码代替换链成功。
 
 首次 CI 同时发现 Rust 格式差异与 CI 旧版 Swift 对跨 actor 默认写入闭包的 Sendable 检查；已执行 rustfmt 并显式标记闭包 @Sendable，本地共享 16 项测试及真实 HTTP 路由回归再次通过。客户端 TestFlight 构建基于 3fe48cb，后续 @Sendable 为静态并发标注，不改变缓存运行行为；刷新响应修复由 NAS 部署提供。
+
+修复提交 `5d6136e` 的 GitHub Actions 三组检查全部通过：Rust server、Apple clients and release scripts、Control plane and migration tools。CI 运行：<https://github.com/hechuan9/photo-asset-manager/actions/runs/36284061452>。
+
+## 最终端到端结果
+
+NAS 切换到 `keeps-server:cache-contract-20260927` 后，输入真实资产对应的正确签名、已经过期的下载 URL，由当前 KeepsAPI 的 PreviewCache 完整执行请求、403识别、刷新元数据、再次下载及下采样；成功输出170×256。随后创建新缓存实例，并将该版本下载URL改为不可达地址，仍成功输出342×512；磁盘仅一份1,697,508字节图片，配置上限5 GiB。该流程没有绕过共享加载器或预先换成有效URL。
+
+NAS 镜像、双库备份、原片只读挂载与任务恢复证据见 [NAS部署验证](cache-nas-20260927.md)。未操作用户iPhone/iPad安装，也未把TestFlight状态或共享加载器验证当作真机界面验收。

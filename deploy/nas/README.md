@@ -73,3 +73,5 @@ curl --fail http://localhost:2283/healthz
 最新统一资料库版本为 `keeps-server:unified-http-20260926`，运行镜像 `e527e706e61c`，容器 healthy。导航 API 已移除未实现的 `location/local` 字段；Mac 统一资料库与来源刷新通过。备份、回退镜像和线上验证见 [统一 HTTP 资料库验证](../../docs/validation/2026-09-26-unified-http-library.md)。
 
 当前隐藏目录版本为 `keeps-server:hidden-directories-20260926`，镜像 `81af7a9a9fd7`，schema 2；容器 healthy。新增目录隐藏配置与资产/计数过滤，迁移保留全部 117,344 个资产。双库备份、逐行数据比对、真实隐藏规则及原片只读验证见 [隐藏目录部署验收](../../docs/validation/2026-09-26-hidden-directories-nas.md)。回退必须同时恢复升级前 schema 1 数据库，不能只切回旧镜像。
+
+当前缓存契约版本为 `keeps-server:cache-contract-20260927`，镜像 `2003e93c989a`，schema 2 不变，容器 healthy。已过期的有效签名预览链接返回 HTTP 403 / `preview_token_expired`，篡改令牌仍返回 HTTP 400，换链响应包含顶层 `width`、`height`、`version`；双库备份、原片只读挂载与任务恢复验证见 [缓存 NAS 部署验证](../../docs/validation/cache-nas-20260927.md)。
