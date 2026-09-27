@@ -1,0 +1,96 @@
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+import urllib.error
+
+import jwt
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization
+
+spec = importlib.util.spec_from_file_location("asc", Path(__file__).with_name("app_store_connect.py"))
+asc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(asc)
+
+
+class APITests(unittest.TestCase):
+    def test_jwt(self):
+        key = ec.generate_private_key(ec.SECP256R1())
+        pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                serialization.NoEncryption()).decode()
+        with patch.dict(os.environ, ASC_KEY_ID="test-key", ASC_ISSUER_ID="test-issuer", ASC_PRIVATE_KEY=pem):
+            token = asc.make_token()
+        payload = jwt.decode(token, key.public_key(), algorithms=["ES256"], audience="appstoreconnect-v1")
+        self.assertEqual(payload["iss"], "test-issuer")
+        self.assertEqual(payload["exp"] - payload["iat"], 600)
+        self.assertEqual(jwt.get_unverified_header(token)["kid"], "test-key")
+
+    def test_status_and_http_error(self):
+        payload = {"data": [{"id": "build", "attributes": {"version": "2", "processingState": "VALID"},
+            "relationships": {"buildBetaDetail": {"data": {"type": "buildBetaDetails", "id": "detail"}}, "betaGroups": {"data": [{"type": "betaGroups", "id": "group"}]}}}],
+            "included": [{"type": "buildBetaDetails", "id": "detail", "attributes": {"internalBuildState": "IN_BETA_TESTING"}}, {"type": "betaGroups", "id": "group", "attributes": {"name": "Internal", "isInternalGroup": True}}]}
+        with patch.object(asc, "make_token", return_value="private-token"), patch.object(asc.urllib.request, "build_opener") as opener:
+            opener.return_value.open.return_value = io.BytesIO(json.dumps(payload).encode())
+            result = asc.build_status("macos")
+            self.assertEqual(result["builds"][0]["buildBetaDetail"]["internalBuildState"], "IN_BETA_TESTING")
+            self.assertTrue(result["builds"][0]["betaGroups"][0]["isInternalGroup"])
+            request = opener.return_value.open.call_args.args[0]
+            self.assertTrue(request.full_url.startswith(asc.API + "/v1/builds?"))
+            self.assertIn("6816541220", request.full_url)
+            opener.return_value.open.side_effect = urllib.error.HTTPError(request.full_url, 401, "private-token", {}, None)
+            with self.assertRaisesRegex(RuntimeError, "^App Store Connect HTTP 401$"):
+                asc.build_status("macos")
+
+    def test_redirect_rejected(self):
+        self.assertIsNone(asc.NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.example"))
+
+
+class ShellTests(unittest.TestCase):
+    def test_forwarding_cleanup_and_partial_configuration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "scripts").mkdir()
+            shutil.copy(Path(__file__).with_name("testflight.sh"), root / "scripts/testflight.sh")
+            archive = root / "macos/.build/testflight/Keeps.xcarchive"
+            archive.mkdir(parents=True)
+            (archive / "Info.plist").touch()
+            (root / "bin").mkdir()
+            stub = root / "bin/xcodebuild"
+            stub.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, stat, sys
+args = sys.argv[1:]
+record = {"args": args}
+if "-authenticationKeyPath" in args:
+ p = pathlib.Path(args[args.index("-authenticationKeyPath") + 1])
+ record.update(path=str(p), mode=stat.S_IMODE(p.stat().st_mode), content_ok=p.read_text().strip()=="test-private-key")
+pathlib.Path(os.environ["RECORD"]).write_text(json.dumps(record))
+sys.exit(int(os.environ.get("STUB_EXIT", "0")))
+''')
+            stub.chmod(0o755)
+            env = {k: v for k, v in os.environ.items() if not k.startswith("ASC_")}
+            env.update(PATH=f"{root / 'bin'}:{os.environ['PATH']}", RECORD=str(root / "record.json"))
+            def run(action, values):
+                return subprocess.run(["/bin/bash", "scripts/testflight.sh", "macos", action], cwd=root,
+                                      env={**env, **values}, capture_output=True, text=True)
+            self.assertEqual(run("archive", {}).returncode, 0)
+            self.assertNotIn("-authenticationKeyPath", json.loads((root / "record.json").read_text())["args"])
+            self.assertNotEqual(run("archive", {"ASC_KEY_ID": "key"}).returncode, 0)
+            for action, code in [("archive", 0), ("upload", 9)]:
+                result = run(action, dict(ASC_KEY_ID="key", ASC_ISSUER_ID="issuer", ASC_PRIVATE_KEY="test-private-key", STUB_EXIT=str(code)))
+                self.assertEqual(result.returncode, code, result.stderr)
+                record = json.loads((root / "record.json").read_text())
+                self.assertEqual(record["mode"], 0o600)
+                self.assertTrue(record["content_ok"])
+                self.assertFalse(Path(record["path"]).exists())
+                self.assertIn("-authenticationKeyIssuerID", record["args"])
+                self.assertNotIn("test-private-key", result.stdout + result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

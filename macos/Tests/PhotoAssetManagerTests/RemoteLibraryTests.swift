@@ -153,13 +153,20 @@ import KeepsAPI
         let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://tree.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
         store.refreshNavigation()
         try await waitUntil { !store.isLoadingNavigation }
-        let outline = NSOutlineView()
+        let outline = DirectoryOutlineView.DirectoryOutline()
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("directory"))
         outline.addTableColumn(column); outline.outlineTableColumn = column
         let coordinator = DirectoryOutlineView.Coordinator(library: store)
         coordinator.outline = outline
         outline.dataSource = coordinator; outline.delegate = coordinator
         coordinator.update()
+        for width in [200.0, 300.0, 480.0] {
+            outline.setFrameSize(NSSize(width: width, height: 400))
+            for row in 0..<outline.numberOfRows {
+                let frame = outline.frameOfCell(atColumn: 0, row: row)
+                #expect(abs(frame.maxX - (width - 14)) < 0.5)
+            }
+        }
         #expect(outline.numberOfRows == 2)
         let root = try #require(outline.item(atRow: 0) as? DirectoryOutlineView.Coordinator.Node)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 400), styleMask: .borderless, backing: .buffered, defer: false)

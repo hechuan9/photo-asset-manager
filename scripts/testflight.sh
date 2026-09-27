@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 if [[ $# -ne 2 ]]; then
-  echo "用法: $0 ios|macos archive|upload" >&2
+  echo "用法: $0 ios|macos archive|upload|status" >&2
   exit 2
 fi
 
@@ -25,18 +25,39 @@ case "$1" in
   *) echo "不支持的平台: $1" >&2; exit 2 ;;
 esac
 
+AUTH_ARGS=()
+AUTH_FILE=""
+trap '[[ -z "$AUTH_FILE" ]] || rm -f "$AUTH_FILE"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [[ -n "${ASC_KEY_ID:-}${ASC_ISSUER_ID:-}${ASC_PRIVATE_KEY:-}" ]]; then
+  if [[ -z "${ASC_KEY_ID:-}" || -z "${ASC_ISSUER_ID:-}" || -z "${ASC_PRIVATE_KEY:-}" ]]; then
+    echo "必须同时配置 ASC_KEY_ID、ASC_ISSUER_ID、ASC_PRIVATE_KEY。" >&2
+    exit 1
+  fi
+  if [[ "$2" != status ]]; then
+    AUTH_FILE="$(umask 077; mktemp "${TMPDIR:-/tmp}/keeps-asc.XXXXXX")"
+    chmod 600 "$AUTH_FILE"
+    printf '%s\n' "$ASC_PRIVATE_KEY" > "$AUTH_FILE"
+    AUTH_ARGS=(-authenticationKeyPath "$AUTH_FILE" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+  fi
+fi
+
 case "$2" in
+  status)
+    uv run --script scripts/app_store_connect.py "$1" status
+    ;;
   archive)
     mkdir -p "$(dirname "$ARCHIVE")"
     xcodebuild -project "$PROJECT" -scheme "$SCHEME" \
       -configuration Release -destination "$DESTINATION" \
-      -archivePath "$ARCHIVE" -allowProvisioningUpdates archive
+      -archivePath "$ARCHIVE" -allowProvisioningUpdates ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} archive
     ;;
   upload)
     test -f "$ARCHIVE/Info.plist" || { echo "请先归档: $0 $1 archive" >&2; exit 1; }
     xcodebuild -exportArchive -archivePath "$ARCHIVE" \
       -exportOptionsPlist scripts/ExportOptions.testflight.plist \
-      -exportPath "$(dirname "$ARCHIVE")/upload" -allowProvisioningUpdates
+      -exportPath "$(dirname "$ARCHIVE")/upload" -allowProvisioningUpdates ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"}
     ;;
   *) echo "不支持的操作: $2" >&2; exit 2 ;;
 esac

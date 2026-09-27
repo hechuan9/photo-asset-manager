@@ -34,6 +34,20 @@ bash scripts/testflight.sh macos archive
 bash scripts/testflight.sh macos upload
 ```
 
+可通过团队 App Store Connect API Key 程序化归档、上传及读取最新构建状态。`codex-secret` 的 `app-store-connect` 条目注入 `ASC_KEY_ID`、`ASC_ISSUER_ID`、`ASC_PRIVATE_KEY`（完整、多行 PKCS8 PEM），不将私钥放入仓库或命令参数：
+
+```sh
+codex-secret run app-store-connect -- bash scripts/testflight.sh macos archive
+codex-secret run app-store-connect -- bash scripts/testflight.sh macos upload
+codex-secret run app-store-connect -- bash scripts/testflight.sh macos status
+```
+
+`ios` 使用同一入口，但只有明确需要发布 iOS 时才运行其 archive/upload。状态查询只读，返回最新上传构建的处理状态及 TestFlight 内外部测试状态；没有构建时返回空列表，未返回的关系显示 null。该命令需要 `uv`，脚本通过 PEP 723 声明 `PyJWT[crypto]>=2.10,<3` 依赖，首次执行会下载依赖。
+
+归档和上传将私钥短暂写入权限 0600 的临时文件，退出时清理。三个变量必须同时配置；全部未配置时，归档和上传继续使用现有 Xcode 账号，status 则要求 API Key。API Key 需具有对应 App 的发布权限；配置密钥不代表自动创建证书或保证上传成功。
+
+实现依据：[Apple JWT 文档](https://developer.apple.com/documentation/appstoreconnectapi/generating-tokens-for-api-requests)、[Builds API](https://developer.apple.com/documentation/appstoreconnectapi/get-v1-builds) 及本机 `xcodebuild -help` 的 authenticationKey 参数。
+
 归档保存在 `macos/.build/testflight/Keeps.xcarchive`，包含 Apple Silicon 与 Intel 架构。上传需要 Xcode 已登录具有团队发布权限的账号，以及 App Store Connect 中对应的 macOS App 记录。归档成功不代表 TestFlight 已处理完成。
 
 发行版开启 App Sandbox、Hardened Runtime 和出站网络权限；客户端只通过 HTTP/HTTPS 访问 NAS，不需要本机照片访问权限。Keychain 仅保存当前应用凭据，不启用跨应用 Keychain sharing。首次切换到沙盒版本需在设置中确认服务地址、资料库与令牌；本地开发版的偏好和旧签名凭据不保证自动迁移。

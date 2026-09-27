@@ -13,6 +13,8 @@ struct DirectoryOutlineView: NSViewRepresentable {
             coordinator?.contextMenu(for: item)
         }
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("directory"))
+        column.resizingMask = .autoresizingMask
+        outline.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         outline.addTableColumn(column)
         outline.outlineTableColumn = column
         outline.headerView = nil
@@ -42,6 +44,18 @@ struct DirectoryOutlineView: NSViewRepresentable {
 
     final class DirectoryOutline: NSOutlineView {
         var contextMenuForItem: ((Any) -> NSMenu?)?
+
+        override func resize(withOldSuperviewSize oldSize: NSSize) {
+            super.resize(withOldSuperviewSize: oldSize)
+            sizeLastColumnToFit()
+        }
+
+        override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
+            var rect = super.frameOfCell(atColumn: column, row: row)
+            // 目录层级只缩进左侧，计数始终对齐侧栏右侧的同一条边线。
+            rect.size.width = max(0, bounds.width - rect.minX - 14)
+            return rect
+        }
 
         override func menu(for event: NSEvent) -> NSMenu? {
             let index = row(at: convert(event.locationInWindow, from: nil))
@@ -77,13 +91,16 @@ struct DirectoryOutlineView: NSViewRepresentable {
                 icon.leadingAnchor.constraint(equalTo: leadingAnchor), icon.centerYAnchor.constraint(equalTo: centerYAnchor), icon.widthAnchor.constraint(equalToConstant: 16),
                 spinner.leadingAnchor.constraint(equalTo: icon.leadingAnchor), spinner.centerYAnchor.constraint(equalTo: centerYAnchor), spinner.widthAnchor.constraint(equalToConstant: 16), spinner.heightAnchor.constraint(equalToConstant: 16),
                 label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6), label.centerYAnchor.constraint(equalTo: centerYAnchor),
-                countLabel.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 6), countLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4), countLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
+                countLabel.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 6), countLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0), countLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
             ])
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
         func configure(_ directory: KeepsNavigationDirectory, loading: Bool, hidden: Bool = false) {
             icon.image = NSImage(systemSymbolName: hidden ? "folder.badge.minus" : "folder", accessibilityDescription: hidden ? "隐藏目录" : "目录")
             textField?.stringValue = directory.name
+            textField?.textColor = hidden ? .secondaryLabelColor : .labelColor
+            icon.contentTintColor = hidden ? .tertiaryLabelColor : .secondaryLabelColor
+            countLabel.textColor = hidden ? .tertiaryLabelColor : .secondaryLabelColor
             countLabel.stringValue = String(directory.photoCount)
             toolTip = directory.path + (hidden ? "（隐藏目录：仅进入此目录或其子目录时显示内容）" : "")
             icon.isHidden = loading
