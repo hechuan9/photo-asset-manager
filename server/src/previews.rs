@@ -202,7 +202,7 @@ impl PreviewStorage {
 
     fn verify(&self, token: &str, operation: &str) -> Result<Value> {
         let current_time = now()?;
-        let payload = (|| -> Result<Value> {
+        let (payload, expires) = (|| -> Result<(Value, u64)> {
             let (encoded, signature) = token.split_once('.').context("invalid preview token")?;
             let mut mac = Hmac::<Sha256>::new_from_slice(&self.signing_key)?;
             mac.update(encoded.as_bytes());
@@ -218,20 +218,27 @@ impl PreviewStorage {
                     .context("invalid token payload")?,
             )?;
             ensure!(payload["operation"] == operation, "invalid token operation");
-            ensure!(
-                payload["expires"]
-                    .as_u64()
-                    .context("missing token expiry")?
-                    > current_time,
-                "preview token expired"
-            );
+            let expires = payload["expires"].as_u64().context("missing token expiry")?;
             validate_object(&payload)?;
-            Ok(payload)
+            Ok((payload, expires))
         })()
         .map_err(|error| {
             let message = error.to_string();
             error.context(PreviewError::token(message))
         })?;
+        if expires <= current_time {
+            let error = anyhow::anyhow!("preview token expired");
+            let context = if operation == "download" {
+                PreviewError {
+                    status: 403,
+                    code: "preview_token_expired".into(),
+                    message: error.to_string(),
+                }
+            } else {
+                PreviewError::token(error.to_string())
+            };
+            return Err(error.context(context));
+        }
         self.object_path(&payload)?;
         Ok(payload)
     }
@@ -476,13 +483,18 @@ mod tests {
             "{payload}.{}",
             URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
         );
-        assert!(
-            storage
-                .read(&token)
-                .unwrap_err()
-                .to_string()
-                .contains("expired")
-        );
+        let error = storage.read(&token).unwrap_err();
+        let response = error.downcast_ref::<PreviewError>().unwrap();
+        assert_eq!(response.status, 403);
+        assert_eq!(response.code, "preview_token_expired");
+        assert_eq!(error.root_cause().to_string(), "preview token expired");
+
+        let tampered = token.replacen(&payload, &URL_SAFE_NO_PAD.encode(b"{}"), 1);
+        let error = storage.read(&tampered).unwrap_err();
+        let response = error.downcast_ref::<PreviewError>().unwrap();
+        assert_eq!(response.status, 400);
+        assert_eq!(response.code, "invalid_derivative_storage_token");
+        assert!(format!("{error:#}").contains("invalid token signature"));
         Ok(())
     }
 }

@@ -323,34 +323,9 @@ struct ContentView: View {
 struct RemotePreview: View {
     var asset: KeepsAsset
     @EnvironmentObject private var library: LibraryStore
-    @State private var refreshedURL: URL?
-    @State private var refreshError: String?
+
     var body: some View {
-        Group {
-            if let url = refreshedURL ?? asset.preview?.downloadURL {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .empty: ProgressView()
-                    case .success(let image): image.resizable().scaledToFit()
-                    case .failure:
-                        VStack {
-                            Image(systemName: "photo.badge.exclamationmark")
-                            Button("重新载入预览") { Task {
-                                do { refreshedURL = try await library.refreshPreview(id: asset.id); refreshError = nil }
-                                catch { refreshError = LibraryStore.describe(error) }
-                            } }.font(.caption)
-                            if let refreshError { Text(refreshError).font(.caption).foregroundStyle(.red) }
-                        }
-                    @unknown default: EmptyView()
-                    }
-                }
-            } else {
-                VStack { Image(systemName: "photo"); Text("预览尚未生成").font(.caption) }.foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onChange(of: asset.id) { _, _ in refreshedURL = nil; refreshError = nil }
-        .onChange(of: asset.preview?.version) { _, _ in refreshedURL = nil; refreshError = nil }
+        KeepsPreviewImage(asset: asset, configuration: library.configuration)
     }
 }
 

@@ -71,11 +71,13 @@ public final class KeepsClient: Sendable {
         try await request("POST", library + ["jobs", id, "retry"])
     }
     public func refreshPreview(assetID: UUID) async throws -> URL {
-        let response: PreviewURL = try await request("GET", ["derivatives", assetID.uuidString], query: [URLQueryItem(name: "role", value: "preview"), URLQueryItem(name: "libraryID", value: configuration.libraryID)])
-        return response.downloadURL
+        try await refreshPreviewDescriptor(assetID: assetID).downloadURL
+    }
+    public func refreshPreviewDescriptor(assetID: UUID) async throws -> KeepsPreview {
+        let response: KeepsPreview = try await request("GET", ["derivatives", assetID.uuidString], query: [URLQueryItem(name: "role", value: "preview"), URLQueryItem(name: "libraryID", value: configuration.libraryID)])
+        return response
     }
     private struct Directories: Decodable { var directories: [KeepsDirectory] }
-    private struct PreviewURL: Decodable { var downloadURL: URL }
     private func request<T: Decodable>(_ method: String, _ segments: [String], query: [URLQueryItem] = [], body: Data? = nil) async throws -> T {
         try JSONDecoder().decode(T.self, from: await send(method, segments, query: query, body: body))
     }

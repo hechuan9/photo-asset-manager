@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 import KeepsAPI
 
 struct IOSWaterfallGallery: View {
@@ -53,51 +52,12 @@ struct IOSWaterfallGallery: View {
     }
 }
 
-@MainActor
-private enum PreviewCache {
-    static let images: NSCache<NSString, UIImage> = {
-        let cache = NSCache<NSString, UIImage>()
-        cache.totalCostLimit = 64 * 1024 * 1024
-        return cache
-    }()
-}
-
 struct IOSPreviewImage: View {
     let asset: KeepsAsset
     let configuration: KeepsConfiguration?
-    @State private var image: UIImage?
-    @State private var error: String?
-    private var key: String {
-        "\(configuration?.baseURL.absoluteString ?? "")|\(configuration?.libraryID ?? "")|\(asset.id)|\(asset.preview?.version ?? "")"
-    }
+
     var body: some View {
-        ZStack {
-            Color.secondary.opacity(0.12)
-            if let image { Image(uiImage: image).resizable().aspectRatio(contentMode: .fit) }
-            else if let error {
-                VStack { Image(systemName: "exclamationmark.triangle"); Text(error).font(.caption2).lineLimit(3) }.padding(8)
-            } else if asset.preview == nil { Image(systemName: "photo") }
-            else { ProgressView() }
-        }
-        .task(id: key) { await load() }
-    }
-    private func load() async {
-        image = nil; error = nil
-        if let cached = PreviewCache.images.object(forKey: key as NSString) { image = cached; return }
-        guard let preview = asset.preview else { return }
-        do {
-            var (data, response) = try await URLSession.shared.data(from: preview.downloadURL)
-            if let http = response as? HTTPURLResponse, [401,403].contains(http.statusCode), let configuration {
-                let fresh = try await KeepsClient(configuration: configuration).refreshPreview(assetID: asset.id)
-                (data, response) = try await URLSession.shared.data(from: fresh)
-            }
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw URLError(.badServerResponse) }
-            guard let decoded = UIImage(data: data) else { throw URLError(.cannotDecodeContentData) }
-            try Task.checkCancellation()
-            PreviewCache.images.setObject(decoded, forKey: key as NSString, cost: Int(decoded.size.width * decoded.size.height * 4))
-            image = decoded
-        } catch is CancellationError { }
-        catch { self.error = String(reflecting: error) }
+        KeepsPreviewImage(asset: asset, configuration: configuration)
     }
 }
 

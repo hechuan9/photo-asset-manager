@@ -110,7 +110,7 @@ struct KeepsAPITests {
             case ("GET", "/api/libraries/library/counts"): return (200, "{\"all\":2,\"trashed\":1,\"picked\":1}")
             case ("GET", let path) where path.hasPrefix("/api/derivatives/"):
                 #expect(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.contains(URLQueryItem(name: "libraryID", value: "library")) == true)
-                return (200, "{\"downloadURL\":\"https://preview.example/fresh.jpg\"}")
+                return (200, "{\"downloadURL\":\"https://preview.example/fresh.jpg\",\"width\":1200,\"height\":900,\"version\":\"hash\"}")
             default: Issue.record("unexpected endpoint: \(path)"); return (404, "missing")
             }
         }
