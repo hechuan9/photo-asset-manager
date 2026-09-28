@@ -25,6 +25,15 @@ struct IOSRootView: View {
                         Label("连接 NAS 图库", systemImage: "externaldrive.connected.to.line.below")
                     } description: { Text("填写 NAS 服务地址和访问令牌，即可浏览照片。") }
                     actions: { Button("设置") { showingSettings = true } }
+                } else if library.assets.isEmpty && library.lastError != nil && !library.isLoading {
+                    ContentUnavailableView {
+                        Label("无法加载图库", systemImage: "wifi.exclamationmark")
+                    } description: {
+                        Text("请确认手机可访问 NAS，并检查连接设置。")
+                    } actions: {
+                        Button("重试") { Task { await library.refresh() } }
+                        Button("连接设置") { showingSettings = true }
+                    }
                 } else if library.assets.isEmpty && !library.isLoading {
                     ContentUnavailableView(library.showingTrash ? "回收站为空" : "没有照片", systemImage: "photo.on.rectangle", description: Text("可以刷新图库，或在 NAS 中添加追踪目录。"))
                 } else {
@@ -52,9 +61,9 @@ struct IOSRootView: View {
                             Text("文件名").tag("filename")
                             Text("评分").tag("rating_desc")
                         }
-                    } label: { Image(systemName: "arrow.up.arrow.down") }
-                    Button { Task { await library.refresh() } } label: { Image(systemName: "arrow.clockwise") }
-                    Button { showingSettings = true } label: { Image(systemName: "gearshape") }
+                    } label: { Label("排序", systemImage: "arrow.up.arrow.down") }
+                    Button { Task { await library.refresh() } } label: { Label("刷新图库", systemImage: "arrow.clockwise") }
+                    Button { showingSettings = true } label: { Label("连接设置", systemImage: "gearshape") }
                 }
             }
             .onChange(of: library.sort) { _, _ in Task { await library.refresh() } }
@@ -65,9 +74,7 @@ struct IOSRootView: View {
                 }
             }
             .task { await library.refresh() }
-            .onChange(of: scenePhase) { _, phase in
-                if phase == .active && library.assets.isEmpty { Task { await library.refresh() } }
-            }
+            .onChange(of: scenePhase, initial: true) { _, phase in library.setActive(phase == .active) }
         }
     }
 }
@@ -78,6 +85,7 @@ struct IOSSettingsView: View {
     @State private var libraryID: String
     @State private var token: String
     @State private var error: String?
+    @State private var isChecking = false
     var didSave: () -> Void
 
     init(configuration: KeepsConfiguration?, didSave: @escaping () -> Void) {
@@ -93,25 +101,51 @@ struct IOSSettingsView: View {
                     TextField("服务地址", text: $baseURL).keyboardType(.URL)
                     TextField("图库 ID", text: $libraryID)
                     SecureField("访问令牌", text: $token)
-                }.textInputAutocapitalization(.never).autocorrectionDisabled()
+                }.textInputAutocapitalization(.never).autocorrectionDisabled().disabled(isChecking)
                 Section {
                     Text("照片、评分、标签和回收站状态由 NAS 保存。此设备仅保存连接设置和可清理的图片缓存。")
                     Text("移入回收站只隐藏图库记录，原片保持不变。")
+                    Text("首次连接请允许本地网络访问。手机需与 NAS 在同一网络，或通过已配置的 VPN 访问。")
                 }
+                if isChecking { ProgressView("正在验证 NAS 连接…") }
                 if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             }
+            .interactiveDismissDisabled(isChecking)
             .navigationTitle("连接设置")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() }.disabled(isChecking) }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") {
-                        do {
-                            _ = try KeepsSettings.save(baseURLString: baseURL, libraryID: libraryID, accessCredential: token)
-                            didSave(); dismiss()
-                        } catch { self.error = String(reflecting: error) }
-                    }
+                    Button("验证并保存") { Task { await verifyAndSave() } }
+                        .disabled(isChecking)
                 }
             }
         }
     }
+
+    @MainActor
+    private func verifyAndSave() async {
+        guard !isChecking else { return }
+        isChecking = true
+        error = nil
+        defer { isChecking = false }
+        do {
+            let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            let library = libraryID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let credential = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let url = URL(string: base), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  url.host != nil, url.user == nil, url.password == nil, url.query == nil,
+                  url.fragment == nil, !library.isEmpty else { throw KeepsAPIError.invalidConfiguration }
+            let client = KeepsClient(configuration: KeepsConfiguration(baseURL: url, libraryID: library,
+                                                                       accessCredential: credential.isEmpty ? nil : credential))
+            _ = try await client.counts()
+            var probe = KeepsAssetQuery()
+            probe.limit = 1
+            _ = try await client.assets(query: probe)
+            try Task.checkCancellation()
+            try KeepsSettings.save(baseURLString: base, libraryID: library, accessCredential: credential)
+            didSave()
+            dismiss()
+        } catch { self.error = error.localizedDescription + "\n" + String(reflecting: error) }
+    }
+
 }

@@ -7,6 +7,30 @@ private let assetJSON = """
 """
 
 struct KeepsAPITests {
+    @Test func revisionAndVersionSelectionUseLibraryScopedContracts() async throws {
+        let id = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let fixture = Fixture { request in
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-credential")
+            if request.url!.path.hasSuffix("/revision") { return (200, "{\"revision\":9223372036854775806}") }
+            #expect(request.url!.path.contains("/libraries/library/assets/"))
+            if request.httpMethod == "PUT" {
+                #expect(request.url!.path.hasSuffix("/default-version"))
+                let body = try JSONSerialization.jsonObject(with: request.bodyData) as! [String: String]
+                #expect(body == ["contentHash": "hash"])
+            } else { #expect(request.url!.path.hasSuffix("/versions")) }
+            return (200, """
+            {"items":[{"contentHash":"hash","width":6000,"height":4000,"priority":2,"isDefault":true,"userSelected":true,"available":true,"paths":[{"path":"/photo/旅行.jpg","available":true}],"evidence":{}}]}
+            """)
+        }
+        #expect(try await fixture.client.revision() == 9223372036854775806)
+        let versions = try await fixture.client.versions(assetID: id)
+        #expect(versions.first?.filename == "旅行.jpg")
+        #expect(versions.first?.available == true)
+        let selected = try await fixture.client.setDefaultVersion(assetID: id, contentHash: "hash")
+        #expect(selected.first?.isDefault == true)
+        #expect(selected.first?.userSelected == true)
+    }
+
     @Test func hiddenDirectoryContractEncodesPathsAndFilterOverride() async throws {
         let fixture = Fixture { request in
             let path = request.url!.path

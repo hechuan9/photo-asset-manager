@@ -102,13 +102,13 @@ def main():
         try:
             docker("run", "--rm", "-e", "KEEPS_ROOT=/myphoto/keeps", "--mount", mount, image, "migrate")
             with sqlite3.connect(database) as db:
-                assert db.execute("PRAGMA user_version").fetchone()[0] == 1
+                assert db.execute("PRAGMA user_version").fetchone()[0] == 3
                 assert db.execute("SELECT payload_json FROM ledger_events WHERE global_seq=1").fetchone()[0] == legacy_payload
                 assert db.execute("SELECT count(*) FROM catalog_assets").fetchone()[0] == 1
             record("legacy migration preserves event payload")
             docker("run", "-d", "--name", container, "-p", "127.0.0.1::2283",
                    "-e", "KEEPS_ACCESS_TOKEN", "-e", "KEEPS_ROOT=/myphoto/keeps",
-                   "-e", "ORIGINAL_ROOT=/myphoto/library", "-e", "CONTROL_PLANE_AUTO_CREATE_SCHEMA=0",
+                   "-e", "KEEPS_LIBRARY_ID=smoke", "-e", "ORIGINAL_ROOT=/myphoto/library", "-e", "CONTROL_PLANE_AUTO_CREATE_SCHEMA=0",
                    "-e", "CONTROL_PLANE_PUBLIC_BASE_URL=http://localhost:2283",
                    "-e", "TZ=America/New_York", "-e", "KEEPS_SCAN_INTERVAL_SECONDS=3600",
                    "--mount", mount,
@@ -135,10 +135,14 @@ def main():
                     raise AssertionError("invalid request succeeded: " + path)
 
             def wait_job(job_id=None, folder_id=None, expected="completed"):
+                scope = None
+                if folder_id is not None and job_id is None:
+                    scope = next(f["path"] for f in request("/libraries/smoke/folders")["folders"] if f["id"] == folder_id)
                 for _ in range(900):
                     jobs = request("/libraries/smoke/jobs")["jobs"]
                     matches = [j for j in jobs if (job_id is None or j["id"] == job_id)
-                               and (folder_id is None or j["folderID"] == folder_id)]
+                               and (folder_id is None or j["folderID"] == folder_id)
+                               and (scope is None or j["path"] == scope)]
                     if matches and matches[0]["status"] in ("completed", "failed", "cancelled"):
                         assert matches[0]["status"] == expected, matches[0]
                         return matches[0]
@@ -206,29 +210,25 @@ def main():
             add_original("mixed/after-error/z-valid.png", fixture_png(64))
             mixed = request("/libraries/smoke/folders", {"path": "mixed"})
             failed = wait_job(folder_id=mixed["id"], expected="failed")
-            assert failed["processed"] == 1 and failed["failed"] == 1, failed
+            assert failed["processed"] + failed["skipped"] == 1 and failed["failed"] == 1, failed
             assert "a-broken.jpg" in failed["error"], failed
-            assert "stderr:" in failed["error"], failed
-            assert request("/libraries/smoke/assets")["total"] == 4
+            assert "missing JPEG SOI" in failed["error"], failed
+            assert request("/libraries/smoke/assets")["total"] == 3
             bad_assets = request("/libraries/smoke/assets?q=a-broken.jpg")
-            assert bad_assets["total"] == 1, bad_assets
-            bad_asset_id = bad_assets["items"][0]["id"]
-            assert bad_assets["items"][0]["preview"] is None, bad_assets
+            assert bad_assets["total"] == 0, bad_assets
             valid_assets = request("/libraries/smoke/assets?q=z-valid.png")
             assert valid_assets["total"] == 1 and valid_assets["items"][0]["preview"], valid_assets
             record("bad JPEG fails visibly while valid PNG is ingested", failed)
             retried = request(f"/libraries/smoke/jobs/{failed['id']}/retry", method="POST")
             assert retried["id"] == failed["id"]
             retried = wait_job(job_id=retried["id"], expected="failed")
-            assert retried["failed"] == 1 and retried["skipped"] == 1, retried
-            assert request("/libraries/smoke/assets")["total"] == 4
+            assert retried["failed"] == 1 and retried["skipped"] + retried["processed"] == 1, retried
+            assert request("/libraries/smoke/assets")["total"] == 3
             bad_assets = request("/libraries/smoke/assets?q=a-broken.jpg")
-            assert bad_assets["total"] == 1, bad_assets
-            assert bad_assets["items"][0]["id"] == bad_asset_id, bad_assets
-            assert bad_assets["items"][0]["preview"] is None, bad_assets
+            assert bad_assets["total"] == 0, bad_assets
             assert (originals / "mixed/a-broken.jpg").is_file()
             request(f"/libraries/smoke/folders/{mixed['id']}", method="DELETE")
-            record("failed job retries while preserving bad source and skipping completed work", retried)
+            record("failed job retries preserve bad source and completed assets", retried)
 
             resume_count = 12
             for index in range(resume_count):
@@ -245,6 +245,7 @@ def main():
                     raise AssertionError("resume fixture did not reach an interruptible checkpoint: " + str(matches[0]))
                 time.sleep(0.05)
             assert checkpoint is not None, "no running checkpoint reached"
+            before_restart = {a["id"]: a["preview"]["version"] for a in request("/libraries/smoke/assets")["items"] if a.get("preview")}
             docker("kill", "--signal=KILL", container)
             with sqlite3.connect(str(keeps / "db/jobs.sqlite")) as db:
                 row = db.execute("SELECT status,processed FROM jobs WHERE id=?", (checkpoint["id"],)).fetchone()
@@ -253,18 +254,19 @@ def main():
             address = "http://" + docker("port", container, "2283/tcp")
             ready()
             resumed = wait_job(job_id=checkpoint["id"])
-            assert resumed["skipped"] >= 1, resumed
+            after_restart = {a["id"]: a["preview"]["version"] for a in request("/libraries/smoke/assets")["items"] if a.get("preview")}
+            assert all(after_restart.get(asset_id) == version for asset_id, version in before_restart.items())
             assert resumed["processed"] + resumed["skipped"] == resume_count, resumed
-            assert request("/libraries/smoke/assets")["total"] == 4 + resume_count
+            assert request("/libraries/smoke/assets")["total"] == 3 + resume_count
             request(f"/libraries/smoke/folders/{resume_folder['id']}", method="DELETE")
-            record("interrupted running job resumes after SIGKILL without reprocessing completed files",
+            record("interrupted running job resumes after SIGKILL preserving asset identity and completed previews",
                    {"checkpoint": checkpoint, "resumed": resumed})
             docker("restart", container)
             address = "http://" + docker("port", container, "2283/tcp")
             ready()
             assert request(legacy_path)["rating"] == 4
             assert request(legacy_path)["tags"] == ["smoke"]
-            assert request("/libraries/smoke/assets")["total"] == 4 + resume_count
+            assert request("/libraries/smoke/assets")["total"] == 3 + resume_count
             assert request("/libraries/smoke/folders")["folders"] == []
             mounts = json.loads(docker("inspect", container))[0]["Mounts"]
             assert next(m for m in mounts if m["Destination"] == "/myphoto/library")["RW"] is False
@@ -273,7 +275,7 @@ def main():
             with sqlite3.connect(database) as db:
                 assert db.execute("SELECT payload_json FROM ledger_events WHERE global_seq=1").fetchone()[0] == legacy_payload
             record("restart persists catalog and inactive folders; every original hash remains unchanged",
-                   {"assets": 4 + resume_count, "originalFiles": len(original_hashes)})
+                   {"assets": 3 + resume_count, "originalFiles": len(original_hashes)})
             evidence["status"] = "passed"
             print("PASS: all isolated NAS service checks", flush=True)
         except Exception as error:

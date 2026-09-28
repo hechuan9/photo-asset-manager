@@ -46,6 +46,45 @@ final class LibraryStore: ObservableObject {
     private let session: URLSession
     private let persistConfiguration: (KeepsConfiguration) throws -> Void
 
+    private var revisionTask: Task<Void, Never>?
+    private var observedRevision: Int64?
+    private var isActive = false
+
+    func setActive(_ active: Bool) {
+        isActive = active
+        revisionTask?.cancel()
+        revisionTask = nil
+        guard active, let configuration else { return }
+        let client = KeepsClient(configuration: configuration, session: session)
+        revisionTask = Task {
+            var pollingError: String?
+            while !Task.isCancelled {
+                do {
+                    let revision = try await client.revision()
+                    try Task.checkCancellation()
+                    guard self.configuration == configuration else { return }
+                    if let pollingError, lastError == pollingError { lastError = nil }
+                    pollingError = nil
+                    if observedRevision != revision {
+                        refreshNavigation()
+                        refresh()
+                        await loadTask?.value
+                        try Task.checkCancellation()
+                        guard self.configuration == configuration else { return }
+                        if lastError == nil { observedRevision = revision }
+                    }
+                } catch {
+                    if Task.isCancelled { return }
+                    guard self.configuration == configuration else { return }
+                    pollingError = String(reflecting: error)
+                    lastError = pollingError
+                }
+                do { try await Task.sleep(for: .seconds(5)) }
+                catch { return }
+            }
+        }
+    }
+
     init(
         configuration: KeepsConfiguration? = nil,
         session: URLSession = KeepsClient.apiSession,
@@ -226,6 +265,8 @@ final class LibraryStore: ObservableObject {
                 try persistConfiguration(candidate)
                 configuration = candidate
                 client = candidateClient
+                observedRevision = nil
+                setActive(isActive)
                 assets = []; selectedIDs = []; counts = nil
                 resetNavigation()
                 query = KeepsAssetQuery()

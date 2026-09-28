@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{previews::PreviewStorage, store::Store};
 use axum::{
@@ -18,6 +18,7 @@ pub struct AppState {
     pub previews: Arc<PreviewStorage>,
     pub jobs: Arc<crate::jobs::Jobs>,
     pub access_token: String,
+    pub library_id: String,
     pub original_root_names: crate::navigation::RootNames,
 }
 
@@ -81,6 +82,19 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/libraries/{library}/assets/{asset}/restore",
             post(restore_asset),
         )
+        .route(
+            "/libraries/{library}/assets/{asset}/versions",
+            get(versions),
+        )
+        .route(
+            "/libraries/{library}/assets/{asset}/version-candidates",
+            get(version_candidates),
+        )
+        .route(
+            "/libraries/{library}/assets/{asset}/default-version",
+            axum::routing::put(default_version),
+        )
+        .route("/libraries/{library}/revision", get(revision))
         .route("/libraries/{library}/counts", get(counts))
         .route(
             "/libraries/{library}/hidden-directories",
@@ -115,6 +129,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 async fn authenticate(
     State(state): State<Arc<AppState>>,
+    Path(params): Path<HashMap<String, String>>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -132,7 +147,23 @@ async fn authenticate(
         )
         .into_response();
     }
+    if let Some(library) = params.get("library")
+        && let Err(error) = require_library(&state, library)
+    {
+        return error.into_response();
+    }
     next.run(request).await
+}
+
+fn require_library(state: &AppState, library: &str) -> Result<(), ApiError> {
+    if library != state.library_id {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "library_not_found".into(),
+            "图库 ID 不存在，请检查连接设置中的图库 ID；此字段不是 NAS 用户名。".into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn blocking<F>(operation: F) -> Result<Value, ApiError>
@@ -447,6 +478,9 @@ async fn derivative_metadata(
     Path(asset): Path<String>,
     Query(query): Query<DerivativeQuery>,
 ) -> ApiResult {
+    if let Some(library) = &query.library {
+        require_library(&state, library)?;
+    }
     let asset = validate_derivative(&asset, &query.role)?;
     let result = blocking(move || {
         let Some(derivative) =
@@ -487,4 +521,88 @@ async fn local_download(
         content,
     )
         .into_response())
+}
+
+async fn revision(State(state): State<Arc<AppState>>, Path(library): Path<String>) -> ApiResult {
+    Ok(Json(blocking(move || state.store.library_revision(&library)).await?).into_response())
+}
+async fn versions(
+    State(state): State<Arc<AppState>>,
+    Path((library, id)): Path<(String, String)>,
+) -> ApiResult {
+    let id = asset_id(&id)?;
+    Ok(Json(blocking(move || state.store.versions(&library, &id)).await?).into_response())
+}
+async fn version_candidates(
+    State(state): State<Arc<AppState>>,
+    Path((library, id)): Path<(String, String)>,
+) -> ApiResult {
+    let id = asset_id(&id)?;
+    Ok(
+        Json(blocking(move || state.store.version_candidates(&library, &id)).await?)
+            .into_response(),
+    )
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DefaultVersionChange {
+    content_hash: String,
+}
+async fn default_version(
+    State(state): State<Arc<AppState>>,
+    Path((library, id)): Path<(String, String)>,
+    Json(change): Json<DefaultVersionChange>,
+) -> ApiResult {
+    let id = asset_id(&id)?;
+    Ok(Json(
+        blocking(move || {
+            let versions = state.store.versions(&library, &id)?;
+            let version = versions["items"]
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|version| {
+                        version["contentHash"].as_str() == Some(&change.content_hash)
+                            && version["available"] == true
+                    })
+                })
+                .ok_or_else(|| resource_error(422, "version is not available for this asset"))?;
+            let folders = state.jobs.folders()?;
+            let target = version["paths"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|location| location["available"] == true)
+                .filter_map(|location| location["path"].as_str())
+                .find_map(|path| {
+                    folders
+                        .iter()
+                        .find(|folder| {
+                            folder.active
+                                && folder.library_id == library
+                                && std::path::Path::new(path).starts_with(&folder.path)
+                        })
+                        .map(|folder| (folder.id.clone(), path))
+                })
+                .ok_or_else(|| {
+                    resource_error(
+                        409,
+                        "version folder is not tracked; enable tracking before selecting a default",
+                    )
+                })?;
+            let scope = std::path::Path::new(target.1)
+                .parent()
+                .ok_or_else(|| resource_error(422, "version path has no parent"))?;
+            state
+                .jobs
+                .validate_path(scope)
+                .map_err(|error| resource_error(409, format!("{error:#}")))?;
+            let result = state
+                .store
+                .set_default_version(&library, &id, &change.content_hash)?;
+            state.jobs.enqueue_reconcile_scope(&target.0, scope)?;
+            Ok(result)
+        })
+        .await?,
+    )
+    .into_response())
 }

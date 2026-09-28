@@ -75,3 +75,7 @@ curl --fail http://localhost:2283/healthz
 当前隐藏目录版本为 `keeps-server:hidden-directories-20260926`，镜像 `81af7a9a9fd7`，schema 2；容器 healthy。新增目录隐藏配置与资产/计数过滤，迁移保留全部 117,344 个资产。双库备份、逐行数据比对、真实隐藏规则及原片只读验证见 [隐藏目录部署验收](../../docs/validation/2026-09-26-hidden-directories-nas.md)。回退必须同时恢复升级前 schema 1 数据库，不能只切回旧镜像。
 
 当前缓存契约版本为 `keeps-server:cache-contract-20260927`，镜像 `2003e93c989a`，schema 2 不变，容器 healthy。已过期的有效签名预览链接返回 HTTP 403 / `preview_token_expired`，篡改令牌仍返回 HTTP 400，换链响应包含顶层 `width`、`height`、`version`；双库备份、原片只读挂载与任务恢复验证见 [缓存 NAS 部署验证](../../docs/validation/cache-nas-20260927.md)。
+
+当前版本与后台监听机制已部署为 `keeps-server:versions-watch-20260927`，镜像 `17950d7cfe47`，schema 3，容器 healthy。原生目录监听、持久化目录任务队列、版本/default API 已上线；NAS 临时样本验证通过，425 个生产目录监听及队列推进已核验。双库备份、历史表完整保留与回退说明见 [部署验收](../../docs/validation/2026-09-27-versions-watch-nas.md)。历史版本证据尚未全量回填，数据库整理候选已完成首批实盘核验，未执行合并。
+
+2026-09-27 14:03 UTC 已升级为 `keeps-server:folder-merge-20260927`（`7855aff06325`），schema 3 不变，服务 healthy。新文件归组限制为同直接父目录。用户已授权的全库同目录整理已在 NAS 独立进程启动，先在线预演，之后自动停服刷新计划、备份合并、恢复并验收；不表示全库整理已完成。[执行状态与报告位置](../../docs/validation/2026-09-27-folder-merge-execution.md)。

@@ -311,6 +311,25 @@ import KeepsAPI
         #expect(!reloaded.hiddenDirectoryFilterEnabled)
     }
 
+    @Test func revisionPollingRefreshesOnlyWhenChangedAndStopsWhileInactive() async throws {
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://revision.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        store.setActive(true)
+        defer { store.setActive(false) }
+        try await waitUntil { store.assets.count == 2 && !store.isLoading }
+        #expect(LibraryStubProtocol.treeRequests.count(for: "revision-assets") == 1)
+        store.setActive(false)
+        store.setActive(true)
+        try await waitUntil { LibraryStubProtocol.treeRequests.count(for: "revision-poll") == 2 }
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(LibraryStubProtocol.treeRequests.count(for: "revision-assets") == 1)
+        store.setActive(false)
+        store.setActive(true)
+        try await waitUntil { LibraryStubProtocol.treeRequests.count(for: "revision-assets") == 2 && !store.isLoading }
+        store.setActive(false)
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(LibraryStubProtocol.treeRequests.count(for: "revision-poll") == 3)
+    }
+
     private func stubSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [LibraryStubProtocol.self]
@@ -350,6 +369,15 @@ private final class LibraryStubProtocol: URLProtocol, @unchecked Sendable {
                 deliver(body: "{\"directories\":[]}", status: 200)
             }
             return
+        }
+        if request.url?.host == "revision.invalid" {
+            if request.url?.path.hasSuffix("/revision") == true {
+                Self.treeRequests.record("revision-poll")
+                let value = Self.treeRequests.count(for: "revision-poll") > 2 ? 2 : 1
+                deliver(body: "{\"revision\":\(value)}", status: 200)
+                return
+            }
+            if request.url?.path.hasSuffix("/assets") == true { Self.treeRequests.record("revision-assets") }
         }
         let first = Self.asset("00000000-0000-0000-0000-000000000001")
         let second = Self.asset("00000000-0000-0000-0000-000000000002")

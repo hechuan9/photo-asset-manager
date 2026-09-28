@@ -148,3 +148,27 @@ public struct KeepsAssetPatch: Encodable, Sendable {
         try values.encodeIfPresent(tags, forKey: .tags)
     }
 }
+
+public struct KeepsAssetVersion: Decodable, Identifiable, Sendable {
+    public var contentHash: String
+    public var width: Int
+    public var height: Int
+    public var priority: Int
+    public var isDefault: Bool
+    public var userSelected: Bool
+    public var available: Bool
+    public var paths: [Location]
+    public var id: String { contentHash }
+    public var filename: String { paths.first.map { URL(fileURLWithPath: $0.path).lastPathComponent } ?? contentHash }
+    public var kind: String {
+        switch priority {
+        case 3: "编辑成片"
+        case 2: "成片"
+        default: "RAW"
+        }
+    }
+    public struct Location: Decodable, Sendable {
+        public var path: String
+        public var available: Bool
+    }
+}

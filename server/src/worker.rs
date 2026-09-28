@@ -3,6 +3,7 @@ use crate::{
     media::{self, MediaProcessor},
     previews::PreviewStorage,
     store::Store,
+    versions::VersionEvidence,
 };
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
@@ -38,7 +39,7 @@ pub fn run(
                 if let Err(error) = jobs.enqueue_scan(&folder.id)
                     && jobs.is_active(&folder.id)?
                 {
-                    return Err(error).context("schedule tracked directory");
+                    tracing::error!(folder_id = %folder.id, error = %format!("{error:#}"), "schedule tracked directory; will retry on next reconciliation");
                 }
             }
             next_scan = Instant::now() + interval;
@@ -86,6 +87,7 @@ pub fn run_one(
         .context("validate tracked directory")?;
     let mut directories = vec![root.clone()];
     let mut progress = Progress::default();
+    let started = Instant::now();
     while let Some(directory) = directories.pop() {
         if stopped(jobs, job, stop)? {
             return Ok(());
@@ -96,6 +98,13 @@ pub fn run_one(
             .with_context(|| format!("read directory {}", directory.display()))?
         {
             if stopped(jobs, job, stop)? {
+                return Ok(());
+            }
+            if !job.refresh_metadata
+                && started.elapsed() > Duration::from_secs(30)
+                && jobs.has_pending_changes(&job.id)?
+            {
+                jobs.enqueue_scan(&job.folder_id)?;
                 return Ok(());
             }
             let entry = entry.with_context(|| format!("read entry in {}", directory.display()))?;
@@ -139,6 +148,15 @@ pub fn run_one(
         &job.library_id,
         root.to_str().context("original path must be UTF-8")?,
     )?;
+    for asset_id in store.defaults_needing_previews(
+        &job.library_id,
+        root.to_str().context("original path must be UTF-8")?,
+    )? {
+        if stopped(jobs, job, stop)? {
+            return Ok(());
+        }
+        ensure_default_preview(store, jobs, previews, job, &asset_id, stop)?;
+    }
     if let Some(error) = progress.last_error {
         bail!("{} files failed; latest failure: {error}", progress.failed);
     }
@@ -185,6 +203,7 @@ fn process_file(
     jobs.validate_path(path.parent().context("original has no parent")?)?;
     let text = path.to_str().context("original path must be UTF-8")?;
     let (size, mtime) = file_stamp(path)?;
+    let sidecars = media::sidecar_stamp(path)?;
     let previous = jobs.file_state(&job.folder_id, text)?;
     let mut asset_id = previous
         .as_ref()
@@ -194,9 +213,11 @@ fn process_file(
         .as_ref()
         .map(|p| p.version.clone())
         .unwrap_or_default();
-    if let Some(previous) = &previous
+    if !job.refresh_metadata
+        && let Some(previous) = &previous
         && previous.size == size
         && previous.mtime_ns == mtime
+        && previous.metadata_stamp == sidecars
         && previous.error.is_none()
         && !previous.asset_id.is_empty()
         && store.original_is_online(&job.library_id, text, &previous.version)?
@@ -207,6 +228,16 @@ fn process_file(
         {
             return Ok(false);
         }
+    }
+    // Debouncing is normally handled by the event queue; reconciliation can also
+    // discover a file during a copy, before the close/write notification arrives.
+    if recently_modified(mtime) {
+        jobs.enqueue_change(
+            &job.folder_id,
+            path.parent().context("original has no parent")?,
+            2,
+        )?;
+        return Ok(false);
     }
     let result: Result<bool> = (|| {
         let processor = MediaProcessor::new();
@@ -226,42 +257,41 @@ fn process_file(
             "contentFingerprint": hash, "metadataFingerprint": metadata.fingerprint(path),
             "rating": metadata.rating, "flagState":"unflagged", "tags":[], "createdAt":now, "updatedAt":now,
         });
-        if let Some(capture_time) = metadata.capture_time {
+        if let Some(capture_time) = &metadata.capture_time {
             snapshot["captureTime"] = json!(capture_time);
         }
         let file = json!({"contentHash":hash,"sizeBytes":size,"role":if media::is_raw(path){"raw_original"}else{"jpeg_original"}});
-        asset_id = store.ingest_original(&job.library_id, text, &file, &snapshot)?;
-        // Imported historical previews already represent these originals. A new
-        // worker index should not trigger a complete RAW decode of the library.
-        if previous.as_ref().is_none_or(|state| state.version == hash) {
-            let asset = store.asset(&job.library_id, &asset_id)?;
-            if let Some(object) = asset["_preview"].get("objectRef")
-                && previews.contains(object)?
-            {
-                return Ok(true);
-            }
-        }
-        if stopped(jobs, job, stop)? {
-            return Ok(false);
-        }
-        let scratch = tempfile::tempdir().context("create preview staging directory")?;
-        let target: PathBuf = scratch.path().join("preview.heic");
-        let generated = processor.generate_preview(path, &target)?;
-        if stopped(jobs, job, stop)? {
-            return Ok(false);
-        }
+        let evidence = VersionEvidence {
+            visual_hash: media::jpeg_visual_hash(path, &metadata)?,
+            width: metadata.width,
+            height: metadata.height,
+            edited: metadata.edited && !media::is_raw(path),
+            camera_serial: metadata.camera_serial.clone(),
+            capture_original: metadata.capture_original.clone(),
+        };
         ensure!(
             file_stamp(path)? == (size, mtime),
-            "original changed during preview generation"
+            "original changed during identity extraction"
         );
-        let object =
-            previews.put_generated(&job.library_id, &asset_id, &generated.sha256, &target)?;
-        let derivative = json!({"assetID":asset_id,"role":"preview","fileObject":{"contentHash":generated.sha256,"sizeBytes":generated.size_bytes,"role":"preview"},"objectRef":object,"pixelSize":{"width":generated.width,"height":generated.height}});
-        store.declare_generated_preview(&job.library_id, &asset_id, &derivative)?;
+        ensure!(
+            media::sidecar_stamp(path)? == sidecars,
+            "sidecar changed during metadata extraction"
+        );
+        asset_id = store.ingest_original_with_evidence(
+            &job.library_id,
+            text,
+            &file,
+            &snapshot,
+            &evidence,
+        )?;
+        ensure_default_preview(store, jobs, previews, job, &asset_id, stop)?;
         Ok(true)
     })();
     match &result {
-        Ok(true) => jobs.record_file(&job.folder_id, text, size, mtime, &asset_id, &hash, None)?,
+        Ok(true) => {
+            jobs.record_file(&job.folder_id, text, size, mtime, &asset_id, &hash, None)?;
+            jobs.record_metadata_stamp(&job.folder_id, text, &sidecars)?;
+        }
         Err(error) => jobs.record_file(
             &job.folder_id,
             text,
@@ -274,6 +304,59 @@ fn process_file(
         Ok(false) => {}
     }
     result
+}
+
+fn recently_modified(mtime_ns: i64) -> bool {
+    let now = Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
+    (0..2_000_000_000).contains(&now.saturating_sub(mtime_ns))
+}
+
+fn ensure_default_preview(
+    store: &Store,
+    jobs: &Jobs,
+    previews: &PreviewStorage,
+    job: &Job,
+    asset_id: &str,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let asset = store.asset(&job.library_id, asset_id)?;
+    if let Some(object) = asset["_preview"].get("objectRef")
+        && previews.contains(object)?
+    {
+        return Ok(());
+    }
+    let Some(selected) = store.default_version(&job.library_id, asset_id)? else {
+        return Ok(());
+    };
+    let source = Path::new(&selected.path);
+    jobs.validate_path(source.parent().context("default original has no parent")?)?;
+    let stamp = file_stamp(source)?;
+    if stopped(jobs, job, stop)? {
+        return Ok(());
+    }
+    ensure!(
+        media::sha256_file(source)? == selected.content_hash,
+        "default original changed before preview generation"
+    );
+    let scratch = tempfile::tempdir().context("create preview staging directory")?;
+    let target: PathBuf = scratch.path().join("preview.heic");
+    let generated = MediaProcessor::new().generate_preview(source, &target)?;
+    if stopped(jobs, job, stop)? {
+        return Ok(());
+    }
+    ensure!(
+        file_stamp(source)? == stamp,
+        "default original changed during preview generation"
+    );
+    let object = previews.put_generated(&job.library_id, asset_id, &generated.sha256, &target)?;
+    let derivative = json!({"assetID":asset_id,"role":"preview","fileObject":{"contentHash":generated.sha256,"sizeBytes":generated.size_bytes,"role":"preview"},"objectRef":object,"pixelSize":{"width":generated.width,"height":generated.height}});
+    store.declare_generated_preview_for_version(
+        &job.library_id,
+        asset_id,
+        &selected.content_hash,
+        &derivative,
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

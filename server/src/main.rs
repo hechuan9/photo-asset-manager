@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
         jobs.root(),
         env::var("KEEPS_ORIGINAL_ROOT_SOURCES").ok().as_deref(),
     )?;
+    let library_id = env::var("KEEPS_LIBRARY_ID").unwrap_or_else(|_| "local-library".into());
     if let Ok(library) = env::var("KEEPS_LIBRARY_ID") {
         if library.trim().is_empty() {
             bail!("KEEPS_LIBRARY_ID cannot be empty");
@@ -87,6 +88,10 @@ async fn main() -> Result<()> {
     let address = env::var("KEEPS_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:2283".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
     let stop = Arc::new(AtomicBool::new(false));
+    let mut watcher = tokio::task::spawn_blocking({
+        let (jobs, stop) = (jobs.clone(), stop.clone());
+        move || keeps_server::watcher::run(jobs, stop)
+    });
     let mut worker = tokio::task::spawn_blocking({
         let (store, jobs, previews, stop) =
             (store.clone(), jobs.clone(), previews.clone(), stop.clone());
@@ -102,6 +107,7 @@ async fn main() -> Result<()> {
             previews,
             jobs,
             access_token,
+            library_id,
             original_root_names,
         })),
     )
@@ -113,8 +119,9 @@ async fn main() -> Result<()> {
         }
     });
     tokio::select! {
-        result=http=>{stop.store(true,Ordering::Relaxed);result?;worker.await??;}
-        result=&mut worker=>{result??;if !stop.load(Ordering::Relaxed) {bail!("NAS worker exited unexpectedly");}}
+        result=http=>{stop.store(true,Ordering::Relaxed);result?;worker.await??;watcher.await??;}
+        result=&mut watcher=>{let stopping=stop.swap(true,Ordering::Relaxed);result??;worker.await??;if !stopping {bail!("NAS watcher exited unexpectedly");}}
+        result=&mut worker=>{let stopping=stop.swap(true,Ordering::Relaxed);result??;watcher.await??;if !stopping {bail!("NAS worker exited unexpectedly");}}
     }
     Ok(())
 }

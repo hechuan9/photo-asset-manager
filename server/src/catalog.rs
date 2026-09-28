@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
-const VERSION: i64 = 2;
+const VERSION: i64 = 3;
 const DIRECTORY_ASSET_SET: &str =
     " AND a.id IN (SELECT f.asset_id FROM catalog_paths f WHERE f.library_id=? AND ";
 const SCHEMA: &str = r#"
@@ -34,6 +34,12 @@ pub fn ensure_schema(db: &mut Connection, allow_migrate: bool) -> Result<()> {
         )?;
         db.prepare("SELECT library_id,path,asset_id,content_hash,role FROM catalog_paths LIMIT 0")?;
         db.prepare("SELECT library_id,path FROM catalog_hidden_directories LIMIT 0")?;
+        db.prepare("SELECT library_id,asset_id,content_hash,visual_hash,capture_key,width,height,priority,evidence FROM catalog_versions LIMIT 0")?;
+        db.prepare("SELECT library_id,path,asset_id,content_hash,available FROM catalog_version_paths LIMIT 0")?;
+        db.prepare(
+            "SELECT library_id,asset_id,content_hash,user_selected FROM catalog_defaults LIMIT 0",
+        )?;
+        db.prepare("SELECT library_id,revision FROM catalog_version_revision LIMIT 0")?;
         return Ok(());
     }
     ensure!(
@@ -67,7 +73,10 @@ pub fn ensure_schema(db: &mut Connection, allow_migrate: bool) -> Result<()> {
             tracing::info!(events = count, "NAS catalog replay complete");
         }
     }
-    tx.execute_batch("CREATE TABLE catalog_hidden_directories(library_id TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(library_id,path));")?;
+    if version < 2 {
+        tx.execute_batch("CREATE TABLE catalog_hidden_directories(library_id TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(library_id,path));")?;
+    }
+    crate::versions::migrate(&tx)?;
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
     Ok(())
@@ -613,21 +622,32 @@ impl Store {
         file: &Value,
         snapshot: &Value,
     ) -> Result<String> {
+        self.ingest_original_with_evidence(lib, path, file, snapshot, &Default::default())
+    }
+    pub fn ingest_original_with_evidence(
+        &self,
+        lib: &str,
+        path: &str,
+        file: &Value,
+        snapshot: &Value,
+        evidence: &crate::versions::VersionEvidence,
+    ) -> Result<String> {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let hash = text(file, "contentHash")?;
-        let fingerprint = text(snapshot, "metadataFingerprint")?;
-        let by_hash: Option<String> = tx
-            .query_row(
-                "SELECT asset_id FROM catalog_files WHERE library_id=? AND content_hash=? LIMIT 1",
-                params![lib, hash],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let matched = if by_hash.is_some() {
-            by_hash
+        let directory = std::path::Path::new(path)
+            .parent()
+            .context("original has no parent directory")?
+            .to_str()
+            .context("original directory must be UTF-8")?;
+        let prefix = format!("{}/", directory.trim_end_matches('/'));
+        // Missing version paths retain identity when an original reappears.
+        let by_path: Option<String> = tx.query_row("SELECT asset_id FROM catalog_paths WHERE library_id=?1 AND path=?2 AND content_hash=?3 UNION ALL SELECT asset_id FROM catalog_version_paths WHERE library_id=?1 AND path=?2 AND content_hash=?3 LIMIT 1",params![lib,path,hash],|r|r.get(0)).optional()?;
+        let matched = if by_path.is_some() {
+            by_path
         } else {
-            tx.query_row("SELECT id FROM catalog_assets WHERE library_id=? AND (content_hash=? OR fingerprint=?) ORDER BY CASE WHEN content_hash=? THEN 0 ELSE 1 END,id LIMIT 1",params![lib,hash,fingerprint,hash],|r|r.get(0)).optional()?
+            let by_hash: Option<String> = tx.query_row("SELECT c.asset_id FROM (SELECT asset_id FROM catalog_files WHERE library_id=?1 AND content_hash=?3 AND role IN ('jpeg_original','raw_original') UNION SELECT id FROM catalog_assets WHERE library_id=?1 AND content_hash=?3) c WHERE EXISTS(SELECT 1 FROM catalog_paths p WHERE p.library_id=?1 AND p.asset_id=c.asset_id AND p.content_hash=?3 AND p.role IN ('jpeg_original','raw_original') AND substr(p.path,1,length(?2))=?2 AND instr(substr(p.path,length(?2)+1),'/')=0) ORDER BY c.asset_id LIMIT 1",params![lib,prefix,hash],|r|r.get(0)).optional()?;
+            by_hash.or(crate::versions::exact_match(&tx, lib, &prefix, evidence)?)
         };
         let id = matched
             .clone()
@@ -667,12 +687,43 @@ impl Store {
             }
         }
         tx.execute("INSERT INTO catalog_paths VALUES(?,?,?,?,?) ON CONFLICT(library_id,path) DO UPDATE SET asset_id=excluded.asset_id,content_hash=excluded.content_hash,role=excluded.role",params![lib,path,id,hash,text(file,"role")?])?;
+        crate::versions::register(&tx, lib, &id, path, file, snapshot, evidence)?;
         tx.commit()?;
         Ok(id)
     }
     pub fn declare_generated_preview(&self, lib: &str, id: &str, derivative: &Value) -> Result<()> {
+        self.declare_preview(lib, id, None, derivative).map(|_| ())
+    }
+    pub fn declare_generated_preview_for_version(
+        &self,
+        lib: &str,
+        id: &str,
+        hash: &str,
+        derivative: &Value,
+    ) -> Result<bool> {
+        self.declare_preview(lib, id, Some(hash), derivative)
+    }
+    fn declare_preview(
+        &self,
+        lib: &str,
+        id: &str,
+        hash: Option<&str>,
+        derivative: &Value,
+    ) -> Result<bool> {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(hash) = hash {
+            let selected: Option<String> = tx
+                .query_row(
+                    "SELECT content_hash FROM catalog_defaults WHERE library_id=? AND asset_id=?",
+                    params![lib, id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if selected.as_deref() != Some(hash) {
+                return Ok(false);
+            }
+        }
         let current:Option<String>=tx.query_row("SELECT object_key FROM derivative_objects WHERE library_id=? AND asset_id=? AND role='preview'",params![lib,id],|r|r.get(0)).optional()?;
         if current.as_deref() != derivative["objectRef"]["key"].as_str() {
             let entity = format!(
@@ -689,7 +740,7 @@ impl Store {
             )?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
     pub fn mark_missing_under(&self, lib: &str, directory: &str) -> Result<usize> {
         let mut db = self.lock()?;
@@ -725,6 +776,7 @@ impl Store {
                 "DELETE FROM catalog_paths WHERE library_id=? AND path=?",
                 params![lib, path],
             )?;
+            crate::versions::missing_path(&tx, lib, &id, &path)?;
             let other:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM catalog_paths WHERE library_id=? AND asset_id=? AND content_hash=? AND role=?)",params![lib,id,hash,role],|r|r.get(0))?;
             if other {
                 continue;
@@ -760,6 +812,17 @@ mod tests {
         let file = json!({"contentHash":"photo-hash","sizeBytes":100,"role":"jpeg_original"});
         let asset = snapshot();
         let id = store.ingest_original("lib", "/private/photo.jpg", &file, &asset)?;
+        // Preserve the historical cross-directory association without creating new ones.
+        store.lock()?.execute(
+            "INSERT INTO catalog_paths VALUES(?,?,?,?,?)",
+            params![
+                "lib",
+                "/public/photo.jpg",
+                id,
+                "photo-hash",
+                "jpeg_original"
+            ],
+        )?;
         assert_eq!(
             store.ingest_original("lib", "/public/photo.jpg", &file, &asset)?,
             id
@@ -802,7 +865,7 @@ mod tests {
         );
         drop(store);
         let db = Connection::open(&path)?;
-        db.execute_batch("DROP TABLE catalog_hidden_directories; PRAGMA user_version=1;")?;
+        db.execute_batch("DROP TABLE catalog_hidden_directories; DROP TABLE catalog_versions; DROP TABLE catalog_version_paths; DROP TABLE catalog_defaults; PRAGMA user_version=1;")?;
         drop(db);
         assert!(Store::open(&path, false, Default::default()).is_err());
         let store = Store::open(&path, true, Default::default())?;

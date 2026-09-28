@@ -1,8 +1,13 @@
 use anyhow::{Context, Result, bail, ensure};
-use chrono::{Local, NaiveDateTime, SecondsFormat, TimeZone, Utc};
+use chrono::{DateTime, Local, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{fs::File, io::Read, path::Path, process::Command};
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 const RAW_EXTENSIONS: &[&str] = &[
     "3fr", "ari", "arw", "bay", "cr2", "cr3", "crw", "dcr", "dng", "erf", "fff", "iiq", "k25",
@@ -16,7 +21,8 @@ pub fn is_raw(path: &Path) -> bool {
 
 pub fn is_photo(path: &Path) -> bool {
     is_raw(path)
-        || ["jpg", "jpeg", "heic", "heif", "png", "tif", "tiff"].contains(&extension(path).as_str())
+        || ["jpg", "jpeg", "heic", "heif", "hif", "png", "tif", "tiff"]
+            .contains(&extension(path).as_str())
 }
 
 fn extension(path: &Path) -> String {
@@ -33,6 +39,13 @@ pub struct Metadata {
     pub camera_model: String,
     pub lens_model: String,
     pub rating: i64,
+    pub camera_serial: String,
+    pub capture_original: String,
+    pub width: i64,
+    pub height: i64,
+    pub edited: bool,
+    pub orientation: i64,
+    pub color_space: String,
 }
 
 impl Metadata {
@@ -122,20 +135,21 @@ impl MediaProcessor {
             .with_context(|| format!("resolving {}", path.display()))?;
         let tags = read_tags(&path)?;
         let text = |key: &str| tags[key].as_str().unwrap_or_default().to_owned();
-        let capture_time = tags["EXIF:DateTimeOriginal"]
+        let capture_original = tags["Composite:SubSecDateTimeOriginal"]
             .as_str()
+            .or_else(|| tags["EXIF:DateTimeOriginal"].as_str())
+            .unwrap_or_default();
+        let capture_time = tags["Composite:SubSecDateTimeOriginal"]
+            .as_str()
+            .or_else(|| tags["EXIF:DateTimeOriginal"].as_str())
             .map(parse_capture_time)
             .transpose()?;
         let mut rating = rating(&tags);
         if rating.is_none() {
-            let mut appended = path.as_os_str().to_os_string();
-            appended.push(".xmp");
-            for candidate in [path.with_extension("xmp"), appended.into()] {
-                if candidate.is_file() {
-                    rating = rating_from_sidecar(&candidate)?;
-                    if rating.is_some() {
-                        break;
-                    }
+            for candidate in sidecars(&path)? {
+                rating = rating_from_sidecar(&candidate)?;
+                if rating.is_some() {
+                    break;
                 }
             }
         }
@@ -145,6 +159,16 @@ impl MediaProcessor {
             camera_model: text("EXIF:Model"),
             lens_model: text("EXIF:LensModel"),
             rating: rating.unwrap_or(0),
+            camera_serial: text("EXIF:BodySerialNumber"),
+            capture_original: capture_original.to_owned(),
+            width: image_dimension(&tags, "ImageWidth"),
+            height: image_dimension(&tags, "ImageHeight"),
+            edited: tags["XMP:HasSettings"].as_bool().unwrap_or(false)
+                || tags["XMP:HasSettings"]
+                    .as_str()
+                    .is_some_and(|v| v.eq_ignore_ascii_case("true")),
+            orientation: tags["EXIF:Orientation"].as_i64().unwrap_or(1),
+            color_space: tags["EXIF:ColorSpace"].to_string(),
         })
     }
 
@@ -180,7 +204,7 @@ impl MediaProcessor {
                 source.display()
             );
             decoded.as_path()
-        } else if ["heic", "heif"].contains(&extension(&source).as_str()) {
+        } else if ["heic", "heif", "hif"].contains(&extension(&source).as_str()) {
             // 100 MP 10-bit Hasselblad images exceed libheif's default 512 MiB block limit.
             // The subprocess instead has an OS address-space limit and a wall-clock deadline.
             run(Command::new("heif-convert")
@@ -271,6 +295,13 @@ fn read_tags(path: &Path) -> Result<Value> {
             "-G0",
             "-n",
             "-DateTimeOriginal",
+            "-SubSecDateTimeOriginal",
+            "-BodySerialNumber",
+            "-ImageWidth",
+            "-ImageHeight",
+            "-Orientation",
+            "-ColorSpace",
+            "-HasSettings",
             "-Make",
             "-Model",
             "-LensModel",
@@ -308,20 +339,138 @@ fn rating(tags: &Value) -> Option<i64> {
     .map(|value: i64| value.clamp(0, 5))
 }
 
+fn sidecars(path: &Path) -> Result<Vec<PathBuf>> {
+    let mut result = Vec::new();
+    for extension in ["xmp", "XMP"] {
+        let mut appended = path.as_os_str().to_os_string();
+        appended.push(format!(".{extension}"));
+        for candidate in [path.with_extension(extension), PathBuf::from(appended)] {
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(info) if info.file_type().is_file() => result.push(candidate),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("stat sidecar {}", candidate.display()));
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+pub fn sidecar_stamp(path: &Path) -> Result<String> {
+    let mut entries = Vec::new();
+    for candidate in sidecars(path)? {
+        let info = std::fs::symlink_metadata(&candidate)
+            .with_context(|| format!("stat sidecar {}", candidate.display()))?;
+        entries.push(format!(
+            "{}:{}:{}",
+            candidate.display(),
+            info.len(),
+            info.modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+    }
+    Ok(entries.join("|"))
+}
+
 fn rating_from_sidecar(path: &Path) -> Result<Option<i64>> {
     Ok(rating(&read_tags(path)?))
 }
 
+fn image_dimension(tags: &Value, name: &str) -> i64 {
+    ["File", "PNG", "QuickTime", "EXIF"]
+        .iter()
+        .find_map(|group| tags[format!("{group}:{name}")].as_i64())
+        .unwrap_or(0)
+}
+
 fn parse_capture_time(value: &str) -> Result<String> {
-    let naive = NaiveDateTime::parse_from_str(value, "%Y:%m:%d %H:%M:%S")
+    // Composite timestamps retain the camera's fractional seconds and explicit offset.
+    if let Ok(date) = DateTime::parse_from_str(value, "%Y:%m:%d %H:%M:%S%.f%:z") {
+        return Ok(date
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::AutoSi, true));
+    }
+    let naive = NaiveDateTime::parse_from_str(value, "%Y:%m:%d %H:%M:%S%.f")
         .with_context(|| format!("invalid EXIF capture time {value:?}"))?;
     let date = Local
         .from_local_datetime(&naive)
-        .earliest()
-        .with_context(|| format!("EXIF capture time falls in a local timezone gap: {value}"))?;
+        .single()
+        .with_context(|| {
+            format!("EXIF capture time is ambiguous or falls in a local timezone gap: {value}")
+        })?;
     Ok(date
         .with_timezone(&Utc)
-        .to_rfc3339_opts(SecondsFormat::Millis, true))
+        .to_rfc3339_opts(SecondsFormat::AutoSi, true))
+}
+
+/// Exact JPEG compressed image identity, excluding EXIF/XMP/IPTC text metadata.
+/// Rendering orientation, color space, ICC and Adobe transform segments remain evidence.
+pub fn jpeg_visual_hash(path: &Path, metadata: &Metadata) -> Result<Option<String>> {
+    if !["jpg", "jpeg"].contains(&extension(path).as_str()) {
+        return Ok(None);
+    }
+    let mut input = File::open(path).with_context(|| format!("open JPEG {}", path.display()))?;
+    jpeg_payload_hash(&mut input, metadata)
+        .map(Some)
+        .with_context(|| format!("read JPEG image identity {}", path.display()))
+}
+
+fn jpeg_payload_hash(input: &mut impl Read, metadata: &Metadata) -> Result<String> {
+    let mut marker = [0u8; 2];
+    input.read_exact(&mut marker)?;
+    ensure!(marker == [0xff, 0xd8], "missing JPEG SOI");
+    let mut digest = Sha256::new();
+    digest.update(format!(
+        "jpeg-image-v1|{}|{}|",
+        metadata.orientation, metadata.color_space
+    ));
+    loop {
+        input.read_exact(&mut marker)?;
+        while marker == [0xff, 0xff] {
+            input.read_exact(&mut marker[1..])?;
+        }
+        ensure!(marker[0] == 0xff, "invalid JPEG marker");
+        if marker[1] == 0xda {
+            digest.update(marker);
+            let mut buffer = [0u8; 128 * 1024];
+            let mut tail = [0u8; 2];
+            let mut length = 0usize;
+            let mut end_seen = false;
+            loop {
+                let count = input.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                digest.update(&buffer[..count]);
+                for &byte in &buffer[..count] {
+                    tail = [tail[1], byte];
+                    end_seen |= tail == [0xff, 0xd9];
+                }
+                length += count;
+            }
+            ensure!(length >= 4 && end_seen, "incomplete JPEG scan");
+            return Ok(format!("jpeg-v1:{:x}", digest.finalize()));
+        }
+        ensure!(
+            !matches!(marker[1], 0x00 | 0xd8 | 0xd9 | 0xff),
+            "unexpected JPEG marker"
+        );
+        let mut size = [0u8; 2];
+        input.read_exact(&mut size)?;
+        let length = u16::from_be_bytes(size) as usize;
+        ensure!(length >= 2, "invalid JPEG segment length");
+        let mut segment = vec![0u8; length - 2];
+        input.read_exact(&mut segment)?;
+        if !matches!(marker[1], 0xe1 | 0xed | 0xfe) {
+            digest.update(marker);
+            digest.update(size);
+            digest.update(segment);
+        }
+    }
 }
 
 pub fn sha256_file(path: &Path) -> Result<String> {
@@ -353,6 +502,7 @@ mod tests {
             camera_model: "R5".into(),
             lens_model: "50mm".into(),
             rating: 5,
+            ..Default::default()
         };
         assert_eq!(
             metadata.fingerprint(Path::new("/photos/IMG_123-Edited (2).CR3")),
@@ -364,6 +514,74 @@ mod tests {
             rating(&serde_json::json!({"XMP:Rating":-1, "IPTC:Urgency":5})),
             Some(0)
         );
+    }
+
+    #[test]
+    fn sidecar_stamp_detects_changes_and_ignores_symlinks() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let photo = dir.path().join("a.jpg");
+        assert_eq!(sidecar_stamp(&photo)?, "");
+        std::fs::write(dir.path().join("a.xmp"), b"first")?;
+        let first = sidecar_stamp(&photo)?;
+        std::fs::write(dir.path().join("a.xmp"), b"changed and larger")?;
+        assert_ne!(first, sidecar_stamp(&photo)?);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.path().join("a.xmp"), dir.path().join("b.xmp"))?;
+            assert_eq!(sidecar_stamp(&dir.path().join("b.jpg"))?, "");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn capture_time_keeps_subseconds_and_offset() -> Result<()> {
+        assert_eq!(
+            parse_capture_time("2025:11:24 20:02:35.123456-05:00")?,
+            "2025-11-25T01:02:35.123456Z"
+        );
+        assert_ne!(
+            parse_capture_time("2025:11:24 20:02:35.100-05:00")?,
+            parse_capture_time("2025:11:24 20:02:35.200-05:00")?
+        );
+        assert!(parse_capture_time("not-a-date").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn jpeg_identity_ignores_text_metadata_but_keeps_image_and_rendering() -> Result<()> {
+        fn fixture(text: &[u8], pixels: u8, profile: u8) -> Vec<u8> {
+            let mut bytes = vec![0xff, 0xd8, 0xff, 0xe1];
+            bytes.extend_from_slice(&((text.len() + 2) as u16).to_be_bytes());
+            bytes.extend_from_slice(text);
+            bytes.extend_from_slice(&[
+                0xff, 0xe2, 0, 3, profile, 0xff, 0xda, 0, 2, pixels, 0xff, 0xd9,
+            ]);
+            bytes
+        }
+        let metadata = Metadata {
+            orientation: 1,
+            ..Default::default()
+        };
+        let hash = |bytes: Vec<u8>, m: &Metadata| jpeg_payload_hash(&mut bytes.as_slice(), m);
+        let original = hash(fixture(b"original", 42, 1), &metadata)?;
+        assert_eq!(
+            original,
+            hash(fixture(b"different rating and name", 42, 1), &metadata)?
+        );
+        assert_ne!(original, hash(fixture(b"original", 43, 1), &metadata)?);
+        assert_ne!(original, hash(fixture(b"original", 42, 2), &metadata)?);
+        assert_ne!(
+            original,
+            hash(
+                fixture(b"original", 42, 1),
+                &Metadata {
+                    orientation: 6,
+                    ..metadata
+                }
+            )?
+        );
+        assert!(hash(vec![0xff, 0xd8, 0xff, 0xda, 0, 2], &Metadata::default()).is_err());
+        Ok(())
     }
 
     #[test]

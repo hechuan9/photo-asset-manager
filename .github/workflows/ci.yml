@@ -68,3 +68,4 @@ jobs:
       - run: python -m pytest
         working-directory: control_plane
       - run: python -m unittest discover -s scripts -p 'test_migrate_nas_paths.py'
+      - run: python -m unittest discover -s scripts -p 'test_merge_tracked_folders.py'

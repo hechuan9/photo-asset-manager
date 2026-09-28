@@ -26,6 +26,7 @@ pub struct Job {
     #[serde(rename = "libraryID")]
     pub library_id: String,
     pub path: String,
+    pub refresh_metadata: bool,
     pub status: String,
     pub error: Option<String>,
     pub processed: i64,
@@ -37,6 +38,7 @@ pub struct Job {
 }
 #[derive(Debug, Clone)]
 pub struct FileState {
+    pub metadata_stamp: String,
     pub size: i64,
     pub mtime_ns: i64,
     pub asset_id: String,
@@ -70,9 +72,10 @@ fn job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
         current_path: row.get(9)?,
         started_at: row.get(10)?,
         finished_at: row.get(11)?,
+        refresh_metadata: row.get(12)?,
     })
 }
-const JOB_SELECT: &str = "SELECT j.id,j.folder_id,f.library_id,f.path,j.status,j.error,j.processed,j.skipped,j.failed,j.current_path,j.started_at,j.finished_at FROM jobs j JOIN folders f ON f.id=j.folder_id";
+const JOB_SELECT: &str = "SELECT j.id,j.folder_id,f.library_id,COALESCE(j.scope_path,f.path),j.status,j.error,j.processed,j.skipped,j.failed,j.current_path,j.started_at,j.finished_at,j.refresh_metadata FROM jobs j JOIN folders f ON f.id=j.folder_id";
 
 impl Jobs {
     pub fn root(&self) -> &Path {
@@ -103,9 +106,35 @@ impl Jobs {
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
           CREATE TABLE IF NOT EXISTS folders(id TEXT PRIMARY KEY,library_id TEXT NOT NULL,path TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,UNIQUE(library_id,path));
           CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,folder_id TEXT NOT NULL REFERENCES folders(id),status TEXT NOT NULL,error TEXT,processed INTEGER NOT NULL DEFAULT 0,skipped INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,current_path TEXT,started_at INTEGER,finished_at INTEGER,created_at INTEGER NOT NULL DEFAULT(unixepoch()),updated_at INTEGER NOT NULL DEFAULT(unixepoch()));
-          CREATE UNIQUE INDEX IF NOT EXISTS jobs_live ON jobs(folder_id) WHERE status IN ('pending','running');
           CREATE TABLE IF NOT EXISTS files(folder_id TEXT NOT NULL REFERENCES folders(id),path TEXT NOT NULL,size INTEGER NOT NULL,mtime_ns INTEGER NOT NULL,asset_id TEXT NOT NULL,version TEXT NOT NULL,error TEXT,PRIMARY KEY(folder_id,path));
           UPDATE jobs SET status='pending',updated_at=unixepoch() WHERE status='running';")?;
+        let columns: Vec<String> = db
+            .prepare("PRAGMA table_info(jobs)")?
+            .query_map([], |row| row.get(1))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (name, definition) in [
+            ("scope_path", "TEXT"),
+            ("refresh_metadata", "INTEGER NOT NULL DEFAULT 0"),
+            ("rerun", "INTEGER NOT NULL DEFAULT 0"),
+            ("available_at", "INTEGER NOT NULL DEFAULT 0"),
+            ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !columns.iter().any(|column| column == name) {
+                db.execute_batch(&format!("ALTER TABLE jobs ADD COLUMN {name} {definition}"))?;
+            }
+        }
+        let file_columns: Vec<String> = db
+            .prepare("PRAGMA table_info(files)")?
+            .query_map([], |row| row.get(1))?
+            .collect::<rusqlite::Result<_>>()?;
+        if !file_columns.iter().any(|column| column == "metadata_stamp") {
+            db.execute_batch(
+                "ALTER TABLE files ADD COLUMN metadata_stamp TEXT NOT NULL DEFAULT ''",
+            )?;
+        }
+        db.execute_batch("DROP INDEX IF EXISTS jobs_live;
+            UPDATE jobs SET scope_path=(SELECT path FROM folders WHERE id=jobs.folder_id) WHERE scope_path IS NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS jobs_live_scope ON jobs(folder_id,scope_path) WHERE status IN ('pending','running');")?;
         Ok(Self {
             db: Mutex::new(db),
             root,
@@ -176,25 +205,54 @@ impl Jobs {
         Ok(found)
     }
     pub fn enqueue_scan(&self, folder_id: &str) -> Result<Job> {
-        let db = self.db.lock().unwrap();
-        let active = db
-            .query_row("SELECT active FROM folders WHERE id=?1", [folder_id], |r| {
-                r.get::<_, bool>(0)
-            })
-            .optional()?
-            .unwrap_or(false);
-        if !active {
-            bail!("folder is missing or inactive");
-        }
-        db.execute(
-            "INSERT OR IGNORE INTO jobs(id,folder_id,status) VALUES(?1,?2,'pending')",
-            params![Uuid::new_v4().to_string(), folder_id],
-        )?;
-        Ok(db.query_row(
-            &format!("{JOB_SELECT} WHERE j.folder_id=?1 AND j.status IN ('pending','running')"),
+        let path = self.db.lock().unwrap().query_row(
+            "SELECT path FROM folders WHERE id=?1",
             [folder_id],
-            job,
-        )?)
+            |r| r.get::<_, String>(0),
+        )?;
+        self.enqueue_scope(folder_id, Path::new(&path), 0, false)
+    }
+    /// A running scan receives another pass instead of swallowing a concurrent event.
+    pub fn enqueue_change(
+        &self,
+        folder_id: &str,
+        path: &Path,
+        debounce_seconds: i64,
+    ) -> Result<Job> {
+        self.enqueue_scope(folder_id, path, debounce_seconds, true)
+    }
+    pub fn enqueue_reconcile_scope(&self, folder_id: &str, path: &Path) -> Result<Job> {
+        self.enqueue_scope(folder_id, path, 0, false)
+    }
+    fn enqueue_scope(
+        &self,
+        folder_id: &str,
+        path: &Path,
+        debounce_seconds: i64,
+        refresh_metadata: bool,
+    ) -> Result<Job> {
+        let path = self.validate_path(path)?;
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let tracked: Option<String> = tx
+            .query_row(
+                "SELECT path FROM folders WHERE id=?1 AND active=1",
+                [folder_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let tracked = tracked.context("folder is missing or inactive")?;
+        if !path.starts_with(&tracked) {
+            bail!("scan scope must be within tracked folder");
+        }
+        let scope = path.to_str().context("scan scope must be UTF-8")?;
+        let available = chrono::Utc::now().timestamp() + debounce_seconds.max(0);
+        tx.execute("INSERT OR IGNORE INTO jobs(id,folder_id,scope_path,status,available_at) VALUES(?1,?2,?3,'pending',?4)",
+            params![Uuid::new_v4().to_string(), folder_id, scope, available])?;
+        tx.execute("UPDATE jobs SET refresh_metadata=MAX(refresh_metadata,?4),rerun=CASE WHEN status='running' THEN 1 ELSE rerun END,available_at=MAX(available_at,?3),updated_at=unixepoch() WHERE folder_id=?1 AND scope_path=?2 AND status IN ('pending','running')", params![folder_id,scope,available,refresh_metadata])?;
+        let result = tx.query_row(&format!("{JOB_SELECT} WHERE j.folder_id=?1 AND j.scope_path=?2 AND j.status IN ('pending','running')"), params![folder_id,scope],job)?;
+        tx.commit()?;
+        Ok(result)
     }
     pub fn jobs(&self, limit: usize) -> Result<Vec<Job>> {
         let db = self.db.lock().unwrap();
@@ -207,20 +265,23 @@ impl Jobs {
     }
     pub fn retry(&self, id: &str) -> Result<Job> {
         let db = self.db.lock().unwrap();
-        let changed = db.execute("UPDATE jobs SET status='pending',error=NULL,processed=0,skipped=0,failed=0,current_path=NULL,started_at=NULL,finished_at=NULL,updated_at=unixepoch() WHERE id=?1 AND status='failed' AND EXISTS(SELECT 1 FROM folders WHERE folders.id=jobs.folder_id AND active=1)",[id])?;
+        let changed = db.execute("UPDATE jobs SET status='pending',attempts=0,available_at=0,error=NULL,processed=0,skipped=0,failed=0,current_path=NULL,started_at=NULL,finished_at=NULL,updated_at=unixepoch() WHERE id=?1 AND status='failed' AND EXISTS(SELECT 1 FROM folders WHERE folders.id=jobs.folder_id AND active=1)",[id])?;
         if changed == 0 {
             bail!("only failed jobs of active folders can be retried");
         }
         Ok(db.query_row(&format!("{JOB_SELECT} WHERE j.id=?1"), [id], job)?)
     }
+    pub fn has_pending_changes(&self, excluding_id: &str) -> Result<bool> {
+        Ok(self.db.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM jobs j JOIN folders f ON f.id=j.folder_id WHERE j.refresh_metadata=1 AND j.available_at<=unixepoch() AND f.active=1 AND ((j.id<>?1 AND j.status='pending') OR (j.id=?1 AND j.status='running' AND j.rerun=1)))", [excluding_id], |row| row.get(0))?)
+    }
     pub fn claim_next(&self) -> Result<Option<Job>> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
-        let next = tx.query_row(&format!("{JOB_SELECT} WHERE j.status='pending' AND f.active=1 ORDER BY j.created_at,j.rowid LIMIT 1"),[],job).optional()?;
+        let next = tx.query_row(&format!("{JOB_SELECT} WHERE j.status='pending' AND j.available_at<=unixepoch() AND f.active=1 ORDER BY j.refresh_metadata DESC,j.created_at,j.rowid LIMIT 1"),[],job).optional()?;
         let Some(mut next) = next else {
             return Ok(None);
         };
-        tx.execute("UPDATE jobs SET status='running',processed=0,skipped=0,failed=0,current_path=NULL,started_at=unixepoch(),finished_at=NULL,updated_at=unixepoch() WHERE id=?1",[&next.id])?;
+        tx.execute("UPDATE jobs SET status='running',rerun=0,processed=0,skipped=0,failed=0,current_path=NULL,started_at=unixepoch(),finished_at=NULL,updated_at=unixepoch() WHERE id=?1",[&next.id])?;
         tx.commit()?;
         next.status = "running".into();
         next.processed = 0;
@@ -232,7 +293,12 @@ impl Jobs {
         Ok(Some(next))
     }
     pub fn finish(&self, id: &str, error: Option<&str>) -> Result<()> {
-        self.db.lock().unwrap().execute("UPDATE jobs SET status=?2,error=?3,current_path=NULL,finished_at=unixepoch(),updated_at=unixepoch() WHERE id=?1 AND status='running'",params![id,if error.is_some(){"failed"}else{"completed"},error])?;
+        self.db.lock().unwrap().execute("UPDATE jobs SET
+            status=CASE WHEN rerun=1 OR (?2 IS NOT NULL AND attempts<3) THEN 'pending' WHEN ?2 IS NOT NULL THEN 'failed' ELSE 'completed' END,
+            available_at=CASE WHEN ?2 IS NOT NULL THEN MAX(available_at,unixepoch() + 5 * (1 << attempts)) ELSE available_at END,
+            attempts=CASE WHEN rerun=1 OR ?2 IS NULL THEN 0 ELSE attempts+1 END,
+            error=?2,current_path=NULL,finished_at=unixepoch(),updated_at=unixepoch()
+            WHERE id=?1 AND status='running'",params![id,error])?;
         Ok(())
     }
     pub fn update_progress(
@@ -258,7 +324,17 @@ impl Jobs {
             .unwrap_or(false))
     }
     pub fn file_state(&self, folder_id: &str, path: &str) -> Result<Option<FileState>> {
-        Ok(self.db.lock().unwrap().query_row("SELECT size,mtime_ns,asset_id,version,error FROM files WHERE folder_id=?1 AND path=?2",params![folder_id,path],|r|Ok(FileState {size:r.get(0)?,mtime_ns:r.get(1)?,asset_id:r.get(2)?,version:r.get(3)?,error:r.get(4)?})).optional()?)
+        Ok(self.db.lock().unwrap().query_row("SELECT size,mtime_ns,asset_id,version,error,metadata_stamp FROM files WHERE folder_id=?1 AND path=?2",params![folder_id,path],|r|Ok(FileState {size:r.get(0)?,mtime_ns:r.get(1)?,asset_id:r.get(2)?,version:r.get(3)?,error:r.get(4)?,metadata_stamp:r.get(5)?})).optional()?)
+    }
+    pub fn record_metadata_stamp(&self, folder_id: &str, path: &str, stamp: &str) -> Result<()> {
+        let changed = self.db.lock().unwrap().execute(
+            "UPDATE files SET metadata_stamp=?3 WHERE folder_id=?1 AND path=?2",
+            params![folder_id, path, stamp],
+        )?;
+        if changed == 0 {
+            bail!("file must be recorded before its metadata stamp");
+        }
+        Ok(())
     }
     #[allow(clippy::too_many_arguments)]
     pub fn record_file(
@@ -306,6 +382,48 @@ mod tests {
         assert_ne!(jobs.enqueue_scan(&folder.id).unwrap().id, a.id);
     }
     #[test]
+    fn change_during_scan_gets_another_pass_and_scopes_survive_restart() {
+        let (dir, jobs, folder) = setup();
+        let scope = jobs.root().join("child");
+        std::fs::create_dir(&scope).unwrap();
+        let queued = jobs.enqueue_change(&folder.id, &scope, 0).unwrap();
+        let running = jobs.claim_next().unwrap().unwrap();
+        assert_eq!(running.path, scope.to_str().unwrap());
+        assert_eq!(
+            jobs.enqueue_change(&folder.id, &scope, 0).unwrap().id,
+            queued.id
+        );
+        jobs.finish(&running.id, None).unwrap();
+        drop(jobs);
+        let jobs = Jobs::open(
+            &dir.path().join("jobs.sqlite"),
+            &dir.path().join("originals"),
+        )
+        .unwrap();
+        let rerun = jobs.claim_next().unwrap().unwrap();
+        assert_eq!(rerun.path, scope.to_str().unwrap());
+        jobs.finish(&rerun.id, None).unwrap();
+        assert!(jobs.claim_next().unwrap().is_none());
+        jobs.enqueue_change(&folder.id, &scope, 60).unwrap();
+        assert!(jobs.claim_next().unwrap().is_none());
+        jobs.remove_folder(&folder.id).unwrap();
+        assert!(jobs.claim_next().unwrap().is_none());
+    }
+    #[test]
+    fn root_change_interrupts_incremental_scan_and_preserves_refresh() {
+        let (_dir, jobs, folder) = setup();
+        let initial = jobs.enqueue_scan(&folder.id).unwrap();
+        let running = jobs.claim_next().unwrap().unwrap();
+        assert!(!running.refresh_metadata);
+        assert!(!jobs.has_pending_changes(&running.id).unwrap());
+        jobs.enqueue_change(&folder.id, Path::new(&folder.path), 0)
+            .unwrap();
+        assert!(jobs.has_pending_changes(&running.id).unwrap());
+        jobs.enqueue_scan(&folder.id).unwrap();
+        jobs.finish(&initial.id, None).unwrap();
+        assert!(jobs.claim_next().unwrap().unwrap().refresh_metadata);
+    }
+    #[test]
     fn removal_cancels_without_touching_originals() {
         let (dir, jobs, folder) = setup();
         let original = dir.path().join("originals/a.jpg");
@@ -326,12 +444,31 @@ mod tests {
         jobs.claim_next().unwrap();
         jobs.update_progress(&a.id, 1, 2, 3, Some("a.jpg")).unwrap();
         jobs.finish(&a.id, Some("decoder failed")).unwrap();
+        for _ in 0..3 {
+            jobs.db
+                .lock()
+                .unwrap()
+                .execute("UPDATE jobs SET available_at=0", [])
+                .unwrap();
+            jobs.claim_next().unwrap().unwrap();
+            jobs.update_progress(&a.id, 1, 2, 3, Some("a.jpg")).unwrap();
+            jobs.finish(&a.id, Some("decoder failed")).unwrap();
+        }
         let failed = jobs.jobs(1).unwrap().remove(0);
         assert_eq!((failed.processed, failed.skipped, failed.failed), (1, 2, 3));
         assert!(failed.finished_at.is_some());
         assert_eq!(jobs.retry(&a.id).unwrap().status, "pending");
         assert!(jobs.retry(&a.id).is_err());
         jobs.record_file(&folder.id, "a.jpg", 10, 100, "asset", "hash1", None)
+            .unwrap();
+        assert_eq!(
+            jobs.file_state(&folder.id, "a.jpg")
+                .unwrap()
+                .unwrap()
+                .metadata_stamp,
+            ""
+        );
+        jobs.record_metadata_stamp(&folder.id, "a.jpg", "sidecar:10:100")
             .unwrap();
         let before = jobs.file_state(&folder.id, "a.jpg").unwrap().unwrap();
         jobs.record_file(
@@ -346,6 +483,7 @@ mod tests {
         .unwrap();
         let after = jobs.file_state(&folder.id, "a.jpg").unwrap().unwrap();
         assert_ne!((before.size, before.mtime_ns), (after.size, after.mtime_ns));
+        assert_eq!(after.metadata_stamp, "sidecar:10:100");
         assert_eq!(after.version, "hash2");
         assert_eq!(after.asset_id, "asset");
         assert_eq!(after.error.as_deref(), Some("error"));

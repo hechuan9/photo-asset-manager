@@ -40,7 +40,9 @@ Rust 主要模块：
 - `api.rs`：HTTP 认证和路由。
 - `catalog.rs`：资产查询、修改及与服务器内部审计事件的衔接。
 - `jobs.rs`：目录追踪、持久化扫描任务与文件处理记录。
-- `media.rs`：原片元数据读取、指纹与预览生成。
+- `media.rs`：原片元数据读取、精确 JPEG 图像指纹与预览生成。
+- `versions.rs`：版本证据、候选查询、稳定默认版本及资料库修订号。
+- `watcher.rs`：文件系统监听、目录变化入队和监听补漏。
 - `store.rs` / `protocol.rs`：历史事件存储、协议验证、幂等和审计兼容。
 - `previews.rs`：服务端预览对象及签名 URL。
 
@@ -80,12 +82,16 @@ macOS 目录树使用 `NSViewRepresentable` 包装原生 `NSOutlineView`，由 A
 
 ## API 契约
 
-业务路由需要共享访问凭据。首期使用单一 NAS 的 Bearer 认证，不声称具备多用户或租户隔离能力。预览下载使用服务端签名 URL。
+业务路由需要共享访问凭据。首期使用单一 NAS 的 Bearer 认证，不声称具备多用户或租户隔离能力。服务仅接受配置的 `KEEPS_LIBRARY_ID`（默认 `local-library`）；鉴权后拒绝未知图库，返回 HTTP 404 / `library_not_found`，包括空库查询和目录写入。图库 ID 不是 NAS 用户名；合法但尚无照片的图库仍返回成功的空列表。预览下载使用服务端签名 URL。
 
 | API | 用途 |
 | --- | --- |
 | `GET /libraries/{libraryID}/assets` | 分页查询、目录范围、搜索、评分、旗标、颜色、标签、回收站及排序。 |
 | `GET /libraries/{libraryID}/assets/{assetID}` | 资产详情。 |
+| `GET .../assets/{assetID}/versions` | 文件版本、路径、可用性和默认版本。 |
+| `GET .../assets/{assetID}/version-candidates` | 非空拍摄时间、相机、镜头匹配的候选；不是自动合并结果。 |
+| `PUT .../assets/{assetID}/default-version` | 指定已有可用版本，body 为 contentHash；入队重建默认预览。 |
+| `GET /libraries/{libraryID}/revision` | 资料库单调修订号，供客户端按需刷新。 |
 | `PATCH /libraries/{libraryID}/assets/{assetID}` | 修改评分、旗标、颜色和标签。 |
 | `POST .../assets/{assetID}/trash` / `restore` | 修改共享回收站状态。 |
 | `GET` / `PUT /libraries/{libraryID}/hidden-directories` | 读取和修改目录隐藏标记（path、hidden），返回 paths；仅改 NAS 数据库。 |
@@ -151,6 +157,8 @@ macOS 发布构建启用 App Sandbox，只授权出站网络访问，不请求�
   },
   "entrypoints": [
     "server/src/main.rs",
+    "server/src/bin/keeps-inspect.rs",
+    "scripts/merge_tracked_folders.py",
     "server/src/api.rs",
     "shared/Package.swift",
     "shared/Sources/KeepsAPI/KeepsClient.swift",
@@ -165,6 +173,8 @@ macOS 发布构建启用 App Sandbox，只授权出站网络访问，不请求�
     "server/src/catalog.rs",
     "server/src/jobs.rs",
     "server/src/media.rs",
+    "server/src/versions.rs",
+    "server/src/watcher.rs",
     "server/src/store.rs",
     "server/src/protocol.rs",
     "server/src/previews.rs"
@@ -181,3 +191,26 @@ Catalog schema 2 新增按资料库隔离的隐藏目录标记。升级 schema 1
 ### 持续集成
 
 GitHub Actions 在 main push、PR 和手动触发时验证 Rust 服务、Apple 客户端、Python 控制平面与迁移工具，执行发布脚本测试和密钥扫描。CI 不持有发布凭据，不自动上传。发布脚本从本机 `codex-secret run app-store-connect` 接收认证环境变量，支持只读构建状态查询；归档和上传使用权限 0600 的临时私钥文件并在退出时清理。
+
+
+## 照片版本与持续索引（schema 3）
+
+一个资产可以关联多个文件内容版本，每个版本有多个物理路径；目录查询仍按资产去重。同一直接父目录内，内容哈希相同或具有精确 JPEG 图像指纹的新文件可归入同一资产；匹配证据本身须有该目录路径，不能借历史跨目录资产桥接。已有路径关联保留。JPEG 指纹跳过 EXIF/XMP/IPTC/注释，保留图像编码、方向、颜色空间、ICC 和 Adobe 颜色转换；缩略图哈希不能充当精确图像证据。拍摄时间保留亚秒与显式时区，原始时间文本和机身序列号随版本保存。没有时区时沿用服务时区，歧义时间报错。
+
+拍摄时间、相机品牌/型号、镜头必须全部非空且相同才成为元数据候选；两份都有机身序列号且不一致则排除。文件名不再用于自动归组，缺失字段不等于匹配。RAW 与导出成片、裁剪调色等视觉相似匹配目前仅有元数据候选机制，尚未实现经真实样本校准的视觉匹配器；不能宣称已自动识别人眼意义上的全部版本，历史精确重复合并由显式离线维护脚本处理；视觉相似合并与拆分尚未实现。
+
+默认优先级为用户指定、明确内嵌 XMP HasSettings 的非 RAW 成片、其他可渲染格式、RAW。同级选择后保持稳定；候选排序按像素数和哈希决定首次选择，但已经选择的同级版本不会随扫描顺序切换。默认文件全部缺失时改选仍可用版本。更换默认立即使旧预览引用失效，后台从选定原片生成预览；提交预览时再次检查默认内容哈希，拒绝过时任务覆盖。客户端详情可查看版本并指定默认；所选版本须至少有一个仍在追踪的可用位置，否则返回 409 且不修改默认。macOS/iOS 前台每 5 秒检查资料库修订号，变化才刷新，后台暂停，切换连接取消旧请求。
+
+schema 3 显式迁移只创建版本/默认/修订表，不合并、拆分或回填历史资产；已有路径和内容哈希的资产关联保留。历史资产没有版本证据时继续使用原预览。生产升级前停服并备份 catalog 与 jobs 两个 SQLite 数据库，catalog 使用 migrate 显式升级；jobs 打开时添加队列字段并恢复中断任务。schema 3 机制的 NAS 部署证据见部署文档；历史库整理仍单独执行。
+
+文件监听与媒体 worker 在同一服务进程的独立后台任务运行，SQLite 是持久化队列。监听逐层注册追踪目录，排除隐藏项、@eaDir、#recycle 和符号链接，配置变化与新增子目录自动更新监听。真实变化按受影响目录合并、防抖 2 秒入队，强制重读该范围元数据；普通周期核对同时比较原片和 XMP sidecar 的状态签名，跳过未变文件，补上停机期间仅 sidecar 改变的情况。任务运行中再次出现变化会保留下一轮，重启恢复 pending，处理失败最多自动重试三次并保留错误链。变化任务优先，全库普通扫描可在文件处理完成且运行超过 30 秒后让出给变化任务；单次媒体解码仍受已有超时约束。
+
+定期扫描保留默认 300 秒；启动、监听溢出与新增监听也补扫，事件不是唯一真源。近期仍在写入的文件推迟处理，哈希/元数据/预览生成前后检查文件状态。外部删除仅在目录可正常读取后更新缺失路径，并为替代默认版本补预览；原片永远不由服务删除、移动或覆盖。目录不可正常读取时保留旧索引并报告错误；生产验收还需覆盖挂载异常。监听数量受 NAS inotify 限额约束，注册失败记录错误并由定期核对补漏。
+
+验证入口新增 `python3 server/tests/mechanisms_smoke.py`（KEEPS_TEST_IMAGE 指定本地测试镜像），仅在临时目录中验证 Linux 文件事件、JPEG 版本归组、连拍候选、默认切换、外部重命名/删除、重启和只读原片边界。
+
+## 同目录批量整理
+
+`scripts/merge_tracked_folders.py` 是显式离线维护入口，plan 用生产双库只读快照与实际只读挂载交集逐层检查，apply 要求服务停止、自动备份、核对计划未变化，并跨 catalog/jobs/维护审计数据库原子提交。只合并同直接父目录的精确内容重复；元数据相似、用户字段冲突、历史跨目录资产和未完整索引的目录单独报告。
+
+媒体证据由 `server/src/bin/keeps-inspect.rs` 通过逐行 JSON 提供，复用服务端媒体读取器；不打开业务数据库、不生成预览。检查断点缓存、计划和合并映射位于 KEEPS_ROOT/maintenance。所有原片保留，旧 ledger 不改写；只回放历史 ledger 不能还原离线合并，恢复需双库备份和作业记录。具体规则、命令和回滚说明见 [批量整理](folder-merge.md)。

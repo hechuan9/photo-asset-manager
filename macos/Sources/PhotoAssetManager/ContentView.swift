@@ -357,6 +357,13 @@ struct AssetDetailView: View {
                     library.updateSelected(KeepsAssetPatch(tags: tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }))
                 }
                 Divider()
+                if let configuration = library.configuration {
+                    KeepsAssetVersionsView(assetID: asset.id, revision: asset.updatedAt, configuration: configuration) { _ in
+                        guard library.configuration == configuration else { return }
+                        library.refresh()
+                    }.id(asset.id.uuidString + configuration.baseURL.absoluteString + configuration.libraryID)
+                    Divider()
+                }
                 if asset.trashed { Button("从回收站恢复") { library.restoreSelected() } }
                 else { Button("移入回收站") { library.trashSelected() } }
                 Text("回收站只改变资产状态，磁盘原片始终保留。")

@@ -27,6 +27,7 @@ fn state(root: &Path) -> Arc<AppState> {
         previews: Arc::new(previews),
         jobs,
         access_token: SIGNING_KEY.into(),
+        library_id: "photos".into(),
         original_root_names: Default::default(),
     })
 }
@@ -249,8 +250,8 @@ async fn folders_jobs_are_library_scoped_and_removal_keeps_originals() {
     assert_eq!(
         call(app.clone(), "GET", "/libraries/other/jobs", Value::Null)
             .await
-            .1["jobs"],
-        json!([])
+            .0,
+        StatusCode::NOT_FOUND
     );
     assert_eq!(
         call(
@@ -417,14 +418,15 @@ async fn navigation_enforces_active_library_roots_and_rejects_escape_and_symlink
     .await;
     assert_eq!(page["directories"].as_array().unwrap().len(), 1);
     assert_eq!(page["directories"][0]["name"], "a");
-    let (_, page) = call(
+    let (status, page) = call(
         app.clone(),
         "GET",
         "/libraries/unknown/navigation",
         Value::Null,
     )
     .await;
-    assert_eq!(page["directories"], json!([]));
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(page["detail"]["code"], "library_not_found");
     let mut denied = vec![
         (root.to_path_buf(), StatusCode::NOT_FOUND),
         (root.join("b"), StatusCode::NOT_FOUND),
@@ -650,4 +652,158 @@ async fn hidden_directories_filter_before_paging_and_persist() {
         store.hidden_directories("another").unwrap(),
         json!({"paths":[]})
     );
+}
+
+#[tokio::test]
+async fn version_api_requires_asset_membership_and_exposes_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = dir.path().canonicalize().unwrap();
+    let state = state(&canonical);
+    let id = seed(&state, &canonical, "one.jpg");
+    let other = seed(&state, &canonical, "two.jpg");
+    let folder = state.jobs.add_folder("photos", ".").unwrap();
+    let app = router(state.clone());
+    let route = format!("/libraries/photos/assets/{id}");
+    let before = call(
+        app.clone(),
+        "GET",
+        "/libraries/photos/revision",
+        Value::Null,
+    )
+    .await
+    .1["revision"]
+        .as_i64()
+        .unwrap();
+    let (status, versions) = call(
+        app.clone(),
+        "GET",
+        &format!("{route}/versions"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(versions["items"][0]["contentHash"], "one.jpg");
+    assert_eq!(versions["items"][0]["isDefault"], true);
+    assert_eq!(
+        call(
+            app.clone(),
+            "PUT",
+            &format!("{route}/default-version"),
+            json!({"contentHash":"two.jpg"})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let (status, versions) = call(
+        app.clone(),
+        "PUT",
+        &format!("{route}/default-version"),
+        json!({"contentHash":"one.jpg"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(versions["items"][0]["userSelected"], true);
+    assert!(
+        call(
+            app.clone(),
+            "GET",
+            "/libraries/photos/revision",
+            Value::Null
+        )
+        .await
+        .1["revision"]
+            .as_i64()
+            .unwrap()
+            > before
+    );
+    state.jobs.remove_folder(&folder.id).unwrap();
+    let revision_before = state.store.library_revision("photos").unwrap();
+    assert_eq!(
+        call(
+            app.clone(),
+            "PUT",
+            &format!("{route}/default-version"),
+            json!({"contentHash":"one.jpg"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        state.store.library_revision("photos").unwrap(),
+        revision_before
+    );
+    let candidates = call(
+        app,
+        "GET",
+        &format!("{route}/version-candidates"),
+        Value::Null,
+    )
+    .await
+    .1;
+    assert_eq!(candidates["items"][0]["assetID"], other);
+    assert_eq!(
+        std::fs::read(dir.path().join("originals/one.jpg")).unwrap(),
+        b"original bytes"
+    );
+}
+
+#[tokio::test]
+async fn rejects_unknown_library_but_accepts_configured_empty_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let app = router(state.clone());
+    for endpoint in [
+        "counts",
+        "assets",
+        "revision",
+        "directories",
+        "navigation",
+        "folders",
+        "jobs",
+        "hidden-directories",
+    ] {
+        let (status, body) = call(
+            app.clone(),
+            "GET",
+            &format!("/libraries/hechuan/{endpoint}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{endpoint}: {body}");
+        assert_eq!(body["detail"]["code"], "library_not_found");
+        let (status, body) = call(
+            app.clone(),
+            "GET",
+            &format!("/libraries/photos/{endpoint}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{endpoint}: {body}");
+    }
+    let (status, body) = call(
+        app.clone(),
+        "POST",
+        "/libraries/hechuan/folders",
+        json!({"path":"."}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(state.jobs.folders().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unknown_library_preview_metadata_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(state(dir.path()));
+    let (status, body) = call(
+        app,
+        "GET",
+        "/derivatives/00000000-0000-0000-0000-000000000001?role=preview&libraryID=hechuan",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["detail"]["code"], "library_not_found");
 }

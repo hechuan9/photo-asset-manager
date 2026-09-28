@@ -83,6 +83,15 @@ struct IOSAssetDetail: View {
                 if !asset.cameraModel.isEmpty { LabeledContent("相机", value: asset.cameraModel) }
                 if !asset.lensModel.isEmpty { LabeledContent("镜头", value: asset.lensModel) }
             }
+            if let configuration = library.configuration {
+                Section {
+                    KeepsAssetVersionsView(assetID: asset.id, revision: asset.updatedAt, configuration: configuration) { updated in
+                        guard library.configuration == configuration else { return }
+                        asset = updated
+                        library.update(updated)
+                    }.id(asset.id.uuidString + configuration.baseURL.absoluteString + configuration.libraryID)
+                }
+            }
             Section("整理") {
                 Stepper("评分：\(rating)", value: $rating, in: 0...5)
                 Picker("标记", selection: $flag) {
@@ -106,6 +115,9 @@ struct IOSAssetDetail: View {
             } footer: { Text("此操作只改变 NAS 图库状态，不会删除或移动原片。") }
             if busy { ProgressView() }
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+        }
+        .onChange(of: library.assets) { _, assets in
+            if let updated = assets.first(where: { $0.id == asset.id }) { asset = updated }
         }
         .navigationTitle("照片详情")
         .navigationBarTitleDisplayMode(.inline)

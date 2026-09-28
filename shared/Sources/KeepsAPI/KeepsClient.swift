@@ -24,12 +24,26 @@ public final class KeepsClient: Sendable {
     }
     private var library: [String] { ["libraries", configuration.libraryID] }
 
+    public func revision() async throws -> Int64 {
+        struct Revision: Decodable { var revision: Int64 }
+        let response: Revision = try await request("GET", library + ["revision"])
+        return response.revision
+    }
     public func assets(query: KeepsAssetQuery = KeepsAssetQuery()) async throws -> KeepsAssetPage {
         try await request("GET", library + ["assets"], query: query.queryItems)
     }
     public func asset(id: UUID) async throws -> KeepsAsset {
         try await request("GET", library + ["assets", id.uuidString])
     }
+    public func versions(assetID: UUID) async throws -> [KeepsAssetVersion] {
+        let response: Versions = try await request("GET", library + ["assets", assetID.uuidString, "versions"])
+        return response.items
+    }
+    public func setDefaultVersion(assetID: UUID, contentHash: String) async throws -> [KeepsAssetVersion] {
+        let response: Versions = try await request("PUT", library + ["assets", assetID.uuidString, "default-version"], body: JSONEncoder().encode(["contentHash": contentHash]))
+        return response.items
+    }
+    private struct Versions: Decodable { var items: [KeepsAssetVersion] }
     public func updateAsset(id: UUID, patch: KeepsAssetPatch) async throws -> KeepsAsset {
         try await request("PATCH", library + ["assets", id.uuidString], body: JSONEncoder().encode(patch))
     }

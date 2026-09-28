@@ -6,4 +6,6 @@ pub mod navigation;
 pub mod previews;
 pub mod protocol;
 pub mod store;
+pub mod versions;
+pub mod watcher;
 pub mod worker;
