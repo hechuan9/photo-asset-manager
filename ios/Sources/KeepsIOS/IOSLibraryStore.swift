@@ -11,7 +11,10 @@ final class IOSLibraryStore: ObservableObject {
     @Published var lastError: String?
     @Published var search = ""
     @Published var showingTrash = false
-    @Published var sort = "capture_desc"
+    @Published var showingPicked = false
+    let sort = "capture_desc"
+    var chronologicalAssets: [KeepsAsset] { assets.reversed() }
+    var followsLatest = true
     private var nextCursor: String?
     private var generation = 0
     private var displayedQuery: String?
@@ -35,7 +38,7 @@ final class IOSLibraryStore: ObservableObject {
                     guard self.configuration == configuration else { return }
                     if let pollingError, lastError == pollingError { lastError = nil }
                     pollingError = nil
-                    if observedRevision != revision {
+                    if observedRevision != revision && followsLatest {
                         await refresh()
                         try Task.checkCancellation()
                         guard self.configuration == configuration else { return }
@@ -72,7 +75,7 @@ final class IOSLibraryStore: ObservableObject {
     func refresh() async {
         generation += 1
         let requestGeneration = generation
-        let queryKey = "\(search)|\(showingTrash)|\(sort)"
+        let queryKey = "\(search)|\(showingTrash)|\(showingPicked)"
         if displayedQuery != queryKey {
             assets = []
             total = 0
@@ -94,14 +97,24 @@ final class IOSLibraryStore: ObservableObject {
         var query = KeepsAssetQuery()
         query.q = search
         query.trashed = showingTrash
+        query.flagState = showingPicked ? "picked" : nil
         query.sort = sort
         query.cursor = cursor
+        query.limit = 200
         do {
-            let page = try await KeepsClient(configuration: configuration).assets(query: query)
-            guard generation == requestGeneration else { return }
+            let client = KeepsClient(configuration: configuration)
+            let countToReload = cursor == nil ? max(200, assets.count) : 200
+            var loaded: [KeepsAsset] = []
+            var page: KeepsAssetPage
+            repeat {
+                page = try await client.assets(query: query)
+                guard generation == requestGeneration else { return }
+                loaded.append(contentsOf: page.items)
+                query.cursor = page.nextCursor
+            } while cursor == nil && loaded.count < countToReload && page.nextCursor != nil
             if cursor == nil { assets = [] }
-            let existing = Set(assets.map(\.id))
-            assets.append(contentsOf: page.items.filter { !existing.contains($0.id) })
+            var existing = Set(assets.map(\.id))
+            assets.append(contentsOf: loaded.filter { existing.insert($0.id).inserted })
             total = page.total
             nextCursor = page.nextCursor
         } catch {
@@ -113,7 +126,7 @@ final class IOSLibraryStore: ObservableObject {
 
     func update(_ asset: KeepsAsset) {
         guard let index = assets.firstIndex(where: { $0.id == asset.id }) else { return }
-        if asset.trashed != showingTrash { assets.remove(at: index); total = max(0, total - 1) }
+        if asset.trashed != showingTrash || (showingPicked && asset.flagState != "picked") { assets.remove(at: index); total = max(0, total - 1) }
         else { assets[index] = asset }
     }
 

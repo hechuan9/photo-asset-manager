@@ -3,14 +3,16 @@ import SwiftUI
 public struct KeepsPreviewImage: View {
     public let asset: KeepsAsset
     public let configuration: KeepsConfiguration?
+    private let contentMode: ContentMode
     @Environment(\.displayScale) private var displayScale
     @State private var image: CGImage?
     @State private var error: String?
     @State private var retry = 0
 
-    public init(asset: KeepsAsset, configuration: KeepsConfiguration?) {
+    public init(asset: KeepsAsset, configuration: KeepsConfiguration?, contentMode: ContentMode = .fit) {
         self.asset = asset
         self.configuration = configuration
+        self.contentMode = contentMode
     }
 
     public var body: some View {
@@ -20,7 +22,8 @@ public struct KeepsPreviewImage: View {
                 Color.secondary.opacity(0.12)
                 if let image {
                     Image(decorative: image, scale: displayScale)
-                        .resizable().scaledToFit()
+                        .resizable().aspectRatio(contentMode: contentMode)
+                        .frame(width: geometry.size.width, height: geometry.size.height).clipped()
                 } else if let error {
                     VStack(spacing: 6) {
                         Image(systemName: "photo.badge.exclamationmark")

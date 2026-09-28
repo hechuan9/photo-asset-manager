@@ -214,3 +214,9 @@ schema 3 显式迁移只创建版本/默认/修订表，不合并、拆分或回
 `scripts/merge_tracked_folders.py` 是显式离线维护入口，plan 用生产双库只读快照与实际只读挂载交集逐层检查，apply 要求服务停止、自动备份、核对计划未变化，并跨 catalog/jobs/维护审计数据库原子提交。只合并同直接父目录的精确内容重复；元数据相似、用户字段冲突、历史跨目录资产和未完整索引的目录单独报告。
 
 媒体证据由 `server/src/bin/keeps-inspect.rs` 通过逐行 JSON 提供，复用服务端媒体读取器；不打开业务数据库、不生成预览。检查断点缓存、计划和合并映射位于 KEEPS_ROOT/maintenance。所有原片保留，旧 ledger 不改写；只回放历史 ledger 不能还原离线合并，恢复需双库备份和作业记录。具体规则、命令和回滚说明见 [批量整理](folder-merge.md)。
+
+### iOS 照片浏览实现
+
+iOS 图库使用 KeepsAPI 的 `KeepsPhotoGrid` 计算大图、中图的等面积行及密集方格；Mac 保留等高行布局，iOS 仅复用其预览宽高比读取方法。图库档位持久化，通过捏合手势与菜单切换；行使用固定尺寸占位，仅可见时加载图片，分页每次 200 张以覆盖密集视图。`IOSPhotoViewer` 管理当前浏览快照和分页选择，信息表单以 sheet 呈现；`IOSZoomablePhoto` 使用 UIKit `UIScrollView` 承载共享预览，处理原生缩放与拖动。照片预览继续走 KeepsAPI 的签名 URL 与缓存。
+
+图库时间轴维持服务端 `capture_desc` 分页，显示时反向遍历行与行内照片，使最新照片位于底部。更早分页加在视觉顶部；`IOSLibraryStore` 在刷新时重读已加载窗口，在浏览旧内容时延后自动刷新。精选集和多选使用现有 `flagState`、`trashed` 查询及逐资产 PATCH / trash / restore API，无新增服务端接口。iOS 部署目标为 26，主图库浮动控件使用原生 Liquid Glass。
