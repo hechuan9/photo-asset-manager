@@ -39,7 +39,6 @@ struct IOSWaterfallGallery: View {
                     }
                 }.scrollTargetLayout()
             }
-            .contentMargins(.top, geometry.safeAreaInsets.top + (library.search.isEmpty ? 170 : 200), for: .scrollContent)
             .contentMargins(.bottom, 0, for: .scrollContent)
             .defaultScrollAnchor(.bottom)
             .defaultScrollAnchor(.top, for: .alignment)
@@ -69,8 +68,7 @@ struct IOSWaterfallGallery: View {
                 if !visibleAssets.isEmpty { focusedAssetID = visibleAssets[visibleAssets.count / 2].id }
                 let dates = visibleAssets.map { String(($0.captureTime ?? $0.createdAt).prefix(10)) }.sorted()
                 if let first = dates.first, let last = dates.last {
-                    let prefix = visibleAssets.allSatisfy { $0.captureTime == nil } ? "添加于 " : ""
-                    visibleDates = prefix + (first == last ? first : "\(first) – \(last)")
+                    visibleDates = first == last ? first : "\(first) – \(last)"
                 }
             }
             }
@@ -186,7 +184,7 @@ struct IOSPhotoViewer: View {
                             .accessibilityLabel("返回图库")
                         Spacer()
                         VStack(spacing: 4) {
-                            Text(current.captureTime?.prefix(10) ?? "照片").font(.headline)
+                            Text(String((current.captureTime ?? current.createdAt).prefix(10))).font(.headline)
                             Text(current.originalFilename).font(.caption).lineLimit(1)
                         }
                         Spacer()

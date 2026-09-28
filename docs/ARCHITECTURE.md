@@ -219,4 +219,10 @@ schema 3 显式迁移只创建版本/默认/修订表，不合并、拆分或回
 
 iOS 图库使用 KeepsAPI 的 `KeepsPhotoGrid` 计算大图、中图的等面积行及密集方格；Mac 保留等高行布局，iOS 仅复用其预览宽高比读取方法。图库档位持久化，通过捏合手势与菜单切换；行使用固定尺寸占位，仅可见时加载图片，分页每次 200 张以覆盖密集视图。`IOSPhotoViewer` 管理当前浏览快照和分页选择，信息表单以 sheet 呈现；`IOSZoomablePhoto` 使用 UIKit `UIScrollView` 承载共享预览，处理原生缩放与拖动。照片预览继续走 KeepsAPI 的签名 URL 与缓存。
 
-图库时间轴维持服务端 `capture_desc` 分页，显示时反向遍历行与行内照片，使最新照片位于底部。更早分页加在视觉顶部；`IOSLibraryStore` 在刷新时重读已加载窗口，在浏览旧内容时延后自动刷新。精选集和多选使用现有 `flagState`、`trashed` 查询及逐资产 PATCH / trash / restore API，无新增服务端接口。iOS 部署目标为 26，主图库浮动控件使用原生 Liquid Glass。
+图库时间轴维持服务端 `capture_desc` 分页，显示时反向遍历行与行内照片，使最新照片位于底部。更早分页加在视觉顶部；`IOSLibraryStore` 在刷新时重读已加载窗口，在浏览旧内容时延后自动刷新。多选使用现有逐资产 PATCH / trash / restore API，精选集通过目录导航和 `directory` 查询浏览照片，无新增服务端接口。iOS 部署目标为 26，主图库浮动控件使用原生 Liquid Glass。
+
+### iOS 精选集目录导航（2026-09-28）
+
+`IOSCollectionsView` 使用 `navigation` HTTP API 展示服务器和本地占位，不再提供全部照片、精选入口或调用相应计数。`IOSCollectionRoute` 保存原生导航路径；`IOSDirectoryStore` 单独管理当前层目录的加载、错误和请求代次，目录读取不依赖资产分页。`IOSLibraryStore.directory` 进入 `KeepsAssetQuery.directory` 和刷新身份，保持现有递归查询及过期响应隔离。文件夹目的页与主图库使用同一个 `galleryPage` 和相同网格边距，目的页隐藏原生导航栏，以当前文件夹名为标题，并提供返回按钮；点击文件夹图标使 `IOSDirectoryBrowser` 在标题下展开。顶部标题按钮与网格采用纵向布局，网格裁切于独立视口；子文件夹菜单使用网格的 top overlay，不参与尺寸计算，展开不会压缩网格。精选集照片页隐藏日期，主图库保留日期。底部浮层位于各自导航页面内。没有新增服务端接口、本地资料库或权限申请。
+
+顶部导航采用 `safeAreaInset` 与 `ultraThinMaterial`，网格使用系统 `backgroundExtensionEffect()` 向安全区域延伸背景；该效果不改变实际照片视口，也不把目录菜单纳入网格布局。API 依据：[Apple backgroundExtensionEffect](https://developer.apple.com/documentation/swiftui/view/backgroundextensioneffect())。

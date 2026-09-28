@@ -15,7 +15,8 @@ struct IOSRootView: View {
     @State private var showingSettings = false
     @State private var showingSearch = false
     @State private var collections = false
-    @State private var collectionOpen = false
+    @State private var collectionPath: [IOSCollectionRoute] = []
+    @State private var showingDirectories = false
     @State private var selecting = false
     @State private var selectedIDs: Set<UUID> = []
     @State private var visibleDates = ""
@@ -23,38 +24,35 @@ struct IOSRootView: View {
     @State private var confirmTrash = false
     @AppStorage("galleryDensity") private var density: KeepsGalleryDensity = .large
 
-    private var showsGallery: Bool { !collections || collectionOpen }
+    private var showsGallery: Bool { !collections || !collectionPath.isEmpty }
     private var title: String {
         if !showsGallery { return "精选集" }
         if library.showingTrash { return "回收站" }
-        return library.showingPicked ? "留用" : "图库"
+        return library.showingPicked ? "精选" : "图库"
     }
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            if !showsGallery {
-                collectionsView
-            } else if library.configuration == nil {
-                ContentUnavailableView("连接 NAS 图库", systemImage: "externaldrive", description: Text("在连接设置中填写服务地址和访问令牌。"))
-            } else if library.assets.isEmpty {
-                if library.isLoading { ProgressView("正在载入图库") }
-                else { ContentUnavailableView(library.lastError == nil ? "没有照片" : "无法加载图库", systemImage: library.lastError == nil ? "photo" : "wifi.exclamationmark") }
-            } else {
-                IOSWaterfallGallery(selecting: $selecting, selectedIDs: $selectedIDs, density: $density, visibleDates: $visibleDates)
-                    .id("\(library.showingTrash)|\(library.showingPicked)|\(library.search)")
-                    .ignoresSafeArea().allowsHitTesting(!changing)
-            }
-            VStack(spacing: 0) {
-                header.disabled(changing)
-                if let error = library.lastError {
-                    Text(error).font(.caption).lineLimit(3).padding(10)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                        .padding(.horizontal)
+            if collections {
+                NavigationStack(path: $collectionPath) {
+                    IOSCollectionsView(configuration: library.configuration)
+                        .overlay(alignment: .bottom) { bottomBar }
+                        .navigationTitle("精选集")
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button("连接设置", systemImage: "gearshape") { showingSettings = true }
+                            }
+                        }
+                        .navigationDestination(for: IOSCollectionRoute.self) { route in
+                            galleryPage(route: route)
+                            .overlay(alignment: .bottom) { bottomBar }
+                            .toolbar(.hidden, for: .navigationBar)
+                            .disabled(changing)
+                        }
                 }
-                if library.isLoading && library.assets.isEmpty { ProgressView().padding() }
-                Spacer(minLength: 0)
-                bottomBar
+            } else {
+                galleryPage().overlay(alignment: .bottom) { bottomBar }
             }
         }
         .preferredColorScheme(.dark)
@@ -66,8 +64,8 @@ struct IOSRootView: View {
         }
         .sheet(isPresented: $showingSearch) {
             IOSSearchSheet(query: library.search) { query in
-                collections = false; collectionOpen = false
-                library.showingTrash = false; library.showingPicked = false
+                collections = false; collectionPath = []
+                library.showingTrash = false; library.showingPicked = false; library.directory = nil
                 library.search = query; library.followsLatest = true; resetSelection()
                 Task { await library.refresh() }
             }
@@ -77,18 +75,83 @@ struct IOSRootView: View {
         }
         .task { await library.refresh() }
         .onChange(of: scenePhase, initial: true) { _, phase in library.setActive(phase == .active) }
+        .onChange(of: library.configuration) { _, _ in
+            collectionPath = []
+            library.directory = nil
+            library.showingPicked = false
+            library.showingTrash = false
+            library.search = ""
+            resetSelection()
+        }
+        .onChange(of: collectionPath) { _, _ in
+            if collections { applyCollectionScope() }
+        }
         .onChange(of: library.assets) { _, assets in
             selectedIDs.formIntersection(Set(assets.map(\.id)))
             if assets.isEmpty { visibleDates = "" }
         }
     }
 
-    private var header: some View {
+    private func galleryPage(route: IOSCollectionRoute? = nil) -> some View {
+        VStack(spacing: 0) {
+            if let error = library.lastError {
+                VStack {
+                    Text(error).font(.caption).lineLimit(3)
+                    Button("重试") { Task { await library.refresh() } }
+                }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)).padding(.horizontal)
+            }
+            ZStack {
+                if library.configuration == nil {
+                    ContentUnavailableView("连接 NAS 图库", systemImage: "externaldrive", description: Text("在连接设置中填写服务地址和访问令牌。"))
+                } else if library.assets.isEmpty {
+                    if library.isLoading { ProgressView("正在载入图库") }
+                    else { ContentUnavailableView(library.lastError == nil ? "没有照片" : "无法加载图库", systemImage: library.lastError == nil ? "photo" : "wifi.exclamationmark") }
+                } else {
+                    IOSWaterfallGallery(selecting: $selecting, selectedIDs: $selectedIDs, density: $density, visibleDates: $visibleDates)
+                        .id("\(library.showingTrash)|\(library.showingPicked)|\(library.search)|\(library.directory ?? "")")
+                        .allowsHitTesting(!changing)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+            .backgroundExtensionEffect()
+            .overlay(alignment: .top) {
+                if let route, route.hasChildren, showingDirectories, !selecting {
+                    IOSDirectoryBrowser(configuration: library.configuration, path: route.directory)
+                        .id(route.directory)
+                        .disabled(changing)
+                }
+            }
+            .ignoresSafeArea(.container, edges: .bottom)
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            header(route: route).disabled(changing)
+        }
+        .background { Color.black.ignoresSafeArea() }
+    }
+
+    private func header(route: IOSCollectionRoute?) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack {
-                Text(selecting ? "已选 \(selectedIDs.count) 张" : title).font(.largeTitle.bold()).lineLimit(1).minimumScaleFactor(0.6)
+            HStack(spacing: 8) {
+                if route != nil {
+                    Button {
+                        collectionPath.removeLast()
+                    } label: {
+                        Image(systemName: "chevron.left").frame(width: 44, height: 44)
+                    }.glassEffect(.regular.interactive(), in: Circle())
+                        .accessibilityLabel("返回上一级")
+                }
+                Text(selecting ? "已选 \(selectedIDs.count) 张" : route?.title ?? title).font(.largeTitle.bold()).lineLimit(1).minimumScaleFactor(0.6)
                 Spacer()
                 if showsGallery {
+                    if let route, route.hasChildren, !selecting {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { showingDirectories.toggle() }
+                        } label: {
+                            Image(systemName: showingDirectories ? "folder.fill" : "folder").frame(width: 44, height: 44)
+                        }.glassEffect(.regular.interactive(), in: Circle())
+                            .accessibilityLabel(showingDirectories ? "收起子文件夹" : "显示子文件夹")
+                    }
                     Menu {
                         Picker("照片大小", selection: $density) {
                             Text("大图 · 完整比例").tag(KeepsGalleryDensity.large)
@@ -109,14 +172,11 @@ struct IOSRootView: View {
                         .glassEffect(.regular.interactive(), in: Circle()).accessibilityLabel("连接设置")
                 }
             }
-            if showsGallery && !visibleDates.isEmpty { Text(visibleDates).font(.subheadline.weight(.semibold)) }
+            if route == nil && showsGallery && !visibleDates.isEmpty { Text(visibleDates).font(.subheadline.weight(.semibold)) }
             if !library.search.isEmpty && showsGallery { Text("搜索：\(library.search)").font(.caption) }
         }
         .foregroundStyle(.white).padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 18)
-        .background {
-            LinearGradient(colors: [.black.opacity(0.65), .clear], startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea(edges: .top)
-        }
+        .background(.ultraThinMaterial)
     }
 
     private var bottomBar: some View {
@@ -136,9 +196,13 @@ struct IOSRootView: View {
                     }.disabled(changing).padding(20).glassEffect(.regular, in: Capsule())
                 } else {
                     HStack(spacing: 4) {
-                        tabButton("图库", icon: "photo.on.rectangle.fill", active: !collections) { openScope(picked: false, trash: false, inCollections: false) }
+                        tabButton("图库", icon: "photo.on.rectangle.fill", active: !collections) {
+                            guard collections else { return }
+                            collections = false; setScope(nil)
+                        }
                         tabButton("精选集", icon: "rectangle.stack.fill", active: collections) {
-                            collections = true; collectionOpen = false; resetSelection()
+                            guard !collections else { return }
+                            collections = true; applyCollectionScope()
                         }
                     }.padding(5).glassEffect(.regular, in: Capsule())
                     Spacer(minLength: 0)
@@ -158,23 +222,22 @@ struct IOSRootView: View {
         }.buttonStyle(.plain).accessibilityAddTraits(active ? .isSelected : [])
     }
 
-    private var collectionsView: some View {
-        VStack(spacing: 14) {
-            Button { openScope(picked: true, trash: false, inCollections: true) } label: {
-                Label("留用", systemImage: "heart.fill").frame(maxWidth: .infinity, alignment: .leading).padding(24)
-            }
-            Button { openScope(picked: false, trash: true, inCollections: true) } label: {
-                Label("回收站", systemImage: "trash").frame(maxWidth: .infinity, alignment: .leading).padding(24)
-            }
-            Spacer()
-        }.buttonStyle(.bordered).padding(.horizontal, 20).padding(.top, 100)
+    private func resetSelection() { selecting = false; selectedIDs.removeAll(); visibleDates = ""; showingDirectories = false }
+
+    private func applyCollectionScope() {
+        resetSelection()
+        guard let route = collectionPath.last else { return }
+        setScope(route)
     }
 
-    private func resetSelection() { selecting = false; selectedIDs.removeAll(); visibleDates = "" }
-    private func openScope(picked: Bool, trash: Bool, inCollections: Bool) {
-        collections = inCollections; collectionOpen = inCollections
-        library.showingPicked = picked; library.showingTrash = trash; library.search = ""; library.followsLatest = true
-        resetSelection(); Task { await library.refresh() }
+    private func setScope(_ route: IOSCollectionRoute?) {
+        library.showingPicked = false
+        library.showingTrash = false
+        library.directory = route?.directory
+        library.search = ""
+        library.followsLatest = true
+        resetSelection()
+        Task { await library.refresh() }
     }
 
     private func changeSelection(trash: Bool) async {
@@ -284,5 +347,4 @@ struct IOSSettingsView: View {
             dismiss()
         } catch { self.error = error.localizedDescription + "\n" + String(reflecting: error) }
     }
-
 }

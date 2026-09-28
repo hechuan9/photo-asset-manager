@@ -12,6 +12,7 @@ final class IOSLibraryStore: ObservableObject {
     @Published var search = ""
     @Published var showingTrash = false
     @Published var showingPicked = false
+    @Published var directory: String?
     let sort = "capture_desc"
     var chronologicalAssets: [KeepsAsset] { assets.reversed() }
     var followsLatest = true
@@ -75,7 +76,7 @@ final class IOSLibraryStore: ObservableObject {
     func refresh() async {
         generation += 1
         let requestGeneration = generation
-        let queryKey = "\(search)|\(showingTrash)|\(showingPicked)"
+        let queryKey = "\(search)|\(showingTrash)|\(showingPicked)|\(directory ?? "")"
         if displayedQuery != queryKey {
             assets = []
             total = 0
@@ -98,6 +99,7 @@ final class IOSLibraryStore: ObservableObject {
         query.q = search
         query.trashed = showingTrash
         query.flagState = showingPicked ? "picked" : nil
+        query.directory = directory
         query.sort = sort
         query.cursor = cursor
         query.limit = 200
