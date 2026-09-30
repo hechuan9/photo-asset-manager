@@ -1,0 +1,161 @@
+{
+  "image": "sha256:737aa1d1e420af4988475affa845d400129fbd4cbf34c6d29ddffc1281125496",
+  "container": "keeps-rust-smoke-905de32f36",
+  "checks": [
+    {
+      "name": "legacy migration preserves event payload",
+      "detail": null
+    },
+    {
+      "name": "missing bearer credential rejected",
+      "detail": null
+    },
+    {
+      "name": "repeated metadata command creates no events",
+      "detail": {
+        "eventCount": 4
+      }
+    },
+    {
+      "name": "malformed commands and out-of-root folders rejected",
+      "detail": null
+    },
+    {
+      "name": "background ingest completed",
+      "detail": {
+        "currentPath": null,
+        "error": null,
+        "failed": 0,
+        "finishedAt": 1790449408,
+        "folderID": "22c342c8-17e1-4b22-9c10-aa1f8370db8f",
+        "id": "db5d35c3-3d8a-4e8c-8b5e-86769b7834cd",
+        "libraryID": "smoke",
+        "path": "/myphoto/library",
+        "processed": 1,
+        "skipped": 0,
+        "startedAt": 1790449408,
+        "status": "completed"
+      }
+    },
+    {
+      "name": "preview content hash and signed URL tamper rejection",
+      "detail": null
+    },
+    {
+      "name": "unchanged rescan skips photo without duplicate asset or event",
+      "detail": {
+        "currentPath": null,
+        "error": null,
+        "failed": 0,
+        "finishedAt": 1790449409,
+        "folderID": "22c342c8-17e1-4b22-9c10-aa1f8370db8f",
+        "id": "208c5dcc-848e-4aa3-b977-e50f19da4103",
+        "libraryID": "smoke",
+        "path": "/myphoto/library",
+        "processed": 0,
+        "skipped": 1,
+        "startedAt": 1790449409,
+        "status": "completed"
+      }
+    },
+    {
+      "name": "tracking removal retains catalog and retired client writes reject",
+      "detail": null
+    },
+    {
+      "name": "bad JPEG fails visibly while valid PNG is ingested",
+      "detail": {
+        "currentPath": null,
+        "error": "1 files failed; latest failure: processing /myphoto/library/mixed/a-broken.jpg: generating preview for /myphoto/library/mixed/a-broken.jpg: \"convert\" \"-limit\" \"thread\" \"2\" \"-limit\" \"memory\" \"256MiB\" \"-limit\" \"map\" \"512MiB\" \"-limit\" \"disk\" \"1GiB\" \"-limit\" \"time\" \"120\" \"/myphoto/library/mixed/a-broken.jpg[0]\" \"-auto-orient\" \"-thumbnail\" \"1200x1200>\" \"-strip\" \"-quality\" \"80\" \"/tmp/.tmp4NgGHV/preview.heic\" failed with exit status: 1\nstdout: \nstderr: convert: insufficient image data in file `/myphoto/library/mixed/a-broken.jpg' @ error/jpeg.c/ReadOneJPEGImage/1117.\nconvert: no images defined `/tmp/.tmp4NgGHV/preview.heic' @ error/deprecate.c/ConvertImageCommand/3371.\n",
+        "failed": 1,
+        "finishedAt": 1790449410,
+        "folderID": "26517ef9-c128-4f49-9c5e-963120107b44",
+        "id": "a6ef15d1-5c2c-475d-98a2-05ec2751883c",
+        "libraryID": "smoke",
+        "path": "/myphoto/library/mixed",
+        "processed": 1,
+        "skipped": 0,
+        "startedAt": 1790449410,
+        "status": "failed"
+      }
+    },
+    {
+      "name": "failed job retries while preserving bad source and skipping completed work",
+      "detail": {
+        "currentPath": null,
+        "error": "1 files failed; latest failure: processing /myphoto/library/mixed/a-broken.jpg: generating preview for /myphoto/library/mixed/a-broken.jpg: \"convert\" \"-limit\" \"thread\" \"2\" \"-limit\" \"memory\" \"256MiB\" \"-limit\" \"map\" \"512MiB\" \"-limit\" \"disk\" \"1GiB\" \"-limit\" \"time\" \"120\" \"/myphoto/library/mixed/a-broken.jpg[0]\" \"-auto-orient\" \"-thumbnail\" \"1200x1200>\" \"-strip\" \"-quality\" \"80\" \"/tmp/.tmpxQ1gOr/preview.heic\" failed with exit status: 1\nstdout: \nstderr: convert: insufficient image data in file `/myphoto/library/mixed/a-broken.jpg' @ error/jpeg.c/ReadOneJPEGImage/1117.\nconvert: no images defined `/tmp/.tmpxQ1gOr/preview.heic' @ error/deprecate.c/ConvertImageCommand/3371.\n",
+        "failed": 1,
+        "finishedAt": 1790449411,
+        "folderID": "26517ef9-c128-4f49-9c5e-963120107b44",
+        "id": "a6ef15d1-5c2c-475d-98a2-05ec2751883c",
+        "libraryID": "smoke",
+        "path": "/myphoto/library/mixed",
+        "processed": 0,
+        "skipped": 1,
+        "startedAt": 1790449411,
+        "status": "failed"
+      }
+    },
+    {
+      "name": "interrupted running job resumes after SIGKILL without reprocessing completed files",
+      "detail": {
+        "checkpoint": {
+          "currentPath": "/myphoto/library/resume/01.png",
+          "error": null,
+          "failed": 0,
+          "finishedAt": null,
+          "folderID": "8d7e88aa-50d3-4841-9420-c9d2bac2b9a1",
+          "id": "727842b0-9c61-49e8-adb0-d5e4eed1cecb",
+          "libraryID": "smoke",
+          "path": "/myphoto/library/resume",
+          "processed": 1,
+          "skipped": 0,
+          "startedAt": 1790449412,
+          "status": "running"
+        },
+        "resumed": {
+          "currentPath": null,
+          "error": null,
+          "failed": 0,
+          "finishedAt": 1790449418,
+          "folderID": "8d7e88aa-50d3-4841-9420-c9d2bac2b9a1",
+          "id": "727842b0-9c61-49e8-adb0-d5e4eed1cecb",
+          "libraryID": "smoke",
+          "path": "/myphoto/library/resume",
+          "processed": 11,
+          "skipped": 1,
+          "startedAt": 1790449414,
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "restart persists catalog and inactive folders; every original hash remains unchanged",
+      "detail": {
+        "assets": 16,
+        "originalFiles": 16
+      }
+    }
+  ],
+  "status": "passed",
+  "imageID": "sha256:737aa1d1e420af4988475affa845d400129fbd4cbf34c6d29ddffc1281125496",
+  "mounts": [
+    {
+      "Type": "bind",
+      "Source": "/volume2/docker/keeps/validation/keeps-nas-validation-_f_2xj09/keeps",
+      "Destination": "/myphoto/keeps",
+      "Mode": "",
+      "RW": true,
+      "Propagation": "rprivate"
+    },
+    {
+      "Type": "bind",
+      "Source": "/volume2/docker/keeps/validation/keeps-nas-validation-_f_2xj09/originals",
+      "Destination": "/myphoto/library",
+      "Mode": "",
+      "RW": false,
+      "Propagation": "rprivate"
+    }
+  ],
+  "retainedContainer": "keeps-rust-smoke-905de32f36"
+}

@@ -1,0 +1,374 @@
+{
+  "realMediaSmoke": {
+    "status": "PASS",
+    "checks": [
+      {
+        "test": "health_and_auth",
+        "status": "PASS"
+      },
+      {
+        "test": "schema9_identity_no_ledger_and_raw_same_asset_standard",
+        "status": "PASS"
+      },
+      {
+        "test": "all_four_remote_tasks_and_duplicate_complete",
+        "status": "PASS"
+      },
+      {
+        "test": "signed_download_hashes_jpeg_heif_reuse_3fr_thumbnail_only",
+        "status": "PASS"
+      },
+      {
+        "test": "rescan_stable_original_hashes_and_resource_limits",
+        "status": "PASS"
+      },
+      {
+        "test": "identity_root_metadata_and_3fr_sidecar",
+        "status": "PASS"
+      },
+      {
+        "test": "metadata_write_preserves_raw_jpeg_heif_pixels_and_3fr_bytes",
+        "status": "PASS"
+      },
+      {
+        "test": "directory_move_preserves_asset_and_retires_old_path",
+        "status": "PASS"
+      }
+    ],
+    "fixtureRoot": "/home/hechuan/keeps-worker/releases/identity-20260929/smoke/20260929-203939-a451b9",
+    "samples": {
+      "raw": {
+        "source": "/home/hechuan/keeps-worker/releases/worker-20260929/fixtures/raw/DSC06294.ARW",
+        "fixture": "/home/hechuan/keeps-worker/releases/identity-20260929/smoke/20260929-203939-a451b9/originals/raw/DSC06294.ARW",
+        "container": "/originals/raw/DSC06294.ARW",
+        "hash": "e7a3dfead64cfea7d78c9ef82026828bbef625776f0bdb02d6242805d452ceca",
+        "originalHash": "92b796166c914d5bc402c252047b8125d8c025edc823cbaadd0ccfead9f615a7"
+      },
+      "jpeg": {
+        "source": "/home/hechuan/keeps-worker/releases/worker-20260929/fixtures/jpeg/DSC05392.jpg",
+        "fixture": "/home/hechuan/keeps-worker/releases/identity-20260929/smoke/20260929-203939-a451b9/originals/jpeg/DSC05392.jpg",
+        "container": "/originals/jpeg/DSC05392.jpg",
+        "hash": "968cdd96a8c647ea8dd938d99f0ef129eea99b798d3b705f03396c18d0789624",
+        "originalHash": "0337223e6a436a4110386d8f152f7e3ba2b3a18553dbedf1b7ff63da04becdf8"
+      },
+      "heif": {
+        "source": "/home/hechuan/keeps-worker/releases/worker-20260929/fixtures/heif/IMG_4438.HEIC",
+        "fixture": "/home/hechuan/keeps-worker/releases/identity-20260929/smoke/20260929-203939-a451b9/originals/heif/IMG_4438.HEIC",
+        "container": "/originals/heif/IMG_4438.HEIC",
+        "hash": "58daac7990263a527f34939ffa96f895c82ab0138c67ca17c5fd736eec193022",
+        "originalHash": "8ae8af893b00f888a3b175a9f7422332d64bcfd35c2ce393bde9a277dc4ed045"
+      },
+      "3fr": {
+        "source": "/home/hechuan/keeps-worker/releases/worker-20260929/fixtures/3fr/B0002737.3FR",
+        "fixture": "/home/hechuan/keeps-worker/releases/identity-20260929/smoke/20260929-203939-a451b9/originals/3fr/B0002737.3FR",
+        "container": "/originals/3fr/B0002737.3FR",
+        "hash": "ea12bf5e726dbff5876a4eb7549392b1748f72349287c203ccf004ab4a92674e",
+        "originalHash": "ea12bf5e726dbff5876a4eb7549392b1748f72349287c203ccf004ab4a92674e"
+      }
+    },
+    "lastCacheStatus": {
+      "batchLimit": 20,
+      "concurrency": 1,
+      "counts": {
+        "failed": 0,
+        "pending": 0,
+        "processing": 0,
+        "ready": 4
+      },
+      "eligibleAssets": 4,
+      "enabled": true,
+      "encoderThreads": 1,
+      "errors": [],
+      "gc": {
+        "batchLimit": 20,
+        "enabled": false,
+        "errors": [],
+        "failed": 0,
+        "graceSeconds": 1200,
+        "nextEligibleAt": null,
+        "pending": 0
+      },
+      "identityBackfill": {
+        "batchLimit": 20,
+        "errors": [],
+        "failed": 0,
+        "pending": 0,
+        "ready": 5
+      },
+      "lastSuccessAt": 1790728834,
+      "localEncodingEnabled": false,
+      "maxAttempts": 4,
+      "pendingInventory": 0,
+      "restSeconds": 60,
+      "runtime": {
+        "freeBytes": 474131128320,
+        "lastBatchAt": 1790728780,
+        "lastBatchCount": 0,
+        "lastError": null,
+        "nextBatchAt": 1790728840
+      },
+      "spec": "thumbnail-heic-512-q50-v1",
+      "totalAssets": 4
+    },
+    "containers": {
+      "api": "keeps-worker-smoke-20260929-203939-a451b9",
+      "worker": "keeps-worker-smoke-20260929-203939-a451b9-worker"
+    },
+    "elapsedSeconds": 65.5
+  },
+  "schema8Backfill": {
+    "status": "PASS",
+    "root": "/home/hechuan/keeps-worker/releases/identity-20260929/legacy-smoke/20260929-204338-d6ab94",
+    "cacheStatus": {
+      "batchLimit": 20,
+      "concurrency": 1,
+      "counts": {
+        "failed": 0,
+        "pending": 0,
+        "processing": 0,
+        "ready": 4
+      },
+      "eligibleAssets": 4,
+      "enabled": true,
+      "encoderThreads": 1,
+      "errors": [],
+      "gc": {
+        "batchLimit": 20,
+        "enabled": false,
+        "errors": [],
+        "failed": 0,
+        "graceSeconds": 1200,
+        "nextEligibleAt": null,
+        "pending": 0
+      },
+      "identityBackfill": {
+        "batchLimit": 20,
+        "errors": [],
+        "failed": 0,
+        "pending": 0,
+        "ready": 5
+      },
+      "lastSuccessAt": 1790729074,
+      "localEncodingEnabled": false,
+      "maxAttempts": 4,
+      "pendingInventory": 0,
+      "restSeconds": 60,
+      "runtime": {
+        "freeBytes": 472628011008,
+        "lastBatchAt": 1790729457,
+        "lastBatchCount": 0,
+        "lastError": null,
+        "nextBatchAt": 1790729517
+      },
+      "spec": "thumbnail-heic-512-q50-v1",
+      "totalAssets": 4
+    },
+    "schema": 9,
+    "thumbnailsUnchanged": 4,
+    "metadataIDsMatch": true,
+    "standardHashesMatch": true,
+    "duplicateCompletedTasks": 4
+  },
+  "rust": {
+    "libraryPassed": 93,
+    "httpPassed": 17,
+    "cliPassed": 1,
+    "ignored": 2,
+    "clippy": "PASS"
+  },
+  "deployment": {
+    "status": "PASS",
+    "image": "sha256:5f3cc37084d36c482cfffdb4105b9f18ccffb79fd83bf8a21e20074122eef503",
+    "oldImage": "sha256:85b164e92c54bb43389c5426992638f7c8948257059ff7b53b6f8ead09224b58",
+    "maintenanceStoppedAtUTC": "2026-09-30T00:52:29Z",
+    "healthyAtUTC": "2026-09-30T00:54:57Z",
+    "schema": 9,
+    "assetsBefore": 91838,
+    "assetsAfter": 91838,
+    "rootMappings": 91838,
+    "cpuset": "2-3",
+    "memoryLimitBytes": 2147483648,
+    "localEncodingEnabled": false,
+    "identityBatchLimit": 20,
+    "metadataWritesAuthorized": true,
+    "pixelDataMustRemainUnchanged": true
+  },
+  "liveVerification": {
+    "observedAtUTC": "2026-09-30T00:57:48Z",
+    "schema": 9,
+    "identityCounts": {
+      "pending": 5684,
+      "ready": 3
+    },
+    "samples": [
+      {
+        "path": "/volume2/photo/照片/2024/Swiss/DSC05002.ARW",
+        "assetID": "984d783a-3c3c-436e-a8a7-6b3ad083a9b7",
+        "rootID": "2bc2084e-76e6-8cdf-189d-ee46440b2e4c",
+        "metadataPath": "/volume2/photo/照片/2024/Swiss/DSC05002.xmp",
+        "metadata": "2BC2084E76E68CDF189DEE46440B2E4C",
+        "matches": true
+      },
+      {
+        "path": "/volume2/photo/照片/2024/Swiss/DSC04864.ARW",
+        "assetID": "834f13e4-6f5f-4fa7-aed2-57f7db32d898",
+        "rootID": "513e3349-0262-c37e-aa6b-752789e2b27b",
+        "metadataPath": "/volume2/photo/照片/2024/Swiss/DSC04864.xmp",
+        "metadata": "513E33490262C37EAA6B752789E2B27B",
+        "matches": true
+      },
+      {
+        "path": "/volume2/photo/照片/2024/Swiss/DSC05206.ARW",
+        "assetID": "bc60de58-df1b-4372-b195-0779b27a8154",
+        "rootID": "54f8987b-ebfb-b5d8-d28b-8ef2f0b463f1",
+        "metadataPath": "/volume2/photo/照片/2024/Swiss/DSC05206.xmp",
+        "metadata": "54F8987BEBFBB5D8D28B8EF2F0B463F1",
+        "matches": true
+      },
+      {
+        "path": "/volume2/photo/未处理/2023/Leavenworth/DSC06482.heic",
+        "assetID": "1cd5a4a6-040f-4d99-829b-e2e08cde44f0",
+        "rootID": "1cd5a4a6-040f-4d99-829b-e2e08cde44f0",
+        "metadataPath": "/volume2/photo/未处理/2023/Leavenworth/DSC06482.heic",
+        "metadata": "xmp.did:1cd5a4a6-040f-4d99-829b-e2e08cde44f0",
+        "matches": true
+      },
+      {
+        "path": "/volume2/photo/照片/2023/冰岛/DSC06981.heic",
+        "assetID": "1cd4ac63-7374-432e-82dc-5a3d3c80f835",
+        "rootID": "1cd4ac63-7374-432e-82dc-5a3d3c80f835",
+        "metadataPath": "/volume2/photo/照片/2023/冰岛/DSC06981.heic",
+        "metadata": "xmp.did:1cd4ac63-7374-432e-82dc-5a3d3c80f835",
+        "matches": true
+      },
+      {
+        "path": "/volume2/photo/未处理/2023/Italy/DSC04142.heic",
+        "assetID": "1cda9a65-fd94-418e-8aa3-b331199d9277",
+        "rootID": "1cda9a65-fd94-418e-8aa3-b331199d9277",
+        "metadataPath": "/volume2/photo/未处理/2023/Italy/DSC04142.heic",
+        "metadata": "xmp.did:1cda9a65-fd94-418e-8aa3-b331199d9277",
+        "matches": true
+      }
+    ],
+    "status": "PASS"
+  },
+  "nas": {
+    "observedAtUTC": "2026-09-30T00:57:56Z",
+    "container": {
+      "image": "sha256:5f3cc37084d36c482cfffdb4105b9f18ccffb79fd83bf8a21e20074122eef503",
+      "status": "running",
+      "health": "healthy",
+      "restartCount": 0,
+      "oomKilled": false,
+      "cpuSet": "2-3",
+      "memoryLimitBytes": 2147483648
+    },
+    "disk": {
+      "freeBytes": 34797529600000,
+      "totalBytes": 69077505212416
+    },
+    "cache": {
+      "batchLimit": 20,
+      "concurrency": 1,
+      "counts": {
+        "failed": 0,
+        "pending": 81933,
+        "processing": 16,
+        "ready": 9889
+      },
+      "eligibleAssets": 91838,
+      "enabled": true,
+      "encoderThreads": 1,
+      "errors": [
+        {
+          "assetID": "1b14c0c3-4850-4556-a216-8271914864a7",
+          "attempts": 1,
+          "error": "Linux worker failed; see worker logs for full traceback",
+          "retryAt": 1790728520
+        }
+      ],
+      "gc": {
+        "batchLimit": 20,
+        "enabled": true,
+        "errors": [],
+        "failed": 0,
+        "graceSeconds": 1200,
+        "nextEligibleAt": 1790729769,
+        "pending": 250
+      },
+      "identityBackfill": {
+        "batchLimit": 20,
+        "errors": [],
+        "failed": 0,
+        "pending": 5683,
+        "ready": 4
+      },
+      "lastSuccessAt": 1790729875,
+      "localEncodingEnabled": false,
+      "maxAttempts": 4,
+      "pendingInventory": 0,
+      "restSeconds": 60,
+      "runtime": {
+        "freeBytes": 34797790081024,
+        "lastBatchAt": 1790729805,
+        "lastBatchCount": 0,
+        "lastError": null,
+        "nextBatchAt": 1790729865
+      },
+      "spec": "thumbnail-heic-512-q50-v1",
+      "totalAssets": 91838
+    },
+    "resourceUsage": {
+      "BlockIO": "0B / 0B",
+      "CPUPerc": "179.65%",
+      "Container": "keeps-control-plane",
+      "ID": "506a1446e83d",
+      "MemPerc": "51.61%",
+      "MemUsage": "1.032GiB / 2GiB",
+      "Name": "keeps-control-plane",
+      "NetIO": "533MB / 2.66GB",
+      "PIDs": "0"
+    },
+    "nasLoadAverage": [
+      3.876953125,
+      2.98583984375,
+      2.89501953125
+    ]
+  },
+  "linux": {
+    "observedAtUTC": "2026-09-30T00:57:56Z",
+    "image": "sha256:efc56151ab267b25cc5554b4056fc6f79f1e5dd9b7e5e65242fc924e49df59e7",
+    "status": "running",
+    "startedAt": "2026-09-30T00:55:11.791515225Z",
+    "restartCount": 0,
+    "oomKilled": false,
+    "cpuLimit": 16.0,
+    "memoryLimit": 25769803776,
+    "concurrency": "16",
+    "addressSpace": "4294967296",
+    "scratchBudget": "137438953472",
+    "resourceUsage": {
+      "BlockIO": "0B / 6.33GB",
+      "CPUPerc": "1503.56%",
+      "Container": "keeps-worker-worker-1",
+      "ID": "a9431b477bf1",
+      "MemPerc": "28.00%",
+      "MemUsage": "6.72GiB / 24GiB",
+      "Name": "keeps-worker-worker-1",
+      "NetIO": "2.64GB / 521MB",
+      "PIDs": "146"
+    },
+    "memoryEvents": {
+      "low": "0",
+      "high": "0",
+      "max": "0",
+      "oom": "0",
+      "oom_kill": "0",
+      "oom_group_kill": "0"
+    },
+    "diskFree": 472686219264,
+    "completedSinceResume": 67,
+    "lastCompleted": "2026-09-30 00:57:55,588 INFO Completed task 96f600b7-be54-42dc-b7a3-f572e4a7d213 elapsedSeconds=6.22 sourceBytes=19136512 outputBytes=1828",
+    "errorsSinceResume": 0
+  }
+}

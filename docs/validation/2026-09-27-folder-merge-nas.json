@@ -1,0 +1,28 @@
+{
+  "at": "2026-09-27T13:41:47.953545+00:00",
+  "image": "sha256:7855aff063257f09f22bd797e4994c6232aa6bd2d2bdd4c22b3f1c64424a48cc",
+  "groups": 2,
+  "assets_before": 5,
+  "assets_after": 3,
+  "paths_preserved": 5,
+  "original_sha256_unchanged": true,
+  "same_capture_different_image_separate": true,
+  "parent_child_separate": true,
+  "edited_default_priority": 3,
+  "repeat_apply_idempotent": true,
+  "native_mechanisms_checks": [
+    "PASS: server ready",
+    "PASS: event adds first photo and preview without periodic scan",
+    "PASS: metadata-only JPEG variant groups despite renamed file",
+    "PASS: same capture metadata with different image stays separate",
+    "PASS: user default persists",
+    "PASS: selected version preview generated",
+    "PASS: same-directory rename keeps version association",
+    "PASS: same image in child directory stays a separate asset",
+    "PASS: external disappearance selects available version",
+    "PASS: fallback preview is rebuilt",
+    "PASS: restart healthy",
+    "PASS: startup reconciliation detects sidecar-only change while offline",
+    "PASS: restart preserves identity; original bytes unchanged; all previews outside originals"
+  ]
+}

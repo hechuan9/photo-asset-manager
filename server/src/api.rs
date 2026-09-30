@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{previews::PreviewStorage, store::Store};
 use axum::{
@@ -18,6 +18,7 @@ pub struct AppState {
     pub previews: Arc<PreviewStorage>,
     pub jobs: Arc<crate::jobs::Jobs>,
     pub access_token: String,
+    pub library_id: String,
     pub original_root_names: crate::navigation::RootNames,
 }
 
@@ -68,6 +69,7 @@ impl IntoResponse for ApiError {
 
 pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
+        .merge(crate::remote_worker::router())
         .route("/libraries/{library}/assets", get(assets))
         .route(
             "/libraries/{library}/assets/{asset}",
@@ -81,7 +83,23 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/libraries/{library}/assets/{asset}/restore",
             post(restore_asset),
         )
+        .route(
+            "/libraries/{library}/assets/{asset}/versions",
+            get(versions),
+        )
+        .route(
+            "/libraries/{library}/assets/{asset}/version-candidates",
+            get(version_candidates),
+        )
+        .route(
+            "/libraries/{library}/assets/{asset}/default-version",
+            axum::routing::put(default_version),
+        )
+        .route("/libraries/{library}/revision", get(revision))
         .route("/libraries/{library}/counts", get(counts))
+        .route("/libraries/{library}/cache-status", get(cache_status))
+        .route("/libraries/{library}/cache-retry", post(cache_retry))
+        .route("/libraries/{library}/cache-rebuild", post(cache_rebuild))
         .route(
             "/libraries/{library}/hidden-directories",
             get(hidden_directories).put(set_hidden_directory),
@@ -108,6 +126,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(protected)
         .route("/healthz", get(|| async { Json(json!({"status":"ok"})) }))
         .route("/derivatives/local-download/{token}", get(local_download))
+        .route(
+            "/derivatives/local-standard/{token}",
+            get(standard_download),
+        )
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -115,6 +137,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 async fn authenticate(
     State(state): State<Arc<AppState>>,
+    Path(params): Path<HashMap<String, String>>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -132,7 +155,23 @@ async fn authenticate(
         )
         .into_response();
     }
+    if let Some(library) = params.get("library")
+        && let Err(error) = require_library(&state, library)
+    {
+        return error.into_response();
+    }
     next.run(request).await
+}
+
+fn require_library(state: &AppState, library: &str) -> Result<(), ApiError> {
+    if library != state.library_id {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "library_not_found".into(),
+            "图库 ID 不存在，请检查连接设置中的图库 ID；此字段不是 NAS 用户名。".into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn blocking<F>(operation: F) -> Result<Value, ApiError>
@@ -154,6 +193,13 @@ fn signed_asset(state: &AppState, mut asset: Value) -> anyhow::Result<Value> {
     } else {
         json!({"downloadURL":state.previews.download_url(&preview["objectRef"])?,"width":preview["width"],"height":preview["height"],"version":preview["version"]})
     };
+    if let Some(id) = asset["id"].as_str().map(str::to_owned)
+        && let Some((thumbnail, standard)) =
+            state.store.cache_descriptors(&state.library_id, &id)?
+    {
+        asset["thumbnail"] = json!({"downloadURL":state.previews.download_url(&thumbnail["objectRef"])?,"width":thumbnail["width"],"height":thumbnail["height"],"version":thumbnail["version"]});
+        asset["standard"] = standard_descriptor(state, &state.library_id, &id, &standard)?;
+    }
     Ok(asset)
 }
 fn asset_id(id: &str) -> Result<String, ApiError> {
@@ -433,7 +479,7 @@ fn validate_derivative(asset: &str, role: &str) -> Result<String, ApiError> {
             "invalid asset UUID".into(),
         )
     })?;
-    if !["preview", "thumbnail"].contains(&role) {
+    if !["preview", "thumbnail", "standard"].contains(&role) {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_request".into(),
@@ -447,8 +493,18 @@ async fn derivative_metadata(
     Path(asset): Path<String>,
     Query(query): Query<DerivativeQuery>,
 ) -> ApiResult {
+    if let Some(library) = &query.library {
+        require_library(&state, library)?;
+    }
     let asset = validate_derivative(&asset, &query.role)?;
     let result = blocking(move || {
+        if query.role != "preview" {
+            let library=query.library.as_deref().unwrap_or(&state.library_id);
+            if let Some((thumbnail,standard))=state.store.cache_descriptors(library,&asset)? {
+                return if query.role=="standard" { standard_descriptor(&state,library,&asset,&standard) } else { Ok(json!({"downloadURL":state.previews.download_url(&thumbnail["objectRef"])?,"width":thumbnail["width"],"height":thumbnail["height"],"version":thumbnail["version"]})) };
+            }
+            return Ok(Value::Null);
+        }
         let Some(derivative) =
             state
                 .store
@@ -487,4 +543,242 @@ async fn local_download(
         content,
     )
         .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RevisionQuery {
+    path: Option<String>,
+    #[serde(default)]
+    include_children: bool,
+}
+async fn revision(
+    State(state): State<Arc<AppState>>,
+    Path(library): Path<String>,
+    Query(query): Query<RevisionQuery>,
+) -> ApiResult {
+    Ok(Json(
+        blocking(move || {
+            state
+                .store
+                .catalog_revision(&library, query.path.as_deref(), query.include_children)
+        })
+        .await?,
+    )
+    .into_response())
+}
+async fn versions(
+    State(state): State<Arc<AppState>>,
+    Path((library, id)): Path<(String, String)>,
+) -> ApiResult {
+    let id = asset_id(&id)?;
+    Ok(Json(blocking(move || state.store.versions(&library, &id)).await?).into_response())
+}
+async fn version_candidates(
+    State(state): State<Arc<AppState>>,
+    Path((library, id)): Path<(String, String)>,
+) -> ApiResult {
+    let id = asset_id(&id)?;
+    Ok(
+        Json(blocking(move || state.store.version_candidates(&library, &id)).await?)
+            .into_response(),
+    )
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DefaultVersionChange {
+    content_hash: String,
+}
+async fn default_version(
+    State(state): State<Arc<AppState>>,
+    Path((library, id)): Path<(String, String)>,
+    Json(change): Json<DefaultVersionChange>,
+) -> ApiResult {
+    let id = asset_id(&id)?;
+    Ok(Json(
+        blocking(move || {
+            let versions = state.store.versions(&library, &id)?;
+            let version = versions["items"]
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|version| {
+                        version["contentHash"].as_str() == Some(&change.content_hash)
+                            && version["available"] == true
+                    })
+                })
+                .ok_or_else(|| resource_error(422, "version is not available for this asset"))?;
+            let folders = state.jobs.folders()?;
+            let target = version["paths"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|location| location["available"] == true)
+                .filter_map(|location| location["path"].as_str())
+                .find_map(|path| {
+                    folders
+                        .iter()
+                        .find(|folder| {
+                            folder.active
+                                && folder.library_id == library
+                                && std::path::Path::new(path).starts_with(&folder.path)
+                        })
+                        .map(|folder| (folder.id.clone(), path))
+                })
+                .ok_or_else(|| {
+                    resource_error(
+                        409,
+                        "version folder is not tracked; enable tracking before selecting a default",
+                    )
+                })?;
+            let scope = std::path::Path::new(target.1)
+                .parent()
+                .ok_or_else(|| resource_error(422, "version path has no parent"))?;
+            state
+                .jobs
+                .validate_path(scope)
+                .map_err(|error| resource_error(409, format!("{error:#}")))?;
+            let result = state
+                .store
+                .set_default_version(&library, &id, &change.content_hash)?;
+            state.jobs.enqueue_reconcile_scope(&target.0, scope)?;
+            Ok(result)
+        })
+        .await?,
+    )
+    .into_response())
+}
+
+fn standard_descriptor(
+    state: &AppState,
+    library: &str,
+    asset: &str,
+    standard: &Value,
+) -> anyhow::Result<Value> {
+    if standard["deferred"].as_bool() == Some(true)
+        || crate::media::is_video(std::path::Path::new(
+            standard["path"].as_str().unwrap_or(""),
+        ))
+    {
+        return Ok(Value::Null);
+    }
+    let object = json!({"bucket":"keeps-previews","key":format!("libraries/{library}/assets/{asset}/standard/{}",standard["version"].as_str().unwrap_or(""))});
+    Ok(
+        json!({"downloadURL":state.previews.signed_url(&object,"standard")?,"width":standard["width"],"height":standard["height"],"version":standard["version"]}),
+    )
+}
+async fn standard_download(
+    State(state): State<Arc<AppState>>,
+    Path(token): Path<String>,
+) -> ApiResult {
+    let (path, mime) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let payload = state.previews.verify(&token, "standard")?;
+        let parts: Vec<_> = payload["key"].as_str().unwrap_or("").split('/').collect();
+        anyhow::ensure!(
+            parts.len() == 6
+                && parts[0] == "libraries"
+                && parts[2] == "assets"
+                && parts[4] == "standard",
+            "invalid standard token"
+        );
+        anyhow::ensure!(parts[1] == state.library_id, "wrong library");
+        let (_, standard) = state
+            .store
+            .cache_descriptors(parts[1], parts[3])?
+            .ok_or_else(|| anyhow::anyhow!("standard no longer available"))?;
+        anyhow::ensure!(
+            standard["deferred"].as_bool() != Some(true),
+            "standard generation deferred"
+        );
+        anyhow::ensure!(standard["version"] == parts[5], "standard version changed");
+        let path = std::path::PathBuf::from(
+            standard["path"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing standard path"))?,
+        );
+        anyhow::ensure!(
+            !std::fs::symlink_metadata(&path)?.file_type().is_symlink(),
+            "standard symlink forbidden"
+        );
+        anyhow::ensure!(
+            std::fs::metadata(&path)?.len() == standard["sizeBytes"].as_u64().unwrap_or(0)
+                && crate::cache_pipeline::file_mtime(&path)?
+                    == standard["mtimeNs"].as_str().unwrap_or(""),
+            "standard source changed; waiting for inventory refresh"
+        );
+        let path = path.canonicalize()?;
+        state.jobs.validate_path(
+            path.parent()
+                .ok_or_else(|| anyhow::anyhow!("standard has no parent directory"))?,
+        )?;
+        let mime = match path
+            .extension()
+            .and_then(|v| v.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .as_str()
+        {
+            "jpg" | "jpeg" => "image/jpeg",
+            "png" => "image/png",
+            "tif" | "tiff" => "image/tiff",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "avif" => "image/avif",
+            "heif" | "hif" => "image/heif",
+            "mov" => "video/quicktime",
+            "mp4" | "m4v" => "video/mp4",
+            "avi" => "video/x-msvideo",
+            "mkv" => "video/x-matroska",
+            "mts" | "m2ts" => "video/mp2t",
+            _ => "image/heic",
+        };
+        Ok((path, mime))
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(anyhow::Error::from)?;
+    let length = file.metadata().await.map_err(anyhow::Error::from)?.len();
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime.to_string()),
+            (header::CONTENT_LENGTH, length.to_string()),
+        ],
+        body,
+    )
+        .into_response())
+}
+async fn cache_status(
+    State(state): State<Arc<AppState>>,
+    Path(library): Path<String>,
+) -> ApiResult {
+    require_library(&state, &library)?;
+    Ok(Json(
+        blocking(move || {
+            let mut result = state.store.cache_status(&library)?;
+            result["identityBackfill"] = state.jobs.identity_status(&library)?;
+            Ok(result)
+        })
+        .await?,
+    )
+    .into_response())
+}
+async fn cache_retry(State(state): State<Arc<AppState>>, Path(library): Path<String>) -> ApiResult {
+    require_library(&state, &library)?;
+    Ok(
+        Json(blocking(move || Ok(json!({"requeued":state.store.retry_cache(&library)?,"gcRequeued":state.store.retry_cache_garbage(&library)?}))).await?)
+            .into_response(),
+    )
+}
+
+async fn cache_rebuild(
+    State(state): State<Arc<AppState>>,
+    Path(library): Path<String>,
+) -> ApiResult {
+    require_library(&state, &library)?;
+    Ok(
+        Json(blocking(move || Ok(json!({"requeued":state.store.rebuild_cache(&library)?}))).await?)
+            .into_response(),
+    )
 }

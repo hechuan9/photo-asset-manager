@@ -158,7 +158,7 @@ struct DirectoryOutlineView: NSViewRepresentable {
             let oldErrors = errors
             let oldLoading = loading
             let oldGalleryLoadingPath = galleryLoadingPath
-            galleryLoadingPath = library.isLoading ? library.query.directory : nil
+            galleryLoadingPath = library.isLoading && !library.isCheckingRevision ? library.query.directory : nil
             let reset = generation != library.navigationGeneration
             roots = library.directories
             children = library.directoryChildren

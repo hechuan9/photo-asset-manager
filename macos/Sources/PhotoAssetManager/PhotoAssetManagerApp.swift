@@ -3,11 +3,13 @@ import KeepsAPI
 
 @main
 struct PhotoAssetManagerApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var library = LibraryStore()
     var body: some Scene {
         WindowGroup {
             ContentView().environmentObject(library).frame(minWidth: 1080, minHeight: 720)
         }
+        .onChange(of: scenePhase, initial: true) { _, phase in library.setActive(phase == .active) }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1440, height: 900)
         .commands {

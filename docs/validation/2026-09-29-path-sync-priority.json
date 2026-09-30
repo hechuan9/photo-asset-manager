@@ -1,0 +1,338 @@
+{
+  "status": "PASS",
+  "deployment": {
+    "status": "PASS",
+    "image": "sha256:85b164e92c54bb43389c5426992638f7c8948257059ff7b53b6f8ead09224b58",
+    "oldImage": "sha256:027bc6e618ca15d65fa250312be5fcbb231ecfde26e72bca3158a325297cef15",
+    "maintenanceStoppedAtUTC": "2026-09-29T23:53:21Z",
+    "secondMaintenanceStoppedAtUTC": "2026-09-30T00:03:35Z",
+    "healthyAtUTC": "2026-09-30T00:04:20Z",
+    "cpuset": "2-3",
+    "memoryLimitBytes": 2147483648,
+    "schema": 8,
+    "pathSyncColumn": true,
+    "targetScanPrioritized": 1,
+    "originalFilesModified": false
+  },
+  "pathVerification": {
+    "utc": "2026-09-30T00:04:53Z",
+    "correct": 147,
+    "expected": 147,
+    "oldPaths": 0,
+    "newPaths": 147,
+    "cacheStates": {
+      "pending": 139,
+      "ready": 8
+    },
+    "errors": [
+      {
+        "asset": "1696765a-d788-49e3-bd7e-8c1ae406b679",
+        "error": "No such file or directory (os error 2)"
+      },
+      {
+        "asset": "145d97f1-434f-4ec4-a20c-a9ee1aa0b0c5",
+        "error": "No such file or directory (os error 2)"
+      },
+      {
+        "asset": "16ce0254-8390-42b4-9074-7ffb76fe0230",
+        "error": "No such file or directory (os error 2)"
+      },
+      {
+        "asset": "1714a7af-1409-4d33-9b13-a21a4a2639b2",
+        "error": "No such file or directory (os error 2)"
+      },
+      {
+        "asset": "0f96059e-c7ea-46ee-a767-069f0617b673",
+        "error": "No such file or directory (os error 2)"
+      },
+      {
+        "asset": "10e65382-531d-4466-8095-e7b92da9b091",
+        "error": "No such file or directory (os error 2)"
+      },
+      {
+        "asset": "132c4c87-d821-4f68-97da-857c13196e05",
+        "error": "No such file or directory (os error 2)"
+      },
+      {
+        "asset": "11a3cb73-cd94-4f5a-954d-bedb7fd7e636",
+        "error": "No such file or directory (os error 2)"
+      },
+      {
+        "asset": "158e7057-33cb-4d5e-96d3-e51eb538faeb",
+        "error": "No such file or directory (os error 2)"
+      }
+    ],
+    "jobs": [
+      {
+        "id": "c6508189-e6e1-47c5-abf9-d8902bc3e9d7",
+        "status": "running",
+        "path_sync": 1,
+        "processed": 51,
+        "skipped": 96,
+        "failed": 0,
+        "current_path": null,
+        "error": null
+      }
+    ],
+    "status": "PASS",
+    "existingReadyThumbnailsPreserved": 8,
+    "quickCheck": "ok"
+  },
+  "samples": {
+    "status": "PASS",
+    "utc": "2026-09-30T00:05:39Z",
+    "samples": [
+      {
+        "asset": "145d97f1-434f-4ec4-a20c-a9ee1aa0b0c5",
+        "path": "/volume2/photo/照片/2025/白墨水婚礼/婚礼拍立得/B0002535.3FR",
+        "originalHashUnchanged": true,
+        "defaultPathUpdated": true
+      },
+      {
+        "asset": "2394e266-c8ee-468c-a9bf-c065bd99d522",
+        "path": "/volume2/photo/照片/2025/白墨水婚礼/婚礼拍立得/B0002524.3FR",
+        "originalHashUnchanged": true,
+        "defaultPathUpdated": true
+      },
+      {
+        "asset": "d2b04de2-99b1-45cb-b710-9a30b5c300b1",
+        "path": "/volume2/photo/照片/2025/白墨水婚礼/婚礼拍立得/B0002687.3FR",
+        "originalHashUnchanged": true,
+        "defaultPathUpdated": true
+      }
+    ]
+  },
+  "retry": {
+    "utc": "2026-09-30T00:05:37Z",
+    "priorErrors": [
+      "0f96059e-c7ea-46ee-a767-069f0617b673",
+      "10e65382-531d-4466-8095-e7b92da9b091",
+      "11a3cb73-cd94-4f5a-954d-bedb7fd7e636",
+      "132c4c87-d821-4f68-97da-857c13196e05",
+      "145d97f1-434f-4ec4-a20c-a9ee1aa0b0c5",
+      "158e7057-33cb-4d5e-96d3-e51eb538faeb",
+      "1696765a-d788-49e3-bd7e-8c1ae406b679",
+      "16ce0254-8390-42b4-9074-7ffb76fe0230",
+      "1714a7af-1409-4d33-9b13-a21a4a2639b2"
+    ],
+    "result": {
+      "gcRequeued": 0,
+      "requeued": 9
+    }
+  },
+  "final": {
+    "utc": "2026-09-30T00:06:46Z",
+    "retried": [
+      {
+        "asset_id": "0f96059e-c7ea-46ee-a767-069f0617b673",
+        "status": "ready",
+        "attempts": 1,
+        "last_error": null,
+        "standard": "{\"deferred\":true,\"height\":8842,\"mtimeNs\":\"1764771292000000000\",\"path\":\"/volume2/photo/照片/2025/白墨水婚礼/婚礼拍立得/B0002562.3FR\",\"sizeBytes\":212152320,\"version\":\"12f8cb0bdfca312a6f58eba6f44eacf1a91c918e313b45e230fa94623de42e85\",\"width\":11904}"
+      },
+      {
+        "asset_id": "10e65382-531d-4466-8095-e7b92da9b091",
+        "status": "ready",
+        "attempts": 1,
+        "last_error": null,
+        "standard": "{\"deferred\":true,\"height\":8842,\"mtimeNs\":\"1764771663000000000\",\"path\":\"/volume2/photo/照片/2025/白墨水婚礼/婚礼拍立得/B0002604.3FR\",\"sizeBytes\":212439040,\"version\":\"c9cb08200edbdcdf919d50fcae76a66b182c60a0d3877db6a7fee5e16565827b\",\"width\":11904}"
+      },
+      {
+        "asset_id": "11a3cb73-cd94-4f5a-954d-bedb7fd7e636",
+        "status": "ready",
+        "attempts": 1,
+        "last_error": null,
+        "standard": "{\"deferred\":true,\"height\":8842,\"mtimeNs\":\"1764772081000000000\",\"path\":\"/volume2/photo/照片/2025/白墨水婚礼/婚礼拍立得/B0002645.3FR\",\"sizeBytes\":212357120,\"version\":\"b6a0462b9b96d464c13166dcff59918b47b2714fab3d4ccb1c897beef4137b60\",\"width\":11904}"
+      },
+      {
+        "asset_id": "132c4c87-d821-4f68-97da-857c13196e05",
+        "status": "ready",
+        "attempts": 1,
+        "last_error": null,
+        "standard": "{\"deferred\":true,\"height\":8842,\"mtimeNs\":\"1764771856000000000\",\"path\":\"/volume2/photo/照片/2025/白墨水婚礼/婚礼拍立得/B0002627.3FR\",\"sizeBytes\":212152320,\"version\":\"cb50c169a6e8149083244f04645ceadf20b6f19a5c902811d690a7445b80a85e\",\"width\":11904}"
+      },
+      {
+        "asset_id": "145d97f1-434f-4ec4-a20c-a9ee1aa0b0c5",
+        "status": "ready",
+        "attempts": 1,
+        "last_error": null,
+        "standard": "{\"deferred\":true,\"height\":8842,\"mtimeNs\":\"1764771090000000000\",\"path\":\"/volume2/photo/照片/2025/白墨水婚礼/婚礼拍立得/B0002535.3FR\",\"sizeBytes\":212566016,\"version\":\"e21810135e79defd7efdb583bd139bc8da60b6873280040f100791cc1f891079\",\"width\":11904}"
+      },
+      {
+        "asset_id": "158e7057-33cb-4d5e-96d3-e51eb538faeb",
+        "status": "ready",
+        "attempts": 1,
+        "last_error": null,
+        "standard": "{\"deferred\":true,\"height\":8842,\"mtimeNs\":\"1764772267000000000\",\"path\":\"/volume2/photo/照片/2025/白墨水婚礼/婚礼拍立得/B0002660.3FR\",\"sizeBytes\":212869120,\"version\":\"c7fce869e21ef31d00662bb0936d7056818d75bda9ad0569ac8671e26cd910b4\",\"width\":11904}"
+      },
+      {
+        "asset_id": "1696765a-d788-49e3-bd7e-8c1ae406b679",
+        "status": "ready",
+        "attempts": 1,
+        "last_error": null,
+        "standard": "{\"deferred\":true,\"height\":8842,\"mtimeNs\":\"1764771049000000000\",\"path\":\"/volume2/photo/照片/2025/白墨水婚礼/婚礼拍立得/B0002529.3FR\",\"sizeBytes\":212602880,\"version\":\"f7e3bfc0a6df2a2a6b6159deb519050f0463bb257fbfc122167470e03c5d3f09\",\"width\":11904}"
+      },
+      {
+        "asset_id": "16ce0254-8390-42b4-9074-7ffb76fe0230",
+        "status": "ready",
+        "attempts": 1,
+        "last_error": null,
+        "standard": "{\"deferred\":true,\"height\":8842,\"mtimeNs\":\"1764771190000000000\",\"path\":\"/volume2/photo/照片/2025/白墨水婚礼/婚礼拍立得/B0002549.3FR\",\"sizeBytes\":212439040,\"version\":\"644aab4a5f04e877ae723782d284d31fa00c99b2881240e9ca553ed9f34b041a\",\"width\":11904}"
+      },
+      {
+        "asset_id": "1714a7af-1409-4d33-9b13-a21a4a2639b2",
+        "status": "ready",
+        "attempts": 1,
+        "last_error": null,
+        "standard": "{\"deferred\":true,\"height\":8842,\"mtimeNs\":\"1764771195000000000\",\"path\":\"/volume2/photo/照片/2025/白墨水婚礼/婚礼拍立得/B0002550.3FR\",\"sizeBytes\":212516864,\"version\":\"ea2463af82dca56c4971f058e4331d0bb01881470c7eb91dfc2fd9b542dfc871\",\"width\":11904}"
+      }
+    ],
+    "job": {
+      "status": "completed",
+      "processed": 51,
+      "skipped": 96,
+      "failed": 0,
+      "path_sync": 1,
+      "error": null
+    },
+    "assetCount": 90592
+  },
+  "tests": {
+    "rustLibrary": 87,
+    "http": 17,
+    "cli": 1,
+    "ignored": 1,
+    "clippy": "PASS",
+    "realMediaSmoke": [
+      {
+        "test": "health_and_auth",
+        "status": "PASS"
+      },
+      {
+        "test": "schema8_no_ledger_and_raw_same_asset_standard",
+        "status": "PASS"
+      },
+      {
+        "test": "all_four_remote_tasks_and_duplicate_complete",
+        "status": "PASS"
+      },
+      {
+        "test": "signed_download_hashes_jpeg_heif_reuse_3fr_thumbnail_only",
+        "status": "PASS"
+      },
+      {
+        "test": "rescan_stable_original_hashes_and_resource_limits",
+        "status": "PASS"
+      },
+      {
+        "test": "directory_move_preserves_asset_and_retires_old_path",
+        "status": "PASS"
+      }
+    ]
+  },
+  "nas": {
+    "observedAtUTC": "2026-09-30T00:06:11Z",
+    "container": {
+      "image": "sha256:85b164e92c54bb43389c5426992638f7c8948257059ff7b53b6f8ead09224b58",
+      "status": "running",
+      "health": "healthy",
+      "restartCount": 0,
+      "oomKilled": false,
+      "cpuSet": "2-3",
+      "memoryLimitBytes": 2147483648
+    },
+    "disk": {
+      "freeBytes": 34812099821568,
+      "totalBytes": 69077505212416
+    },
+    "cache": {
+      "batchLimit": 20,
+      "concurrency": 1,
+      "counts": {
+        "failed": 0,
+        "pending": 82007,
+        "processing": 16,
+        "ready": 8508
+      },
+      "eligibleAssets": 90531,
+      "enabled": true,
+      "encoderThreads": 1,
+      "errors": [],
+      "gc": {
+        "batchLimit": 20,
+        "enabled": true,
+        "errors": [],
+        "failed": 0,
+        "graceSeconds": 1200,
+        "nextEligibleAt": 1790726691,
+        "pending": 161
+      },
+      "lastSuccessAt": 1790726769,
+      "localEncodingEnabled": false,
+      "maxAttempts": 4,
+      "pendingInventory": 29,
+      "restSeconds": 60,
+      "runtime": {
+        "freeBytes": 34812364591104,
+        "lastBatchAt": 1790726733,
+        "lastBatchCount": 0,
+        "lastError": null,
+        "nextBatchAt": 1790726793
+      },
+      "spec": "thumbnail-heic-512-q50-v1",
+      "totalAssets": 90560
+    },
+    "resourceUsage": {
+      "BlockIO": "0B / 0B",
+      "CPUPerc": "185.35%",
+      "Container": "keeps-control-plane",
+      "ID": "1bdde41f4649",
+      "MemPerc": "57.45%",
+      "MemUsage": "1.149GiB / 2GiB",
+      "Name": "keeps-control-plane",
+      "NetIO": "318MB / 3.09GB",
+      "PIDs": "0"
+    },
+    "nasLoadAverage": [
+      3.43359375,
+      2.9189453125,
+      2.822265625
+    ]
+  },
+  "linux": {
+    "observedAtUTC": "2026-09-30T00:06:15Z",
+    "image": "sha256:efc56151ab267b25cc5554b4056fc6f79f1e5dd9b7e5e65242fc924e49df59e7",
+    "status": "running",
+    "startedAt": "2026-09-30T00:04:28.465974798Z",
+    "restartCount": 0,
+    "oomKilled": false,
+    "cpuLimit": 16.0,
+    "memoryLimit": 25769803776,
+    "concurrency": "16",
+    "addressSpace": "4294967296",
+    "scratchBudget": "137438953472",
+    "resourceUsage": {
+      "BlockIO": "0B / 5.57GB",
+      "CPUPerc": "374.38%",
+      "Container": "keeps-worker-worker-1",
+      "ID": "a9431b477bf1",
+      "MemPerc": "3.73%",
+      "MemUsage": "917.2MiB / 24GiB",
+      "Name": "keeps-worker-worker-1",
+      "NetIO": "3.11GB / 320MB",
+      "PIDs": "52"
+    },
+    "memoryEvents": {
+      "low": "0",
+      "high": "0",
+      "max": "0",
+      "oom": "0",
+      "oom_kill": "0",
+      "oom_group_kill": "0"
+    },
+    "diskFree": 475191164928,
+    "completedSinceResume": 37,
+    "lastCompleted": "2026-09-30 00:06:15,311 INFO Completed task 1e85b9a1-c758-4cf4-a58a-ba60d1d8d95f elapsedSeconds=24.95 sourceBytes=212152320 outputBytes=22336",
+    "errorsSinceResume": 0
+  }
+}

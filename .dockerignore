@@ -11,3 +11,6 @@
 !control_plane/control_plane/**
 **/__pycache__/
 **/*.pyc
+
+!scripts/
+!scripts/linux_cache_worker.py

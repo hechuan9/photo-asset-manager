@@ -1,0 +1,52 @@
+{
+  "time": "2026-09-28T12:05:18.371312+00:00",
+  "image": "sha256:a22011663b0d877d562ecae286746a44727a7abebcc4db62ae21d96e7f921a01",
+  "started": "2026-09-28T12:04:35.596593468Z",
+  "checks": [
+    {
+      "library": "hechuan",
+      "endpoint": "counts",
+      "status": 404,
+      "error": {
+        "code": "library_not_found",
+        "message": "图库 ID 不存在，请检查连接设置中的图库 ID；此字段不是 NAS 用户名。"
+      }
+    },
+    {
+      "library": "hechuan",
+      "endpoint": "assets?limit=1",
+      "status": 404,
+      "error": {
+        "code": "library_not_found",
+        "message": "图库 ID 不存在，请检查连接设置中的图库 ID；此字段不是 NAS 用户名。"
+      }
+    },
+    {
+      "library": "hechuan",
+      "endpoint": "revision",
+      "status": 404,
+      "error": {
+        "code": "library_not_found",
+        "message": "图库 ID 不存在，请检查连接设置中的图库 ID；此字段不是 NAS 用户名。"
+      }
+    },
+    {
+      "library": "local-library",
+      "endpoint": "counts",
+      "status": 200,
+      "total": 121447
+    },
+    {
+      "library": "local-library",
+      "endpoint": "assets?limit=1",
+      "status": 200,
+      "total": 121447
+    },
+    {
+      "library": "local-library",
+      "endpoint": "revision",
+      "status": 200,
+      "total": null
+    }
+  ]
+}

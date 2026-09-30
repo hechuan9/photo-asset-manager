@@ -286,8 +286,7 @@ import KeepsAPI
         try await waitUntil { !store.isLoading }
         store.select(store.assets[0].id, extending: false)
         store.setDirectoryHidden("root/private", hidden: true)
-        #expect(store.assets.isEmpty)
-        #expect(store.selectedIDs.isEmpty)
+        #expect(!store.assets.isEmpty)
         try await waitUntil { !store.isUpdatingHiddenDirectory && !store.isLoading }
         #expect(store.hiddenDirectoryPaths == ["root/private"])
         #expect(store.lastError == nil)
@@ -309,6 +308,97 @@ import KeepsAPI
         #expect(store.assets.count == 2)
         let reloaded = LibraryStore(loadSavedSettings: false, preferences: preferences)
         #expect(!reloaded.hiddenDirectoryFilterEnabled)
+    }
+
+    @Test func revisionPollingRefreshesOnlyWhenChangedAndStopsWhileInactive() async throws {
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://revision.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        store.setActive(true)
+        defer { store.setActive(false) }
+        try await waitUntil { store.assets.count == 2 && !store.isLoading }
+        #expect(LibraryStubProtocol.treeRequests.count(for: "revision-assets") == 1)
+        store.setActive(false)
+        store.setActive(true)
+        try await waitUntil { LibraryStubProtocol.treeRequests.count(for: "revision-poll") == 2 }
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(LibraryStubProtocol.treeRequests.count(for: "revision-assets") == 1)
+        store.setActive(false)
+        store.setActive(true)
+        try await waitUntil { LibraryStubProtocol.treeRequests.count(for: "revision-assets") == 2 && !store.isLoading }
+        store.setActive(false)
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(LibraryStubProtocol.treeRequests.count(for: "revision-poll") == 3)
+    }
+
+    @Test func returningToDirectoryRestoresAllLoadedPagesWithoutAssetOrCountRequests() async throws {
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://cache-pages.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        store.showLibrary(directory: "A")
+        try await waitUntil { !store.isLoading }
+        store.loadMore()
+        try await waitUntil { !store.isLoading }
+        #expect(store.assets.count == 2)
+        store.showLibrary(directory: "B")
+        try await waitUntil { !store.isLoading }
+        let requests = LibraryStubProtocol.treeRequests.count(for: "cache-assets")
+        let counts = LibraryStubProtocol.treeRequests.count(for: "cache-counts")
+        store.showLibrary(directory: "A")
+        #expect(store.assets.count == 2)
+        try await waitUntil { !store.isLoading }
+        #expect(LibraryStubProtocol.treeRequests.count(for: "cache-assets") == requests)
+        #expect(LibraryStubProtocol.treeRequests.count(for: "cache-counts") == counts)
+        store.refresh(force: true)
+        try await waitUntil { !store.isLoading }
+        #expect(store.assets.count == 2)
+        #expect(LibraryStubProtocol.treeRequests.count(for: "cache-assets") == requests + 2)
+    }
+
+    @Test func updatingWindowRefreshesOnceAndFinalVersionRefreshesImmediately() async throws {
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://updating.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        store.showLibrary(directory: "A")
+        try await waitUntil { !store.isLoading }
+        store.select(store.assets[0].id, extending: false)
+        let selection = store.selectedIDs
+        store.refresh()
+        #expect(store.assets.count == 2)
+        try await waitUntil { !store.isLoading }
+        #expect(LibraryStubProtocol.treeRequests.count(for: "updating-assets") == 2)
+        store.refresh()
+        try await waitUntil { !store.isLoading }
+        #expect(LibraryStubProtocol.treeRequests.count(for: "updating-assets") == 2)
+        store.refresh()
+        try await waitUntil { !store.isLoading }
+        #expect(LibraryStubProtocol.treeRequests.count(for: "updating-assets") == 3)
+        #expect(store.selectedIDs == selection)
+        #expect(store.lastError == nil)
+    }
+
+    @Test func changedRevisionDuringPaginationRestartsWithoutCachingMixedPages() async throws {
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://mixed-pages.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        store.refresh()
+        try await waitUntil { !store.isLoading }
+        #expect(store.assets.count == 1)
+        store.loadMore()
+        try await waitUntil { !store.isLoading }
+        #expect(store.assets.count == 1)
+        #expect(store.nextCursor == "next")
+        #expect(LibraryStubProtocol.treeRequests.count(for: "mixed-assets") == 3)
+        store.refresh()
+        try await waitUntil { !store.isLoading }
+        #expect(LibraryStubProtocol.treeRequests.count(for: "mixed-assets") == 3)
+        #expect(store.lastError == nil)
+    }
+
+    @Test func refreshedPaginationDeduplicatesOverlappingServerPages() async throws {
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://overlap-pages.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        store.refresh()
+        try await waitUntil { !store.isLoading }
+        store.loadMore()
+        try await waitUntil { !store.isLoading }
+        #expect(store.assets.count == 2)
+        store.refresh(force: true)
+        try await waitUntil { !store.isLoading }
+        #expect(store.assets.count == 2)
+        #expect(Set(store.assets.map(\.id)).count == 2)
+        #expect(store.nextCursor == nil)
     }
 
     private func stubSession() -> URLSession {
@@ -351,6 +441,38 @@ private final class LibraryStubProtocol: URLProtocol, @unchecked Sendable {
             }
             return
         }
+        if request.url?.host == "updating.invalid" {
+            if request.url?.path.hasSuffix("/revision") == true {
+                Self.treeRequests.record("updating-poll")
+                let poll = Self.treeRequests.count(for: "updating-poll")
+                let updating = poll == 2 || poll == 3
+                let revision = poll == 1 ? 1 : updating ? 2 : 3
+                deliver(body: "{\"revision\":\(revision),\"isUpdating\":\(updating)}", status: 200)
+                return
+            }
+            if request.url?.path.hasSuffix("/assets") == true { Self.treeRequests.record("updating-assets") }
+        }
+        if request.url?.host == "revision.invalid" {
+            if request.url?.path.hasSuffix("/revision") == true {
+                Self.treeRequests.record("revision-poll")
+                let value = Self.treeRequests.count(for: "revision-poll") > 2 ? 2 : 1
+                deliver(body: "{\"revision\":\(value),\"isUpdating\":false}", status: 200)
+                return
+            }
+            if request.url?.path.hasSuffix("/assets") == true { Self.treeRequests.record("revision-assets") }
+        }
+        if request.url?.host == "cache-pages.invalid" {
+            if request.url?.path.hasSuffix("/assets") == true { Self.treeRequests.record("cache-assets") }
+            if request.url?.path.hasSuffix("/counts") == true { Self.treeRequests.record("cache-counts") }
+        }
+        if request.url?.host == "mixed-pages.invalid" {
+            if request.url?.path.hasSuffix("/assets") == true { Self.treeRequests.record("mixed-assets") }
+            if request.url?.path.hasSuffix("/revision") == true {
+                let revision = Self.treeRequests.count(for: "mixed-assets") == 0 ? 1 : 2
+                deliver(body: "{\"revision\":\(revision),\"isUpdating\":false}", status: 200)
+                return
+            }
+        }
         let first = Self.asset("00000000-0000-0000-0000-000000000001")
         let second = Self.asset("00000000-0000-0000-0000-000000000002")
         let path = request.url!.path
@@ -359,11 +481,16 @@ private final class LibraryStubProtocol: URLProtocol, @unchecked Sendable {
         if status == 401 { body = "access denied" }
         else if request.url?.host == "invalid-api.invalid" && path.hasSuffix("/assets") { body = "{}" }
         else if request.httpMethod == "PATCH" { body = second }
-        else if path.hasSuffix("/assets"), request.url?.host == "pages.invalid" {
+        else if path.hasSuffix("/assets"), request.url?.host == "overlap-pages.invalid" {
+            let hasCursor = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.contains { $0.name == "cursor" } == true
+            body = hasCursor ? "{\"items\":[\(first),\(second)],\"total\":2}" : "{\"items\":[\(first)],\"total\":2,\"nextCursor\":\"next\"}"
+        }
+        else if path.hasSuffix("/assets"), ["pages.invalid", "cache-pages.invalid", "mixed-pages.invalid"].contains(request.url?.host ?? "") {
             let hasCursor = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.contains { $0.name == "cursor" } == true
             body = hasCursor ? "{\"items\":[\(second)],\"total\":2}" : "{\"items\":[\(first)],\"total\":2,\"nextCursor\":\"next\"}"
         }
         else if path.hasSuffix("/assets") { body = "{\"items\":[\(first),\(second)],\"total\":2}" }
+        else if path.hasSuffix("/revision") { body = "{\"revision\":1,\"isUpdating\":false}" }
         else if path.hasSuffix("/hidden-directories") { body = "{\"paths\":[\"root/private\"]}" }
         else if path.hasSuffix("/counts") { body = "{\"all\":2,\"picked\":0,\"trashed\":0}" }
         else if path.hasSuffix("/navigation"), request.url?.host == "tree.invalid" {
@@ -380,7 +507,21 @@ private final class LibraryStubProtocol: URLProtocol, @unchecked Sendable {
         else if path.hasSuffix("/navigation") { body = "{\"path\":null,\"directories\":[{\"path\":\"2026\",\"name\":\"2026\",\"photoCount\":0,\"hasChildren\":false}]}" }
         else if path.hasSuffix("/directories") { body = "{\"directories\":[{\"path\":\"2026\",\"count\":2}]}" }
         else { Issue.record("unexpected client request: \(path)"); body = "{}" }
-        deliver(body: body, status: status)
+        var response = body
+        if path.hasSuffix("/assets"), status == 200, body.contains("\"items\"") {
+            var revision = request.url?.host == "revision.invalid" && Self.treeRequests.count(for: "revision-poll") > 2 ? 2 : 1
+            if request.url?.host == "mixed-pages.invalid" { revision = Self.treeRequests.count(for: "mixed-assets") == 1 ? 1 : 2 }
+            if request.url?.host == "updating.invalid" {
+                let poll = Self.treeRequests.count(for: "updating-poll")
+                let updating = poll == 2 || poll == 3
+                let revision = poll == 1 ? 1 : updating ? 2 : 3
+                response = String(body.dropLast()) + ",\"revision\":\(revision),\"isUpdating\":\(updating)}"
+                deliver(body: response, status: status)
+                return
+            }
+            response = String(body.dropLast()) + ",\"revision\":\(revision),\"isUpdating\":false}"
+        }
+        deliver(body: response, status: status)
     }
     private func deliver(body: String, status: Int) {
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)

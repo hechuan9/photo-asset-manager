@@ -1,8 +1,13 @@
 use anyhow::{Context, Result, bail, ensure};
-use chrono::{Local, NaiveDateTime, SecondsFormat, TimeZone, Utc};
+use chrono::{DateTime, Local, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{fs::File, io::Read, path::Path, process::Command};
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 const RAW_EXTENSIONS: &[&str] = &[
     "3fr", "ari", "arw", "bay", "cr2", "cr3", "crw", "dcr", "dng", "erf", "fff", "iiq", "k25",
@@ -16,7 +21,12 @@ pub fn is_raw(path: &Path) -> bool {
 
 pub fn is_photo(path: &Path) -> bool {
     is_raw(path)
-        || ["jpg", "jpeg", "heic", "heif", "png", "tif", "tiff"].contains(&extension(path).as_str())
+        || ["jpg", "jpeg", "heic", "heif", "hif", "png", "tif", "tiff"]
+            .contains(&extension(path).as_str())
+}
+
+pub fn is_video(path: &Path) -> bool {
+    ["mov", "mp4", "m4v", "avi", "mkv", "mts", "m2ts"].contains(&extension(path).as_str())
 }
 
 fn extension(path: &Path) -> String {
@@ -33,6 +43,13 @@ pub struct Metadata {
     pub camera_model: String,
     pub lens_model: String,
     pub rating: i64,
+    pub camera_serial: String,
+    pub capture_original: String,
+    pub width: i64,
+    pub height: i64,
+    pub edited: bool,
+    pub orientation: i64,
+    pub color_space: String,
 }
 
 impl Metadata {
@@ -122,20 +139,17 @@ impl MediaProcessor {
             .with_context(|| format!("resolving {}", path.display()))?;
         let tags = read_tags(&path)?;
         let text = |key: &str| tags[key].as_str().unwrap_or_default().to_owned();
-        let capture_time = tags["EXIF:DateTimeOriginal"]
+        let capture_original = tags["Composite:SubSecDateTimeOriginal"]
             .as_str()
-            .map(parse_capture_time)
-            .transpose()?;
+            .or_else(|| tags["EXIF:DateTimeOriginal"].as_str())
+            .unwrap_or_default();
+        let capture_time = Some(complete_capture_time(&tags, &path)?);
         let mut rating = rating(&tags);
         if rating.is_none() {
-            let mut appended = path.as_os_str().to_os_string();
-            appended.push(".xmp");
-            for candidate in [path.with_extension("xmp"), appended.into()] {
-                if candidate.is_file() {
-                    rating = rating_from_sidecar(&candidate)?;
-                    if rating.is_some() {
-                        break;
-                    }
+            for candidate in sidecars(&path)? {
+                rating = rating_from_sidecar(&candidate)?;
+                if rating.is_some() {
+                    break;
                 }
             }
         }
@@ -145,12 +159,93 @@ impl MediaProcessor {
             camera_model: text("EXIF:Model"),
             lens_model: text("EXIF:LensModel"),
             rating: rating.unwrap_or(0),
+            camera_serial: text("EXIF:BodySerialNumber"),
+            capture_original: capture_original.to_owned(),
+            width: image_dimension(&tags, "ImageWidth"),
+            height: image_dimension(&tags, "ImageHeight"),
+            edited: tags["XMP:HasSettings"].as_bool().unwrap_or(false)
+                || tags["XMP:HasSettings"]
+                    .as_str()
+                    .is_some_and(|v| v.eq_ignore_ascii_case("true")),
+            orientation: tags["EXIF:Orientation"].as_i64().unwrap_or(1),
+            color_space: tags["EXIF:ColorSpace"].to_string(),
         })
     }
 
-    pub fn generate_preview(&self, source: &Path, target: &Path) -> Result<Preview> {
+    pub fn preserve_standard_metadata(&self, source: &Path, target: &Path) -> Result<()> {
         ensure!(
-            is_photo(source),
+            source.canonicalize()? != target.canonicalize()?,
+            "metadata output must not be the original"
+        );
+        run(Command::new("exiftool")
+            .arg("-TagsFromFile")
+            .arg(source)
+            .args([
+                "-DateTimeOriginal",
+                "-SubSecTimeOriginal",
+                "-OffsetTimeOriginal",
+                "-CreateDate",
+                "-SubSecTimeDigitized",
+                "-OffsetTimeDigitized",
+                "-ModifyDate",
+                "-Make",
+                "-Model",
+                "-LensMake",
+                "-LensModel",
+                "-LensInfo",
+                "-BodySerialNumber",
+                "-LensSerialNumber",
+                "-GPS:All",
+                "-ExposureTime",
+                "-FNumber",
+                "-ISO",
+                "-FocalLength",
+                "-ExposureCompensation",
+                "-Rating",
+                "-XMP:Rating",
+                "-Copyright",
+                "-Artist",
+                "-Description",
+                "-Orientation#=1",
+                "-ColorSpace#=1",
+                "-Software=Keeps",
+                "-XMP-xmp:CreatorTool=Keeps",
+                "-overwrite_original",
+            ])
+            .arg(target))
+        .context("preserve source metadata on generated standard photo")?;
+        File::open(target)?.sync_all()?;
+        Ok(())
+    }
+    pub fn generate_preview(&self, source: &Path, target: &Path) -> Result<Preview> {
+        self.generate_image(source, target, 1200)
+    }
+
+    pub fn generate_image(&self, source: &Path, target: &Path, edge: u32) -> Result<Preview> {
+        self.generate_image_quality(source, target, edge, 80)
+    }
+    pub fn generate_image_quality(
+        &self,
+        source: &Path,
+        target: &Path,
+        edge: u32,
+        quality: u8,
+    ) -> Result<Preview> {
+        self.generate_with_deadline(source, target, edge, quality, 180)
+    }
+    pub fn generate_standard(&self, source: &Path, target: &Path, edge: u32) -> Result<Preview> {
+        self.generate_with_deadline(source, target, edge, 80, 900)
+    }
+    fn generate_with_deadline(
+        &self,
+        source: &Path,
+        target: &Path,
+        edge: u32,
+        quality: u8,
+        encode_seconds: u64,
+    ) -> Result<Preview> {
+        ensure!(
+            is_photo(source) || is_video(source),
             "unsupported photo extension: {}",
             source.display()
         );
@@ -168,9 +263,16 @@ impl MediaProcessor {
         } else {
             "decoded.tiff"
         });
-        let input = if is_raw(&source) {
+        let input = if is_video(&source) {
+            run(Command::new("ffmpeg")
+                .args(["-nostdin", "-v", "error", "-threads", "1", "-i"])
+                .arg(&source)
+                .args(["-frames:v", "1", "-threads", "1", "-filter_threads", "1"])
+                .arg(&decoded))?;
+            decoded.as_path()
+        } else if is_raw(&source) {
             run(Command::new("dcraw_emu")
-                .args(["-w", "-h", "-o", "1", "-Z"])
+                .args(["-w", "-o", "1", "-Z"])
                 .arg(&decoded)
                 .arg(&source))
             .with_context(|| format!("decoding RAW {}", source.display()))?;
@@ -180,7 +282,7 @@ impl MediaProcessor {
                 source.display()
             );
             decoded.as_path()
-        } else if ["heic", "heif"].contains(&extension(&source).as_str()) {
+        } else if ["heic", "heif", "hif"].contains(&extension(&source).as_str()) {
             // 100 MP 10-bit Hasselblad images exceed libheif's default 512 MiB block limit.
             // The subprocess instead has an OS address-space limit and a wall-clock deadline.
             run(Command::new("heif-convert")
@@ -195,21 +297,41 @@ impl MediaProcessor {
         // The source stays read-only; only the scratch directory contains intermediate images.
         let output = scratch.path().join("preview.heic");
         let input_frame = format!("{}[0]", input.display());
-        run(Command::new("convert")
-            .args([
-                "-limit", "thread", "2", "-limit", "memory", "256MiB", "-limit", "map", "512MiB",
-                "-limit", "disk", "1GiB", "-limit", "time", "120",
-            ])
-            .arg(input_frame)
-            .args([
-                "-auto-orient",
-                "-thumbnail",
-                "1200x1200>",
-                "-strip",
-                "-quality",
-                "80",
-            ])
-            .arg(&output))
+        run_with_timeout(
+            Command::new("convert")
+                .args([
+                    "-limit",
+                    "thread",
+                    "1",
+                    "-limit",
+                    "memory",
+                    "256MiB",
+                    "-limit",
+                    "map",
+                    "512MiB",
+                    "-limit",
+                    "disk",
+                    "1GiB",
+                    "-limit",
+                    "time",
+                    &encode_seconds.to_string(),
+                ])
+                .arg(input_frame)
+                .args([
+                    "-auto-orient",
+                    "-thumbnail",
+                    &format!("{edge}x{edge}>"),
+                    "-colorspace",
+                    "sRGB",
+                    "-strip",
+                    "-define",
+                    "heic:max-threads=1",
+                    "-quality",
+                    &quality.to_string(),
+                ])
+                .arg(&output),
+            encode_seconds,
+        )
         .with_context(|| format!("generating preview for {}", source.display()))?;
         let dimensions = run(Command::new("identify")
             .args(["-format", "%w %h"])
@@ -223,8 +345,8 @@ impl MediaProcessor {
             values.len() == 2
                 && values[0] > 0
                 && values[1] > 0
-                && values[0] <= 1200
-                && values[1] <= 1200,
+                && values[0] <= edge
+                && values[1] <= edge,
             "invalid preview dimensions: {dimensions}"
         );
         let sha256 = sha256_file(&output)?;
@@ -246,11 +368,30 @@ impl MediaProcessor {
     }
 }
 
-fn run(command: &mut Command) -> Result<Vec<u8>> {
+pub(crate) fn run(command: &mut Command) -> Result<Vec<u8>> {
+    run_with_timeout(command, 180)
+}
+
+fn run_with_timeout(command: &mut Command, seconds: u64) -> Result<Vec<u8>> {
+    let address_space: u64 = std::env::var("KEEPS_MEDIA_ADDRESS_SPACE_BYTES")
+        .unwrap_or_else(|_| "1610612736".to_owned())
+        .parse()
+        .context("invalid KEEPS_MEDIA_ADDRESS_SPACE_BYTES")?;
+    ensure!(
+        address_space > 0,
+        "media address-space limit must be positive"
+    );
     let output = Command::new("timeout")
-        .args(["--kill-after=5s", "180s", "prlimit", "--as=4294967296"])
+        .args([
+            "--kill-after=5s",
+            &format!("{seconds}s"),
+            "prlimit",
+            &format!("--as={address_space}"),
+        ])
         .arg(command.get_program())
         .args(command.get_args())
+        .env("MAGICK_THREAD_LIMIT", "1")
+        .env("OMP_NUM_THREADS", "1")
         .output()
         .with_context(|| format!("starting {command:?}"))?;
     if !output.status.success() {
@@ -271,6 +412,15 @@ fn read_tags(path: &Path) -> Result<Value> {
             "-G0",
             "-n",
             "-DateTimeOriginal",
+            "-SubSecDateTimeOriginal",
+            "-CreateDate",
+            "-DateCreated",
+            "-BodySerialNumber",
+            "-ImageWidth",
+            "-ImageHeight",
+            "-Orientation",
+            "-ColorSpace",
+            "-HasSettings",
             "-Make",
             "-Model",
             "-LensModel",
@@ -308,20 +458,169 @@ fn rating(tags: &Value) -> Option<i64> {
     .map(|value: i64| value.clamp(0, 5))
 }
 
+pub(crate) fn sidecars(path: &Path) -> Result<Vec<PathBuf>> {
+    let mut result = Vec::new();
+    for extension in ["xmp", "XMP"] {
+        let mut appended = path.as_os_str().to_os_string();
+        appended.push(format!(".{extension}"));
+        for candidate in [path.with_extension(extension), PathBuf::from(appended)] {
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(info) if info.file_type().is_file() => result.push(candidate),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("stat sidecar {}", candidate.display()));
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+pub fn sidecar_stamp(path: &Path) -> Result<String> {
+    let mut entries = Vec::new();
+    for candidate in sidecars(path)? {
+        let info = std::fs::symlink_metadata(&candidate)
+            .with_context(|| format!("stat sidecar {}", candidate.display()))?;
+        entries.push(format!(
+            "{}:{}:{}",
+            candidate.display(),
+            info.len(),
+            info.modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+    }
+    Ok(entries.join("|"))
+}
+
 fn rating_from_sidecar(path: &Path) -> Result<Option<i64>> {
     Ok(rating(&read_tags(path)?))
 }
 
+fn image_dimension(tags: &Value, name: &str) -> i64 {
+    ["File", "PNG", "QuickTime", "EXIF"]
+        .iter()
+        .find_map(|group| tags[format!("{group}:{name}")].as_i64())
+        .unwrap_or(0)
+}
+
+fn complete_capture_time(tags: &Value, path: &Path) -> Result<String> {
+    for key in [
+        "Composite:SubSecDateTimeOriginal",
+        "EXIF:DateTimeOriginal",
+        "EXIF:CreateDate",
+        "XMP:DateCreated",
+        "QuickTime:CreateDate",
+    ] {
+        if let Some(value) = tags[key].as_str().filter(|v| !v.is_empty()) {
+            match parse_capture_time(value).or_else(|_| {
+                DateTime::parse_from_rfc3339(value)
+                    .map(|v| {
+                        v.with_timezone(&Utc)
+                            .to_rfc3339_opts(SecondsFormat::AutoSi, true)
+                    })
+                    .map_err(anyhow::Error::from)
+            }) {
+                Ok(time) => return Ok(time),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), error = %format!("{error:#}"), "invalid date metadata")
+                }
+            }
+        }
+    }
+    let modified = path
+        .metadata()?
+        .modified()
+        .context("reading fallback photo date")?;
+    Ok(DateTime::<Utc>::from(modified).to_rfc3339_opts(SecondsFormat::AutoSi, true))
+}
+
 fn parse_capture_time(value: &str) -> Result<String> {
-    let naive = NaiveDateTime::parse_from_str(value, "%Y:%m:%d %H:%M:%S")
+    // Composite timestamps retain the camera's fractional seconds and explicit offset.
+    if let Ok(date) = DateTime::parse_from_str(value, "%Y:%m:%d %H:%M:%S%.f%:z") {
+        return Ok(date
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::AutoSi, true));
+    }
+    let naive = NaiveDateTime::parse_from_str(value, "%Y:%m:%d %H:%M:%S%.f")
         .with_context(|| format!("invalid EXIF capture time {value:?}"))?;
     let date = Local
         .from_local_datetime(&naive)
-        .earliest()
-        .with_context(|| format!("EXIF capture time falls in a local timezone gap: {value}"))?;
+        .single()
+        .with_context(|| {
+            format!("EXIF capture time is ambiguous or falls in a local timezone gap: {value}")
+        })?;
     Ok(date
         .with_timezone(&Utc)
-        .to_rfc3339_opts(SecondsFormat::Millis, true))
+        .to_rfc3339_opts(SecondsFormat::AutoSi, true))
+}
+
+/// Exact JPEG compressed image identity, excluding EXIF/XMP/IPTC text metadata.
+/// Rendering orientation, color space, ICC and Adobe transform segments remain evidence.
+pub fn jpeg_visual_hash(path: &Path, metadata: &Metadata) -> Result<Option<String>> {
+    if !["jpg", "jpeg"].contains(&extension(path).as_str()) {
+        return Ok(None);
+    }
+    let mut input = File::open(path).with_context(|| format!("open JPEG {}", path.display()))?;
+    jpeg_payload_hash(&mut input, metadata)
+        .map(Some)
+        .with_context(|| format!("read JPEG image identity {}", path.display()))
+}
+
+fn jpeg_payload_hash(input: &mut impl Read, metadata: &Metadata) -> Result<String> {
+    let mut marker = [0u8; 2];
+    input.read_exact(&mut marker)?;
+    ensure!(marker == [0xff, 0xd8], "missing JPEG SOI");
+    let mut digest = Sha256::new();
+    digest.update(format!(
+        "jpeg-image-v1|{}|{}|",
+        metadata.orientation, metadata.color_space
+    ));
+    loop {
+        input.read_exact(&mut marker)?;
+        while marker == [0xff, 0xff] {
+            input.read_exact(&mut marker[1..])?;
+        }
+        ensure!(marker[0] == 0xff, "invalid JPEG marker");
+        if marker[1] == 0xda {
+            digest.update(marker);
+            let mut buffer = [0u8; 128 * 1024];
+            let mut tail = [0u8; 2];
+            let mut length = 0usize;
+            let mut end_seen = false;
+            loop {
+                let count = input.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                digest.update(&buffer[..count]);
+                for &byte in &buffer[..count] {
+                    tail = [tail[1], byte];
+                    end_seen |= tail == [0xff, 0xd9];
+                }
+                length += count;
+            }
+            ensure!(length >= 4 && end_seen, "incomplete JPEG scan");
+            return Ok(format!("jpeg-v1:{:x}", digest.finalize()));
+        }
+        ensure!(
+            !matches!(marker[1], 0x00 | 0xd8 | 0xd9 | 0xff),
+            "unexpected JPEG marker"
+        );
+        let mut size = [0u8; 2];
+        input.read_exact(&mut size)?;
+        let length = u16::from_be_bytes(size) as usize;
+        ensure!(length >= 2, "invalid JPEG segment length");
+        let mut segment = vec![0u8; length - 2];
+        input.read_exact(&mut segment)?;
+        if !matches!(marker[1], 0xe1 | 0xed | 0xfe) {
+            digest.update(marker);
+            digest.update(size);
+            digest.update(segment);
+        }
+    }
 }
 
 pub fn sha256_file(path: &Path) -> Result<String> {
@@ -353,6 +652,7 @@ mod tests {
             camera_model: "R5".into(),
             lens_model: "50mm".into(),
             rating: 5,
+            ..Default::default()
         };
         assert_eq!(
             metadata.fingerprint(Path::new("/photos/IMG_123-Edited (2).CR3")),
@@ -364,6 +664,95 @@ mod tests {
             rating(&serde_json::json!({"XMP:Rating":-1, "IPTC:Urgency":5})),
             Some(0)
         );
+    }
+
+    #[test]
+    fn sidecar_stamp_detects_changes_and_ignores_symlinks() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let photo = dir.path().join("a.jpg");
+        assert_eq!(sidecar_stamp(&photo)?, "");
+        std::fs::write(dir.path().join("a.xmp"), b"first")?;
+        let first = sidecar_stamp(&photo)?;
+        std::fs::write(dir.path().join("a.xmp"), b"changed and larger")?;
+        assert_ne!(first, sidecar_stamp(&photo)?);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.path().join("a.xmp"), dir.path().join("b.xmp"))?;
+            assert_eq!(sidecar_stamp(&dir.path().join("b.jpg"))?, "");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn capture_date_completion_preserves_valid_date_and_falls_back() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        let tags = serde_json::json!({"EXIF:DateTimeOriginal":"0000:00:00 00:00:00", "EXIF:CreateDate":"2020-02-03T04:05:06Z"});
+        assert_eq!(
+            complete_capture_time(&tags, file.path())?,
+            "2020-02-03T04:05:06Z"
+        );
+        let tags = serde_json::json!({"EXIF:DateTimeOriginal":"2021-02-03T04:05:06Z", "EXIF:CreateDate":"2020-02-03T04:05:06Z"});
+        assert_eq!(
+            complete_capture_time(&tags, file.path())?,
+            "2021-02-03T04:05:06Z"
+        );
+        assert_eq!(
+            complete_capture_time(&serde_json::json!({}), file.path())?,
+            DateTime::<Utc>::from(file.as_file().metadata()?.modified()?)
+                .to_rfc3339_opts(SecondsFormat::AutoSi, true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn capture_time_keeps_subseconds_and_offset() -> Result<()> {
+        assert_eq!(
+            parse_capture_time("2025:11:24 20:02:35.123456-05:00")?,
+            "2025-11-25T01:02:35.123456Z"
+        );
+        assert_ne!(
+            parse_capture_time("2025:11:24 20:02:35.100-05:00")?,
+            parse_capture_time("2025:11:24 20:02:35.200-05:00")?
+        );
+        assert!(parse_capture_time("not-a-date").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn jpeg_identity_ignores_text_metadata_but_keeps_image_and_rendering() -> Result<()> {
+        fn fixture(text: &[u8], pixels: u8, profile: u8) -> Vec<u8> {
+            let mut bytes = vec![0xff, 0xd8, 0xff, 0xe1];
+            bytes.extend_from_slice(&((text.len() + 2) as u16).to_be_bytes());
+            bytes.extend_from_slice(text);
+            bytes.extend_from_slice(&[
+                0xff, 0xe2, 0, 3, profile, 0xff, 0xda, 0, 2, pixels, 0xff, 0xd9,
+            ]);
+            bytes
+        }
+        let metadata = Metadata {
+            orientation: 1,
+            ..Default::default()
+        };
+        let hash = |bytes: Vec<u8>, m: &Metadata| jpeg_payload_hash(&mut bytes.as_slice(), m);
+        let original = hash(fixture(b"original", 42, 1), &metadata)?;
+        assert_eq!(
+            original,
+            hash(fixture(b"different rating and name", 42, 1), &metadata)?
+        );
+        assert_ne!(original, hash(fixture(b"original", 43, 1), &metadata)?);
+        assert_ne!(original, hash(fixture(b"original", 42, 2), &metadata)?);
+        assert_ne!(
+            original,
+            hash(
+                fixture(b"original", 42, 1),
+                &Metadata {
+                    orientation: 6,
+                    ..metadata
+                }
+            )?
+        );
+        assert!(hash(vec![0xff, 0xd8, 0xff, 0xda, 0, 2], &Metadata::default()).is_err());
+        Ok(())
     }
 
     #[test]
@@ -397,6 +786,20 @@ mod tests {
         assert_eq!(before, sha256_file(&original)?);
         assert_eq!(preview.sha256, sha256_file(&preview_path)?);
         assert!(processor.generate_preview(&original, &original).is_err());
+        assert!(
+            processor
+                .preserve_standard_metadata(&original, &original)
+                .is_err()
+        );
+        let standard = directory.path().join("standard.heic");
+        processor.generate_standard(&original, &standard, 1600)?;
+        processor.preserve_standard_metadata(&original, &standard)?;
+        let standard_metadata = processor.extract(&standard)?;
+        assert_eq!(standard_metadata.camera_make, "Test");
+        assert_eq!(standard_metadata.lens_model, "50mm");
+        assert_eq!(standard_metadata.capture_time, metadata.capture_time);
+        assert_eq!(standard_metadata.orientation, 1);
+        assert_eq!(before, sha256_file(&original)?);
         for extension in ["png", "tiff", "heic"] {
             let source = directory.path().join(format!("source.{extension}"));
             run(Command::new("convert").arg(&original).arg(&source))?;

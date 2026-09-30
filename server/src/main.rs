@@ -7,7 +7,6 @@ use keeps_server::{
     store::Store,
 };
 use std::{
-    collections::HashSet,
     env,
     path::PathBuf,
     sync::{
@@ -33,7 +32,7 @@ async fn main() -> Result<()> {
     };
     let database = root.join("db/control_plane.sqlite");
     if migrate {
-        Store::open(&database, true, HashSet::new())?;
+        Store::open(&database, true)?;
         tracing::info!("database migration complete");
         return Ok(());
     }
@@ -55,19 +54,14 @@ async fn main() -> Result<()> {
         Ok("0") | Err(_) => false,
         Ok(_) => bail!("CONTROL_PLANE_AUTO_CREATE_SCHEMA must be 0 or 1"),
     };
-    let trusted: HashSet<String> = env::var("CONTROL_PLANE_TRUSTED_DEVICE_IDS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_owned)
-        .collect();
-    let store = Arc::new(Store::open(&database, auto_create, trusted)?);
+    let store = Arc::new(Store::open(&database, auto_create)?);
     let jobs = Arc::new(Jobs::open(&root.join("db/jobs.sqlite"), &original)?);
+    keeps_server::worker::maintain_revisions(&store, &jobs)?;
     let original_root_names = keeps_server::navigation::parse_root_names(
         jobs.root(),
         env::var("KEEPS_ORIGINAL_ROOT_SOURCES").ok().as_deref(),
     )?;
+    let library_id = env::var("KEEPS_LIBRARY_ID").unwrap_or_else(|_| "local-library".into());
     if let Ok(library) = env::var("KEEPS_LIBRARY_ID") {
         if library.trim().is_empty() {
             bail!("KEEPS_LIBRARY_ID cannot be empty");
@@ -87,6 +81,10 @@ async fn main() -> Result<()> {
     let address = env::var("KEEPS_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:2283".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
     let stop = Arc::new(AtomicBool::new(false));
+    let mut watcher = tokio::task::spawn_blocking({
+        let (jobs, store, stop) = (jobs.clone(), store.clone(), stop.clone());
+        move || keeps_server::watcher::run(jobs, store, stop)
+    });
     let mut worker = tokio::task::spawn_blocking({
         let (store, jobs, previews, stop) =
             (store.clone(), jobs.clone(), previews.clone(), stop.clone());
@@ -102,6 +100,7 @@ async fn main() -> Result<()> {
             previews,
             jobs,
             access_token,
+            library_id,
             original_root_names,
         })),
     )
@@ -113,8 +112,9 @@ async fn main() -> Result<()> {
         }
     });
     tokio::select! {
-        result=http=>{stop.store(true,Ordering::Relaxed);result?;worker.await??;}
-        result=&mut worker=>{result??;if !stop.load(Ordering::Relaxed) {bail!("NAS worker exited unexpectedly");}}
+        result=http=>{stop.store(true,Ordering::Relaxed);result?;worker.await??;watcher.await??;}
+        result=&mut watcher=>{let stopping=stop.swap(true,Ordering::Relaxed);result??;worker.await??;if !stopping {bail!("NAS watcher exited unexpectedly");}}
+        result=&mut worker=>{let stopping=stop.swap(true,Ordering::Relaxed);result??;watcher.await??;if !stopping {bail!("NAS worker exited unexpectedly");}}
     }
     Ok(())
 }

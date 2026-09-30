@@ -7,6 +7,7 @@ cargo test --manifest-path server/Cargo.toml
 cargo clippy --manifest-path server/Cargo.toml --all-targets -- -D warnings
 docker build -f server/Dockerfile -t keeps-server:nas-core .
 KEEPS_TEST_IMAGE=keeps-server:nas-core python3 server/tests/docker_smoke.py
+KEEPS_TEST_IMAGE=keeps-server:nas-core python3 server/tests/mechanisms_smoke.py
 ```
 
 配置：
@@ -17,14 +18,18 @@ KEEPS_TEST_IMAGE=keeps-server:nas-core python3 server/tests/docker_smoke.py
 - `KEEPS_ACCESS_TOKEN`：至少 32 字节的共享访问凭据。
 - `CONTROL_PLANE_AUTO_CREATE_SCHEMA=1`：新空库初始化；现有库设 `0`，升级前备份并执行 `keeps-server migrate`。
 - `KEEPS_LIBRARY_ID`：可选，首次启动时为该资料库追踪原片根目录；已停用目录不会因重启重新启用。
-- `KEEPS_SCAN_INTERVAL_SECONDS`：默认 300，单 worker 定期安排扫描。
+- `KEEPS_SCAN_INTERVAL_SECONDS`：默认 300，为实时监听补漏的周期扫描间隔；监听变化会直接入队。
 - `TZ`：无时区 EXIF 的解释时区，迁移时与旧客户端保持一致。
 - `KEEPS_LISTEN_ADDR`：默认 `0.0.0.0:2283`。
 
 业务 API 使用 Bearer token，预览下载 URL 有效期 15 分钟。共享令牌适用于受信任家庭资料库，不提供独立用户权限体系。
 
-SQLite 使用 WAL。后台扫描只读原片，哈希和 EXIF 匹配已有资产，复用已有预览；未变化文件通过 size/mtime 跳过。媒体解码在 Linux 容器执行，依赖 ExifTool、LibRaw、ImageMagick 与 libheif；每个外部进程有时限和内存限制。错误保留完整上下文，单文件失败不阻止处理其他文件。
+SQLite 使用 WAL。后台扫描只读原片，文件哈希或精确 JPEG 图像指纹可以自动归组；EXIF 匹配仅作为待视觉确认的候选。普通核对通过原片 size/mtime 与 XMP 状态签名跳过未变文件。目录事件防抖后进入持久化队列，独立媒体 worker 处理，运行中再次变化不会被吞掉。默认版本切换会重建预览；版本及监听机制详见 [架构文档](../docs/ARCHITECTURE.md)。媒体解码在 Linux 容器执行，依赖 ExifTool、LibRaw、ImageMagick 与 libheif；每个外部进程有时限和内存限制。错误保留完整上下文，单文件失败不阻止处理其他文件。
 
 SIGTERM 停止领取任务并等待当前处理阶段结束。未完成的运行任务在下次启动恢复；停止追踪仅修改数据库。数据库和文件 I/O 在阻塞线程执行，查询接口不会承担媒体解码。
 
 部署路径、迁移备份和现场验证见 [NAS 部署说明](../deploy/nas/README.md)。同一资料库只能有一个服务进程管理。
+
+版本机制需要 catalog schema 3，迁移只增加表，不回填或重组历史照片。升级前备份两个 SQLite 数据库。`mechanisms_smoke.py` 使用一次性 Linux Docker volume 和临时样本，不访问 NAS 照片；Docker Desktop 的宿主共享目录事件不等同于 NAS 本地文件系统，因此监听验收使用原生 Linux volume。
+
+离线逐文件夹精确重复整理使用 [批量整理脚本](../docs/folder-merge.md)。镜像包含只读 NDJSON 媒体检查命令 `keeps-inspect`；新文件归组仅匹配同一直接父目录内的原片证据，已有路径关联保留。

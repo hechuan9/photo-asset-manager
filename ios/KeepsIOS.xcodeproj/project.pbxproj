@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+ C20000000000000000000001 = {isa = PBXBuildFile; fileRef = C20000000000000000000002; };
+ C10000000000000000000001 = {isa = PBXBuildFile; fileRef = C10000000000000000000002; };
+ B10000000000000000000001 = {isa = PBXBuildFile; fileRef = B10000000000000000000002; };
+ B10000000000000000000003 = {isa = PBXBuildFile; fileRef = B10000000000000000000004; };
 		A10000010000000000000001 /* Sources/KeepsIOS/KeepsIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001010000000000000001 /* Sources/KeepsIOS/KeepsIOSApp.swift */; };
 		A10000020000000000000001 /* Sources/KeepsIOS/IOSLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001020000000000000001 /* Sources/KeepsIOS/IOSLibraryStore.swift */; };
 		A10000030000000000000001 /* Sources/KeepsIOS/WaterfallGalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001030000000000000001 /* Sources/KeepsIOS/WaterfallGalleryView.swift */; };
@@ -16,6 +20,10 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+ C20000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/KeepsIOS/IOSDirectoryStore.swift"; sourceTree = SOURCE_ROOT; };
+ C10000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/KeepsIOS/IOSCollectionsView.swift"; sourceTree = SOURCE_ROOT; };
+ B10000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "../macos/Sources/PhotoAssetManager/JustifiedAssetGridLayout.swift"; sourceTree = SOURCE_ROOT; };
+ B10000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/KeepsIOS/IOSZoomablePhoto.swift"; sourceTree = SOURCE_ROOT; };
 		A10001010000000000000001 /* Sources/KeepsIOS/KeepsIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/KeepsIOS/KeepsIOSApp.swift; sourceTree = SOURCE_ROOT; };
 		A10001020000000000000001 /* Sources/KeepsIOS/IOSLibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/KeepsIOS/IOSLibraryStore.swift; sourceTree = SOURCE_ROOT; };
 		A10001030000000000000001 /* Sources/KeepsIOS/WaterfallGalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/KeepsIOS/WaterfallGalleryView.swift; sourceTree = SOURCE_ROOT; };
@@ -51,6 +59,8 @@
 			isa = PBXGroup;
 			children = (
 				A10001010000000000000001 /* Sources/KeepsIOS/KeepsIOSApp.swift */,
+ C10000000000000000000002,
+ C20000000000000000000002,
 				A10001020000000000000001 /* Sources/KeepsIOS/IOSLibraryStore.swift */,
 				A10001030000000000000001 /* Sources/KeepsIOS/WaterfallGalleryView.swift */,
 			);
@@ -146,8 +156,12 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000010000000000000001 /* Sources/KeepsIOS/KeepsIOSApp.swift in Sources */,
+ C10000000000000000000001,
+ C20000000000000000000001,
 				A10000020000000000000001 /* Sources/KeepsIOS/IOSLibraryStore.swift in Sources */,
 				A10000030000000000000001 /* Sources/KeepsIOS/WaterfallGalleryView.swift in Sources */,
+ B10000000000000000000001,
+ B10000000000000000000003,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -203,7 +217,7 @@
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
                 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 13;
 				DEVELOPMENT_TEAM = 3TZ6RCL8NE;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -233,7 +247,7 @@
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
                 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 13;
 				DEVELOPMENT_TEAM = 3TZ6RCL8NE;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

@@ -24,12 +24,27 @@ public final class KeepsClient: Sendable {
     }
     private var library: [String] { ["libraries", configuration.libraryID] }
 
+    public func revision(path: String? = nil, includeChildren: Bool = false) async throws -> KeepsCatalogRevision {
+        var query: [URLQueryItem] = []
+        if let path { query.append(URLQueryItem(name: "path", value: path)) }
+        if includeChildren { query.append(URLQueryItem(name: "includeChildren", value: "true")) }
+        return try await request("GET", library + ["revision"], query: query)
+    }
     public func assets(query: KeepsAssetQuery = KeepsAssetQuery()) async throws -> KeepsAssetPage {
         try await request("GET", library + ["assets"], query: query.queryItems)
     }
     public func asset(id: UUID) async throws -> KeepsAsset {
         try await request("GET", library + ["assets", id.uuidString])
     }
+    public func versions(assetID: UUID) async throws -> [KeepsAssetVersion] {
+        let response: Versions = try await request("GET", library + ["assets", assetID.uuidString, "versions"])
+        return response.items
+    }
+    public func setDefaultVersion(assetID: UUID, contentHash: String) async throws -> [KeepsAssetVersion] {
+        let response: Versions = try await request("PUT", library + ["assets", assetID.uuidString, "default-version"], body: JSONEncoder().encode(["contentHash": contentHash]))
+        return response.items
+    }
+    private struct Versions: Decodable { var items: [KeepsAssetVersion] }
     public func updateAsset(id: UUID, patch: KeepsAssetPatch) async throws -> KeepsAsset {
         try await request("PATCH", library + ["assets", id.uuidString], body: JSONEncoder().encode(patch))
     }
@@ -73,8 +88,8 @@ public final class KeepsClient: Sendable {
     public func refreshPreview(assetID: UUID) async throws -> URL {
         try await refreshPreviewDescriptor(assetID: assetID).downloadURL
     }
-    public func refreshPreviewDescriptor(assetID: UUID) async throws -> KeepsPreview {
-        let response: KeepsPreview = try await request("GET", ["derivatives", assetID.uuidString], query: [URLQueryItem(name: "role", value: "preview"), URLQueryItem(name: "libraryID", value: configuration.libraryID)])
+    public func refreshPreviewDescriptor(assetID: UUID, role: KeepsMediaRole = .preview) async throws -> KeepsPreview {
+        let response: KeepsPreview = try await request("GET", ["derivatives", assetID.uuidString], query: [URLQueryItem(name: "role", value: role.rawValue), URLQueryItem(name: "libraryID", value: configuration.libraryID)])
         return response
     }
     private struct Directories: Decodable { var directories: [KeepsDirectory] }
@@ -92,6 +107,7 @@ public final class KeepsClient: Sendable {
         url.queryItems = query.isEmpty ? nil : query
         guard let endpoint = url.url else { throw KeepsAPIError.invalidConfiguration }
         var request = URLRequest(url: endpoint)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         request.httpMethod = method
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Accept")

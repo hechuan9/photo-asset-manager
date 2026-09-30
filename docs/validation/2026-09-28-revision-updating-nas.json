@@ -1,0 +1,449 @@
+{
+  "deployment": {
+    "startedAtUTC": "2026-09-28T22:21:41Z",
+    "previousImage": "sha256:cf58d25d23ae65ce7a79cc9222a86e43ba0d929b9378ed8ed67d614e0c51a14b",
+    "newImage": "sha256:9bd99b3bc73ce19769626d13425c74dc9d040e274d2a7d87206b022649f33247",
+    "backupDirectory": "/volume2/myphoto/keeps/backups/before-revision-updating-20260928-222142",
+    "before": {
+      "archive_receipts": {
+        "rows": 33631,
+        "sha256": "bc0aee22668a5cfe8dc8e64f3c92a4c7919cb31588c804b87d992972c5a58afc"
+      },
+      "catalog_assets": {
+        "rows": 123177,
+        "sha256": "2f491b2e2128cb886d81365495a0e1401f2b3a45c870a7dee1f9bbb859890ee0"
+      },
+      "catalog_defaults": {
+        "rows": 1747,
+        "sha256": "39fb149722765fd188c87f17474594f264daf0a3322c90aa7bd677434b3ac803"
+      },
+      "catalog_files": {
+        "rows": 302264,
+        "sha256": "5a95435eee333bf83d70a383e89a7f753f63f22cd3a29082b7f8330b6d89908e"
+      },
+      "catalog_hidden_directories": {
+        "rows": 1,
+        "sha256": "eb1448baeb58ff7d8318fd0e3b0b6954a9b016d92fdeb37ab4f1410c1b0458de"
+      },
+      "catalog_paths": {
+        "rows": 149790,
+        "sha256": "3502cd10d704895bd62eb6ca011a19f804b3270d9474db7d984de3714a3f6dc8"
+      },
+      "catalog_version_paths": {
+        "rows": 1803,
+        "sha256": "acec453869dfa59756f55898457c76ae08f1fe59be44b82eed6e51ead6bd7ab7"
+      },
+      "catalog_versions": {
+        "rows": 1771,
+        "sha256": "9c46dddef079b2f3d770aee2a4dbe9580c324dff31aa749fb979b11983d89d40"
+      },
+      "derivative_objects": {
+        "rows": 123153,
+        "sha256": "070c9191d7f4c51504ebbc1a61bc2158f7e5ff34b76286c1dd58a98e16345392"
+      },
+      "device_states": {
+        "rows": 1,
+        "sha256": "4e3f9e50ad46f8bc06620173847c3a58952fb66d5cec2cf1a082f65c75b5698f"
+      },
+      "ledger_events": {
+        "rows": 825088,
+        "sha256": "3a91992f737797a092673239f77180b7c3a6670f1dcab424bce88984a18cb784"
+      },
+      "ledger_sequence_counters": {
+        "rows": 1,
+        "sha256": "c7b9861d9486157628914631ab5932915bee85e043414ec6871ef3473d18c848"
+      },
+      "sync_conflicts": {
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "unfinishedJobs": [
+      "34d27418-7f2c-4434-9144-d8d1f063280c",
+      "e877b831-db4a-44d8-b2e1-c60583015573",
+      "5fe13a61-68e8-4ab0-88bb-b86e52f7ba72",
+      "05245d3d-c9f8-4fe6-b419-f06af7cad9a5",
+      "528ba143-baf4-44ea-ba9c-789016a1c807",
+      "f1b5e285-351d-40bf-869b-e60a10476691",
+      "94be023d-dd29-409a-b16e-6752058ee59a",
+      "6e59bd42-10d0-4dd0-ada6-d6a4d0e923d1",
+      "29475ac9-a576-4071-bf7a-ba213e4cf86d",
+      "b412306d-02cb-4426-aa69-9e3613885cdf",
+      "9ee29c16-4dc8-4db5-962f-0fd47ed21017"
+    ],
+    "migrationOutput": "\u001b[2m2026-09-28T22:23:03.328819Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mkeeps_server::catalog\u001b[0m\u001b[2m:\u001b[0m migrating NAS catalog \u001b[3mfrom\u001b[0m\u001b[2m=\u001b[0m3 \u001b[3mto\u001b[0m\u001b[2m=\u001b[0m5\n\u001b[2m2026-09-28T22:23:04.089230Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mkeeps_server\u001b[0m\u001b[2m:\u001b[0m database migration complete",
+    "afterMigration": {
+      "archive_receipts": {
+        "rows": 33631,
+        "sha256": "bc0aee22668a5cfe8dc8e64f3c92a4c7919cb31588c804b87d992972c5a58afc"
+      },
+      "catalog_assets": {
+        "rows": 123177,
+        "sha256": "2f491b2e2128cb886d81365495a0e1401f2b3a45c870a7dee1f9bbb859890ee0"
+      },
+      "catalog_defaults": {
+        "rows": 1747,
+        "sha256": "39fb149722765fd188c87f17474594f264daf0a3322c90aa7bd677434b3ac803"
+      },
+      "catalog_files": {
+        "rows": 302264,
+        "sha256": "5a95435eee333bf83d70a383e89a7f753f63f22cd3a29082b7f8330b6d89908e"
+      },
+      "catalog_hidden_directories": {
+        "rows": 1,
+        "sha256": "eb1448baeb58ff7d8318fd0e3b0b6954a9b016d92fdeb37ab4f1410c1b0458de"
+      },
+      "catalog_paths": {
+        "rows": 149790,
+        "sha256": "3502cd10d704895bd62eb6ca011a19f804b3270d9474db7d984de3714a3f6dc8"
+      },
+      "catalog_version_paths": {
+        "rows": 1803,
+        "sha256": "acec453869dfa59756f55898457c76ae08f1fe59be44b82eed6e51ead6bd7ab7"
+      },
+      "catalog_versions": {
+        "rows": 1771,
+        "sha256": "9c46dddef079b2f3d770aee2a4dbe9580c324dff31aa749fb979b11983d89d40"
+      },
+      "derivative_objects": {
+        "rows": 123153,
+        "sha256": "070c9191d7f4c51504ebbc1a61bc2158f7e5ff34b76286c1dd58a98e16345392"
+      },
+      "device_states": {
+        "rows": 1,
+        "sha256": "4e3f9e50ad46f8bc06620173847c3a58952fb66d5cec2cf1a082f65c75b5698f"
+      },
+      "ledger_events": {
+        "rows": 825088,
+        "sha256": "3a91992f737797a092673239f77180b7c3a6670f1dcab424bce88984a18cb784"
+      },
+      "ledger_sequence_counters": {
+        "rows": 1,
+        "sha256": "c7b9861d9486157628914631ab5932915bee85e043414ec6871ef3473d18c848"
+      },
+      "sync_conflicts": {
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "directoryScopes": 411,
+    "migrationVerified": true,
+    "healthy": true,
+    "mounts": [
+      {
+        "Type": "bind",
+        "Source": "/volume2/myphoto/keeps",
+        "Destination": "/myphoto/keeps",
+        "Mode": "rw",
+        "RW": true,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "bind",
+        "Source": "/volume2/photo",
+        "Destination": "/volume2/photo",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "bind",
+        "Source": "/volume2/myphoto/未处理Raw",
+        "Destination": "/volume2/myphoto/未处理Raw",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "bind",
+        "Source": "/volume2/myphoto/已处理Raw",
+        "Destination": "/volume2/myphoto/已处理Raw",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "bind",
+        "Source": "/volume2/myphoto/和川专属",
+        "Destination": "/volume2/myphoto/和川专属",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      }
+    ],
+    "ports": {
+      "2283/tcp": [
+        {
+          "HostIp": "127.0.0.1",
+          "HostPort": "2283"
+        }
+      ]
+    },
+    "finishedAtUTC": "2026-09-28T22:24:31Z"
+  },
+  "verification": {
+    "checkedAtUTC": "2026-09-28T22:24:32Z",
+    "internal": {
+      "health": true,
+      "authentication": true,
+      "revision": {
+        "children": [
+          {
+            "isUpdating": true,
+            "path": "/",
+            "revision": 1088758
+          }
+        ],
+        "isUpdating": true,
+        "revision": 1088758
+      },
+      "assets": 121849,
+      "listRevision": 1088758,
+      "listIsUpdating": true
+    },
+    "public": {
+      "health": true,
+      "authentication": true,
+      "revision": {
+        "children": [
+          {
+            "isUpdating": true,
+            "path": "/",
+            "revision": 1088758
+          }
+        ],
+        "isUpdating": true,
+        "revision": 1088758
+      },
+      "assets": 121849,
+      "listRevision": 1088758,
+      "listIsUpdating": true
+    },
+    "preview": {
+      "bytes": 334544,
+      "hashMatches": true,
+      "tlsVerified": true
+    },
+    "revisionLatencyMs": {
+      "samples": 20,
+      "median": 1.532,
+      "max": 3.297
+    },
+    "jobProgress": [
+      {
+        "id": "b412306d-02cb-4426-aa69-9e3613885cdf",
+        "status": "running",
+        "delta": 66
+      }
+    ],
+    "jobStatuses": {
+      "completed": 90,
+      "pending": 9,
+      "running": 1
+    },
+    "unfinishedJobsPreserved": 11,
+    "updatingScopeRows": 8,
+    "revisionQueryPlan": [
+      [
+        3,
+        0,
+        0,
+        "SEARCH catalog_version_revision USING INDEX sqlite_autoindex_catalog_version_revision_1 (library_id=?)"
+      ]
+    ],
+    "image": "sha256:9bd99b3bc73ce19769626d13425c74dc9d040e274d2a7d87206b022649f33247",
+    "status": "PASS"
+  },
+  "quietWindowSmoke": {
+    "status": "PASS",
+    "test": "persisted quiet window settles after restart with accelerated fixture clock",
+    "beforeRevision": 6,
+    "pendingRows": 7,
+    "after": {
+      "children": [
+        {
+          "isUpdating": false,
+          "path": "/",
+          "revision": 10
+        }
+      ],
+      "isUpdating": false,
+      "revision": 10
+    },
+    "productionDataTouched": false
+  },
+  "sourceArchiveSHA256": "8e3bc85d44226bfca23da603e27603c26c174d4cf1d3f4cb952be5d50581e4d5",
+  "isolatedSmoke": {
+    "image": "keeps-server:revision-updating-20260928",
+    "container": "keeps-rust-smoke-6aae4d5597",
+    "checks": [
+      {
+        "name": "legacy migration preserves event payload",
+        "detail": null
+      },
+      {
+        "name": "missing bearer credential rejected",
+        "detail": null
+      },
+      {
+        "name": "repeated metadata command creates no events",
+        "detail": {
+          "eventCount": 4
+        }
+      },
+      {
+        "name": "malformed commands and out-of-root folders rejected",
+        "detail": null
+      },
+      {
+        "name": "background ingest completed",
+        "detail": {
+          "currentPath": null,
+          "error": null,
+          "failed": 0,
+          "finishedAt": 1790634004,
+          "folderID": "8be083e3-f7bd-46c5-b633-95fd136845c4",
+          "id": "34e26abb-c2d3-4319-af37-844f9222ca1f",
+          "libraryID": "smoke",
+          "path": "/myphoto/library",
+          "processed": 0,
+          "refreshMetadata": false,
+          "skipped": 1,
+          "startedAt": 1790634004,
+          "status": "completed",
+          "waitForQuiet": true
+        }
+      },
+      {
+        "name": "preview content hash and signed URL tamper rejection",
+        "detail": null
+      },
+      {
+        "name": "unchanged rescan skips photo without duplicate asset or event",
+        "detail": {
+          "currentPath": null,
+          "error": null,
+          "failed": 0,
+          "finishedAt": 1790634005,
+          "folderID": "8be083e3-f7bd-46c5-b633-95fd136845c4",
+          "id": "3f83cfcf-e1df-41f9-88bd-ed92e722630f",
+          "libraryID": "smoke",
+          "path": "/myphoto/library",
+          "processed": 0,
+          "refreshMetadata": false,
+          "skipped": 1,
+          "startedAt": 1790634005,
+          "status": "completed",
+          "waitForQuiet": false
+        }
+      },
+      {
+        "name": "tracking removal retains catalog and retired client writes reject",
+        "detail": null
+      },
+      {
+        "name": "bad JPEG fails visibly while valid PNG is ingested",
+        "detail": {
+          "currentPath": null,
+          "error": "1 files failed; latest failure: processing /myphoto/library/mixed/a-broken.jpg: read JPEG image identity /myphoto/library/mixed/a-broken.jpg: missing JPEG SOI",
+          "failed": 1,
+          "finishedAt": 1790634044,
+          "folderID": "e42b9da0-3f15-4bfd-87d0-405277c274be",
+          "id": "62af6f07-b8d9-4419-95f9-32c0e276559b",
+          "libraryID": "smoke",
+          "path": "/myphoto/library/mixed",
+          "processed": 1,
+          "refreshMetadata": true,
+          "skipped": 0,
+          "startedAt": 1790634044,
+          "status": "failed",
+          "waitForQuiet": true
+        }
+      },
+      {
+        "name": "failed job retries preserve bad source and completed assets",
+        "detail": {
+          "currentPath": null,
+          "error": "1 files failed; latest failure: processing /myphoto/library/mixed/a-broken.jpg: read JPEG image identity /myphoto/library/mixed/a-broken.jpg: missing JPEG SOI",
+          "failed": 1,
+          "finishedAt": 1790634080,
+          "folderID": "e42b9da0-3f15-4bfd-87d0-405277c274be",
+          "id": "62af6f07-b8d9-4419-95f9-32c0e276559b",
+          "libraryID": "smoke",
+          "path": "/myphoto/library/mixed",
+          "processed": 1,
+          "refreshMetadata": true,
+          "skipped": 0,
+          "startedAt": 1790634080,
+          "status": "failed",
+          "waitForQuiet": true
+        }
+      },
+      {
+        "name": "interrupted running job resumes after SIGKILL preserving asset identity and completed previews",
+        "detail": {
+          "checkpoint": {
+            "currentPath": "/myphoto/library/resume/01.png",
+            "error": null,
+            "failed": 0,
+            "finishedAt": null,
+            "folderID": "68c7ae39-edf7-4c1d-8f2e-30fac77558ba",
+            "id": "76ab1aba-3721-4c3b-abd1-f6e4c8a58ad2",
+            "libraryID": "smoke",
+            "path": "/myphoto/library/resume",
+            "processed": 1,
+            "refreshMetadata": true,
+            "skipped": 0,
+            "startedAt": 1790634084,
+            "status": "running",
+            "waitForQuiet": true
+          },
+          "resumed": {
+            "currentPath": null,
+            "error": null,
+            "failed": 0,
+            "finishedAt": 1790634091,
+            "folderID": "68c7ae39-edf7-4c1d-8f2e-30fac77558ba",
+            "id": "76ab1aba-3721-4c3b-abd1-f6e4c8a58ad2",
+            "libraryID": "smoke",
+            "path": "/myphoto/library/resume",
+            "processed": 12,
+            "refreshMetadata": true,
+            "skipped": 0,
+            "startedAt": 1790634086,
+            "status": "completed",
+            "waitForQuiet": true
+          }
+        }
+      },
+      {
+        "name": "restart persists catalog and inactive folders; every original hash remains unchanged",
+        "detail": {
+          "assets": 15,
+          "originalFiles": 16
+        }
+      }
+    ],
+    "status": "passed",
+    "imageID": "sha256:9bd99b3bc73ce19769626d13425c74dc9d040e274d2a7d87206b022649f33247",
+    "mounts": [
+      {
+        "Type": "bind",
+        "Source": "/volume2/docker/keeps/releases/revision-updating-20260928/smoke/keeps-nas-validation-t82yv7tk/originals",
+        "Destination": "/myphoto/library",
+        "Mode": "",
+        "RW": false,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "bind",
+        "Source": "/volume2/docker/keeps/releases/revision-updating-20260928/smoke/keeps-nas-validation-t82yv7tk/keeps",
+        "Destination": "/myphoto/keeps",
+        "Mode": "",
+        "RW": true,
+        "Propagation": "rprivate"
+      }
+    ],
+    "retainedContainer": "keeps-rust-smoke-6aae4d5597"
+  }
+}

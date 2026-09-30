@@ -1,5 +1,5 @@
-use crate::store::{Store, StoreError, append_one};
-use anyhow::{Context, Result, bail, ensure};
+use crate::store::{Store, StoreError};
+use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::Deserialize;
@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
-const VERSION: i64 = 2;
+const VERSION: i64 = 9;
 const DIRECTORY_ASSET_SET: &str =
     " AND a.id IN (SELECT f.asset_id FROM catalog_paths f WHERE f.library_id=? AND ";
 const SCHEMA: &str = r#"
@@ -28,12 +28,36 @@ pub fn ensure_schema(db: &mut Connection, allow_migrate: bool) -> Result<()> {
         "database schema {version} is newer than this server supports ({VERSION})"
     );
     if version == VERSION {
+        db.prepare("SELECT library_id,asset_id,root_id FROM catalog_identity_roots LIMIT 0")?;
+        db.prepare("SELECT library_id,root_id,asset_id FROM catalog_identity_aliases LIMIT 0")?;
+        db.prepare("SELECT id,expires_at,completed FROM remote_cache_tasks LIMIT 0")?;
+        db.prepare("SELECT library_id,asset_id,role,file_object,object_bucket,object_key,object_etag,pixel_width,pixel_height,updated_at FROM derivative_objects LIMIT 0")?;
+        db.prepare("SELECT library_id,bucket,object_key,not_before,attempts,last_error FROM media_cache_gc LIMIT 0")?;
+        db.prepare("SELECT library_id,id,snapshot FROM photos LIMIT 0")?;
+        db.prepare("SELECT library_id,id,snapshot FROM videos LIMIT 0")?;
+        db.prepare("SELECT library_id,path,parent_path FROM directories LIMIT 0")?;
+        db.prepare("SELECT library_id,asset_id,source_hash,spec,status,attempts,available_at,last_error,thumbnail,standard,updated_at,audited_at FROM media_cache LIMIT 0")?;
+        db.prepare("SELECT next_batch_at,last_batch_count,last_batch_at,last_error,free_bytes FROM cache_runtime LIMIT 0")?;
         db.prepare("SELECT snapshot,content_hash,fingerprint,sort_time,filename,rating,flag,color,trashed FROM catalog_assets LIMIT 0")?;
         db.prepare(
             "SELECT asset_id,content_hash,size,role,holder,availability FROM catalog_files LIMIT 0",
         )?;
         db.prepare("SELECT library_id,path,asset_id,content_hash,role FROM catalog_paths LIMIT 0")?;
         db.prepare("SELECT library_id,path FROM catalog_hidden_directories LIMIT 0")?;
+        db.prepare("SELECT library_id,asset_id,content_hash,visual_hash,capture_key,width,height,priority,evidence FROM catalog_versions LIMIT 0")?;
+        db.prepare("SELECT library_id,path,asset_id,content_hash,available FROM catalog_version_paths LIMIT 0")?;
+        db.prepare(
+            "SELECT library_id,asset_id,content_hash,user_selected FROM catalog_defaults LIMIT 0",
+        )?;
+        db.prepare("SELECT library_id,revision FROM catalog_version_revision LIMIT 0")?;
+        db.prepare(
+            "SELECT library_id,path,parent_path,revision FROM catalog_directory_revisions LIMIT 0",
+        )?;
+        db.prepare("SELECT library_id,kind,key FROM catalog_revision_dirty LIMIT 0")?;
+        db.prepare("SELECT library_id,value FROM catalog_revision_sequence LIMIT 0")?;
+        db.prepare(
+            "SELECT library_id,path,owner,last_changed_at FROM catalog_revision_updates LIMIT 0",
+        )?;
         return Ok(());
     }
     ensure!(
@@ -43,31 +67,57 @@ pub fn ensure_schema(db: &mut Connection, allow_migrate: bool) -> Result<()> {
     tracing::info!(from = version, to = VERSION, "migrating NAS catalog");
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if version == 0 {
-        tx.execute_batch(SCHEMA)?;
-        {
-            let mut statement=tx.prepare("SELECT library_id,global_seq,op_type,payload_json,committed_at FROM ledger_events ORDER BY library_id,global_seq")?;
-            let mut rows = statement.query([])?;
-            let mut count = 0usize;
-            while let Some(row) = rows.next()? {
-                let lib: String = row.get(0)?;
-                let seq: i64 = row.get(1)?;
-                let kind: String = row.get(2)?;
-                let payload: Value = serde_json::from_str(&row.get::<_, String>(3)?)?;
-                project(
-                    &tx,
-                    &lib,
-                    seq,
-                    &json!({"opType":kind,"payload":payload,"committedAt":row.get::<_,String>(4)?}),
-                )?;
-                count += 1;
-                if count.is_multiple_of(50000) {
-                    tracing::info!(events = count, "replaying existing ledger into NAS catalog");
-                }
-            }
-            tracing::info!(events = count, "NAS catalog replay complete");
+        let legacy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='ledger_events')", [], |r| r.get(0))?;
+        if legacy {
+            let populated: bool =
+                tx.query_row("SELECT EXISTS(SELECT 1 FROM ledger_events)", [], |r| {
+                    r.get(0)
+                })?;
+            ensure!(
+                !populated,
+                "legacy ledger-only database requires explicit conversion with the previous server; historical events are never replayed by this server"
+            );
         }
+        tx.execute_batch(SCHEMA)?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS derivative_objects(library_id TEXT NOT NULL,asset_id TEXT NOT NULL,role TEXT NOT NULL,file_object TEXT NOT NULL,object_bucket TEXT NOT NULL,object_key TEXT NOT NULL,object_etag TEXT,pixel_width INTEGER NOT NULL,pixel_height INTEGER NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(library_id,asset_id,role));")?;
     }
-    tx.execute_batch("CREATE TABLE catalog_hidden_directories(library_id TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(library_id,path));")?;
+
+    if version < 2 {
+        tx.execute_batch("CREATE TABLE catalog_hidden_directories(library_id TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(library_id,path));")?;
+    }
+    if version < 3 {
+        crate::versions::migrate(&tx)?;
+    }
+    if version < 4 {
+        crate::revisions::migrate(&tx)?;
+    }
+    if version < 5 {
+        crate::revisions::migrate_updates(&tx)?;
+    }
+    if version < 6 {
+        crate::cache_pipeline::migrate(&tx)?;
+    }
+    if version < 7 {
+        let has_event_sequence = tx
+            .prepare("PRAGMA table_info(derivative_objects)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|name| name == "declared_event_seq");
+        if has_event_sequence {
+            tx.execute_batch("ALTER TABLE derivative_objects DROP COLUMN declared_event_seq;")?;
+        }
+        tx.execute_batch("DROP TABLE IF EXISTS archive_receipts; DROP TABLE IF EXISTS sync_conflicts; DROP TABLE IF EXISTS device_states; DROP TABLE IF EXISTS ledger_sequence_counters; DROP TABLE IF EXISTS ledger_events;")?;
+    }
+    if version < 8 {
+        crate::remote_worker::migrate(&tx)?;
+    }
+    if version < 9 {
+        tx.execute_batch("CREATE TABLE catalog_identity_roots(library_id TEXT NOT NULL,asset_id TEXT NOT NULL,root_id TEXT NOT NULL,PRIMARY KEY(library_id,asset_id));
+            CREATE TABLE catalog_identity_aliases(library_id TEXT NOT NULL,root_id TEXT NOT NULL,asset_id TEXT NOT NULL,PRIMARY KEY(library_id,root_id));
+            INSERT INTO catalog_identity_roots SELECT library_id,id,id FROM catalog_assets;
+            INSERT INTO catalog_identity_aliases SELECT library_id,id,id FROM catalog_assets;")?;
+    }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
     Ok(())
@@ -92,122 +142,27 @@ fn save(db: &Connection, lib: &str, a: &Value) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn project(db: &Connection, lib: &str, seq: i64, op: &Value) -> Result<()> {
-    let p = &op["payload"];
-    match op["opType"].as_str().unwrap_or("") {
-        "asset_snapshot_declared" => {
-            let mut a = p["assetSnapshotDeclared"]["snapshot"].clone();
-            let id = text(&a, "assetID")?.to_ascii_lowercase();
-            a.as_object_mut()
-                .context("snapshot is not an object")?
-                .remove("assetID");
-            a["id"] = json!(id);
-            let lifecycle:Option<String>=db.query_row("SELECT op_type FROM ledger_events WHERE library_id=? AND entity_type='asset' AND entity_id IN (?,?) AND global_seq<=? AND op_type IN ('move_to_trash','restore_from_trash') ORDER BY global_seq DESC LIMIT 1",params![lib,id,id.to_ascii_uppercase(),seq],|r|r.get(0)).optional()?;
-            a["trashed"] = json!(lifecycle.as_deref() == Some("move_to_trash"));
-            save(db, lib, &a)?;
-        }
-        "metadata_set" | "tags_updated" | "move_to_trash" | "restore_from_trash" => {
-            let case = match op["opType"].as_str().unwrap() {
-                "metadata_set" => "metadataSet",
-                "tags_updated" => "tagsUpdated",
-                "move_to_trash" => "moveToTrash",
-                _ => "restoreFromTrash",
-            };
-            let change = &p[case];
-            let id = text(change, "assetID")?.to_ascii_lowercase();
-            if let Some(mut a) = existing(db, lib, &id)? {
-                match case {
-                    "metadataSet" => {
-                        let field = match change["field"].as_str().unwrap_or("") {
-                            "rating" => "rating",
-                            "flag_state" => "flagState",
-                            "color_label" => "colorLabel",
-                            "caption" => "caption",
-                            _ => bail!("invalid metadata field"),
-                        };
-                        let v = &change["value"];
-                        let value = if !v["int"].is_null() {
-                            v["int"]["_0"].clone()
-                        } else if !v["string"].is_null() {
-                            v["string"]["_0"].clone()
-                        } else if !v["intValue"].is_null() {
-                            v["intValue"].clone()
-                        } else if !v["stringValue"].is_null() {
-                            v["stringValue"].clone()
-                        } else {
-                            Value::Null
-                        };
-                        let valid = match field {
-                            "rating" => value.as_i64().is_some(),
-                            "flagState" => value
-                                .as_str()
-                                .is_some_and(|s| ["unflagged", "picked", "rejected"].contains(&s)),
-                            "colorLabel" => {
-                                value.is_null()
-                                    || value.as_str().is_some_and(|s| {
-                                        ["red", "yellow", "green", "blue", "purple"].contains(&s)
-                                    })
-                            }
-                            _ => value.is_null() || value.is_string(),
-                        };
-                        if valid {
-                            a[field] = value;
-                        }
-                    }
-                    "tagsUpdated" => {
-                        let mut tags: BTreeSet<String> = a["tags"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(Value::as_str)
-                            .map(str::to_owned)
-                            .collect();
-                        for tag in change["remove"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(Value::as_str)
-                        {
-                            tags.remove(tag);
-                        }
-                        for tag in change["add"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(Value::as_str)
-                        {
-                            tags.insert(tag.into());
-                        }
-                        a["tags"] = json!(tags);
-                    }
-                    "moveToTrash" => a["trashed"] = json!(true),
-                    _ => a["trashed"] = json!(false),
-                }
-                a["updatedAt"] = op
-                    .get("committedAt")
-                    .or_else(|| op.get("createdAt"))
-                    .cloned()
-                    .unwrap_or_else(|| a["updatedAt"].clone());
-                save(db, lib, &a)?;
-            }
-        }
-        "file_placement_snapshot_declared"
-        | "imported_original_declared"
-        | "original_archive_receipt_recorded" => {
-            let (case, placement) = match op["opType"].as_str().unwrap() {
-                "file_placement_snapshot_declared" => {
-                    ("filePlacementSnapshotDeclared", "placement")
-                }
-                "imported_original_declared" => ("importedOriginalDeclared", "placement"),
-                _ => ("originalArchiveReceiptRecorded", "serverPlacement"),
-            };
-            let p = &p[case];
-            let file = &p["fileObject"];
-            let place = &p[placement];
-            db.execute("INSERT INTO catalog_files(library_id,asset_id,content_hash,size,role,holder,availability) VALUES (?,?,?,?,?,?,?) ON CONFLICT(library_id,asset_id,content_hash,role,holder) DO UPDATE SET availability=excluded.availability",params![lib,text(p,"assetID")?.to_ascii_lowercase(),text(file,"contentHash")?,file["sizeBytes"].as_i64().context("file size missing")?,text(file,"role")?,text(place,"holderID")?,text(place,"availability")?])?;
-        }
-        _ => {}
-    }
+pub(crate) fn register_derivative(db: &Connection, lib: &str, id: &str, d: &Value) -> Result<()> {
+    ensure!(
+        existing(db, lib, id)?.is_some(),
+        "derivative asset does not exist"
+    );
+    ensure!(
+        d["assetID"].as_str().is_none_or(|asset| asset == id),
+        "derivative asset mismatch"
+    );
+    db.execute("INSERT INTO derivative_objects(library_id,asset_id,role,file_object,object_bucket,object_key,object_etag,pixel_width,pixel_height,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(library_id,asset_id,role) DO UPDATE SET file_object=excluded.file_object,object_bucket=excluded.object_bucket,object_key=excluded.object_key,object_etag=excluded.object_etag,pixel_width=excluded.pixel_width,pixel_height=excluded.pixel_height,updated_at=excluded.updated_at",params![lib,id,text(d,"role")?,d["fileObject"].to_string(),text(&d["objectRef"],"bucket")?,text(&d["objectRef"],"key")?,d["objectRef"]["eTag"].as_str(),d["pixelSize"]["width"].as_i64().context("missing derivative width")?,d["pixelSize"]["height"].as_i64().context("missing derivative height")?,Utc::now().to_rfc3339()])?;
+    Ok(())
+}
+
+fn register_file(
+    db: &Connection,
+    lib: &str,
+    id: &str,
+    file: &Value,
+    availability: &str,
+) -> Result<()> {
+    db.execute("INSERT INTO catalog_files(library_id,asset_id,content_hash,size,role,holder,availability) VALUES (?,?,?,?,?,'keeps-nas',?) ON CONFLICT(library_id,asset_id,content_hash,role,holder) DO UPDATE SET availability=excluded.availability",params![lib,id,text(file,"contentHash")?,file["sizeBytes"].as_i64().context("file size missing")?,text(file,"role")?,availability])?;
     Ok(())
 }
 
@@ -297,7 +252,8 @@ impl Store {
             path.trim_end_matches('/')
         };
         {
-            let db = self.lock()?;
+            let mut connection = self.lock()?;
+            let db = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if hidden {
                 db.execute("INSERT INTO catalog_hidden_directories(library_id,path) VALUES (?,?) ON CONFLICT DO NOTHING", params![lib,path])?;
             } else {
@@ -306,6 +262,8 @@ impl Store {
                     params![lib, path],
                 )?;
             }
+            crate::revisions::flush(&db)?;
+            db.commit()?;
         }
         self.hidden_directories(lib)
     }
@@ -375,7 +333,10 @@ impl Store {
         if !q.show_hidden.unwrap_or(false) {
             hidden_filter(&mut filter, &mut values, lib, q.directory.as_deref());
         }
-        let db = self.lock()?;
+        let mut connection = self.lock()?;
+        let db = connection.transaction()?;
+        let revision = crate::revisions::read(&db, lib, q.directory.as_deref())?;
+        let is_updating = crate::revisions::is_updating(&db, lib, q.directory.as_deref())?;
         let total: i64 = db.query_row(
             &format!("SELECT count(*) FROM catalog_assets a WHERE {filter}"),
             rusqlite::params_from_iter(&values),
@@ -393,7 +354,7 @@ impl Store {
         }
         let next = offset + items.len() as i64;
         Ok(
-            json!({"items":items,"total":total,"nextCursor":if next<total{Some(next.to_string())}else{None}}),
+            json!({"items":items,"total":total,"nextCursor":if next<total{Some(next.to_string())}else{None},"revision":revision,"isUpdating":is_updating}),
         )
     }
     pub fn asset(&self, lib: &str, id: &str) -> Result<Value> {
@@ -490,78 +451,41 @@ impl Store {
         }
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let old = existing(&tx, lib, id)?.ok_or_else(not_found)?;
+        let mut asset = existing(&tx, lib, id)?.ok_or_else(not_found)?;
+        let old = asset.clone();
         for (key, value) in fields {
-            if old[key] == *value {
-                continue;
-            }
             if key == "tags" {
-                let before: BTreeSet<&str> = old["tags"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .collect();
-                let after: BTreeSet<&str> = value
+                let tags: BTreeSet<&str> = value
                     .as_array()
                     .unwrap()
                     .iter()
                     .filter_map(Value::as_str)
                     .collect();
-                server_event(
-                    &tx,
-                    lib,
-                    "asset",
-                    id,
-                    "tags_updated",
-                    json!({"tagsUpdated":{"assetID":id,"add":after.difference(&before).collect::<Vec<_>>(),"remove":before.difference(&after).collect::<Vec<_>>()}}),
-                )?;
+                asset[key] = json!(tags);
             } else {
-                let field = match key.as_str() {
-                    "rating" => "rating",
-                    "flagState" => "flag_state",
-                    _ => "color_label",
-                };
-                let value = if value.is_null() {
-                    json!({"null":{}})
-                } else if key == "rating" {
-                    json!({"int":{"_0":value}})
-                } else {
-                    json!({"string":{"_0":value}})
-                };
-                server_event(
-                    &tx,
-                    lib,
-                    "asset",
-                    id,
-                    "metadata_set",
-                    json!({"metadataSet":{"assetID":id,"field":field,"value":value}}),
-                )?;
+                asset[key] = value.clone();
             }
         }
+        if asset != old {
+            asset["updatedAt"] = json!(Utc::now().to_rfc3339());
+            save(&tx, lib, &asset)?;
+        }
         let a = decorate(&tx, lib, existing(&tx, lib, id)?.ok_or_else(not_found)?)?;
+        crate::revisions::flush(&tx)?;
         tx.commit()?;
         Ok(a)
     }
     pub fn set_trashed(&self, lib: &str, id: &str, trashed: bool) -> Result<Value> {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let old = existing(&tx, lib, id)?.ok_or_else(not_found)?;
-        if old["trashed"] != trashed {
-            let (kind, payload) = if trashed {
-                (
-                    "move_to_trash",
-                    json!({"moveToTrash":{"assetID":id,"reason":"user"}}),
-                )
-            } else {
-                (
-                    "restore_from_trash",
-                    json!({"restoreFromTrash":{"assetID":id}}),
-                )
-            };
-            server_event(&tx, lib, "asset", id, kind, payload)?;
+        let mut asset = existing(&tx, lib, id)?.ok_or_else(not_found)?;
+        if asset["trashed"] != trashed {
+            asset["trashed"] = json!(trashed);
+            asset["updatedAt"] = json!(Utc::now().to_rfc3339());
+            save(&tx, lib, &asset)?;
         }
         let a = decorate(&tx, lib, existing(&tx, lib, id)?.ok_or_else(not_found)?)?;
+        crate::revisions::flush(&tx)?;
         tx.commit()?;
         Ok(a)
     }
@@ -572,37 +496,217 @@ fn escape_like(s: &str) -> String {
         .replace('_', "\\_")
 }
 
-pub(crate) fn server_event(
-    db: &Connection,
-    lib: &str,
-    entity: &str,
-    id: &str,
-    kind: &str,
-    payload: Value,
-) -> Result<()> {
-    let last:Option<(i64,String)>=db.query_row("SELECT device_seq,hybrid_logical_time FROM ledger_events WHERE library_id=? AND device_id='keeps-nas' ORDER BY device_seq DESC LIMIT 1",[lib],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-    let seq = last.as_ref().map_or(1, |v| v.0 + 1);
-    let mut wall = Utc::now().timestamp_millis();
-    let mut counter = 0;
-    if let Some((_, clock)) = last {
-        let clock: Value = serde_json::from_str(&clock)?;
-        if clock["wallTimeMilliseconds"].as_i64().unwrap_or(0) >= wall {
-            wall = clock["wallTimeMilliseconds"].as_i64().unwrap();
-            counter = clock["counter"].as_i64().unwrap_or(0) + 1;
+fn moved_original(db: &Connection, lib: &str, hash: &str) -> Result<Option<(String, Vec<String>)>> {
+    let ids = {
+        let mut q = db.prepare("SELECT DISTINCT asset_id FROM catalog_files WHERE library_id=? AND content_hash=? AND role IN ('jpeg_original','raw_original') LIMIT 2")?;
+        q.query_map(params![lib, hash], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if ids.len() != 1 {
+        return Ok(None);
+    }
+    let id = &ids[0];
+    let paths = {
+        let mut q = db.prepare("SELECT path FROM catalog_paths WHERE library_id=?1 AND asset_id=?2 AND content_hash=?3 UNION SELECT path FROM catalog_version_paths WHERE library_id=?1 AND asset_id=?2 AND content_hash=?3")?;
+        q.query_map(params![lib, id, hash], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    for path in &paths {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("check moved original {path}")),
         }
     }
-    let time = Utc::now().to_rfc3339();
-    let mut op = json!({"opID":Uuid::new_v4(),"libraryID":lib,"deviceID":"keeps-nas","deviceSequence":seq,"hybridLogicalTime":{"wallTimeMilliseconds":wall,"counter":counter,"nodeID":"keeps-nas"},"actorID":"server","entityType":entity,"entityID":id,"opType":kind,"payload":payload,"createdAt":time});
-    crate::protocol::validate_operation(&mut op).map_err(anyhow::Error::msg)?;
-    let result = append_one(db, lib, &op)?;
-    ensure!(
-        result["status"] == "committed",
-        "server command conflicted: {result}"
+    Ok(Some((id.clone(), paths)))
+}
+
+fn merge_unlocated_identity(db: &Connection, lib: &str, old: &str, target: &str) -> Result<()> {
+    let located: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM catalog_paths WHERE library_id=? AND asset_id=?)",
+        params![lib, old],
+        |r| r.get(0),
+    )?;
+    if located {
+        return Ok(());
+    }
+    let Some(previous) = existing(db, lib, old)? else {
+        return Ok(());
+    };
+    let mut current = existing(db, lib, target)?.context("identity merge target missing")?;
+    let tags: BTreeSet<String> = [&current, &previous]
+        .into_iter()
+        .flat_map(|s| {
+            s["tags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    current["tags"] = json!(tags);
+    current["rating"] = json!(
+        current["rating"]
+            .as_i64()
+            .unwrap_or(0)
+            .max(previous["rating"].as_i64().unwrap_or(0))
     );
+    if current["flagState"]
+        .as_str()
+        .is_none_or(|v| v == "unflagged")
+        && !previous["flagState"].is_null()
+    {
+        current["flagState"] = previous["flagState"].clone();
+    }
+    if current["colorLabel"].is_null() {
+        current["colorLabel"] = previous["colorLabel"].clone();
+    }
+    let mut history = current["identityMergedFrom"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    history.push(previous);
+    current["identityMergedFrom"] = json!(history);
+    current["updatedAt"] = json!(Utc::now().to_rfc3339());
+    save(db, lib, &current)?;
+    db.execute("INSERT OR IGNORE INTO catalog_files SELECT library_id,?3,content_hash,size,role,holder,availability FROM catalog_files WHERE library_id=?1 AND asset_id=?2",params![lib,old,target])?;
+    db.execute("INSERT OR IGNORE INTO catalog_versions SELECT library_id,?3,content_hash,visual_hash,capture_key,width,height,priority,evidence FROM catalog_versions WHERE library_id=?1 AND asset_id=?2",params![lib,old,target])?;
+    db.execute(
+        "UPDATE catalog_version_paths SET asset_id=? WHERE library_id=? AND asset_id=?",
+        params![target, lib, old],
+    )?;
+    db.execute(
+        "UPDATE catalog_identity_aliases SET asset_id=? WHERE library_id=? AND asset_id=?",
+        params![target, lib, old],
+    )?;
+    for table in [
+        "catalog_files",
+        "catalog_versions",
+        "catalog_defaults",
+        "catalog_identity_roots",
+        "media_cache",
+        "remote_cache_tasks",
+        "derivative_objects",
+    ] {
+        db.execute(
+            &format!("DELETE FROM {table} WHERE library_id=? AND asset_id=?"),
+            params![lib, old],
+        )?;
+    }
+    for table in ["photos", "videos", "catalog_assets"] {
+        db.execute(
+            &format!("DELETE FROM {table} WHERE library_id=? AND id=?"),
+            params![lib, old],
+        )?;
+    }
+    Ok(())
+}
+
+fn metadata_identity_updated(
+    db: &Connection,
+    lib: &str,
+    id: &str,
+    path: &str,
+    old: &str,
+    metadata: (&str, u64, &str),
+) -> Result<()> {
+    let (new, size, mtime) = metadata;
+    let size = i64::try_from(size)?;
+    db.execute("INSERT OR REPLACE INTO catalog_files SELECT library_id,asset_id,?4,?5,role,holder,availability FROM catalog_files WHERE library_id=?1 AND asset_id=?2 AND content_hash=?3",params![lib,id,old,new,size])?;
+    db.execute("INSERT OR IGNORE INTO catalog_versions SELECT library_id,asset_id,?4,visual_hash,capture_key,width,height,priority,json_set(evidence,'$.capture.contentFingerprint',?4) FROM catalog_versions WHERE library_id=?1 AND asset_id=?2 AND content_hash=?3",params![lib,id,old,new])?;
+    db.execute(
+        "UPDATE catalog_paths SET content_hash=? WHERE library_id=? AND path=?",
+        params![new, lib, path],
+    )?;
+    db.execute(
+        "UPDATE catalog_version_paths SET content_hash=? WHERE library_id=? AND path=?",
+        params![new, lib, path],
+    )?;
+    db.execute("UPDATE catalog_defaults SET content_hash=? WHERE library_id=? AND asset_id=? AND content_hash=?",params![new,lib,id,old])?;
+    db.execute("UPDATE catalog_assets SET content_hash=?4,snapshot=json_set(snapshot,'$.contentFingerprint',?4) WHERE library_id=?1 AND id=?2 AND content_hash=?3",params![lib,id,old,new])?;
+    db.execute(
+        "UPDATE media_cache SET source_hash=? WHERE library_id=? AND asset_id=? AND source_hash=?",
+        params![new, lib, id, old],
+    )?;
+    db.execute("UPDATE remote_cache_tasks SET source_hash=?4 WHERE library_id=?1 AND asset_id=?2 AND source_hash=?3 AND completed<>0",params![lib,id,old,new])?;
+    db.execute("UPDATE remote_cache_tasks SET input_hash=?4 WHERE library_id=?1 AND input_path=?2 AND input_hash=?3 AND completed<>0",params![lib,path,old,new])?;
+    db.execute("UPDATE media_cache SET standard=json_set(standard,'$.version',?3,'$.sizeBytes',?4,'$.mtimeNs',?5) WHERE library_id=?1 AND json_extract(standard,'$.path')=?2",params![lib,path,new,size,mtime])?;
+    db.execute("UPDATE catalog_versions SET evidence=json_set(evidence,'$.generatedFrom',?4) WHERE library_id=?1 AND asset_id=?2 AND json_extract(evidence,'$.generatedFrom')=?3",params![lib,id,old,new])?;
+    let other:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_paths WHERE library_id=? AND asset_id=? AND content_hash=?)",params![lib,id,old],|r|r.get(0))?;
+    if !other {
+        db.execute(
+            "DELETE FROM catalog_files WHERE library_id=? AND asset_id=? AND content_hash=?",
+            params![lib, id, old],
+        )?;
+        db.execute(
+            "DELETE FROM catalog_versions WHERE library_id=? AND asset_id=? AND content_hash=?",
+            params![lib, id, old],
+        )?;
+        db.execute("UPDATE catalog_version_paths SET content_hash=? WHERE library_id=? AND asset_id=? AND content_hash=?",params![new,lib,id,old])?;
+    }
     Ok(())
 }
 
 impl Store {
+    pub fn root_id(&self, lib: &str, asset: &str) -> Result<String> {
+        Ok(self.lock()?.query_row(
+            "SELECT root_id FROM catalog_identity_roots WHERE library_id=? AND asset_id=?",
+            params![lib, asset],
+            |r| r.get(0),
+        )?)
+    }
+    pub fn existing_asset_for_path(&self, lib: &str, path: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT asset_id FROM catalog_paths WHERE library_id=? AND path=?",
+                params![lib, path],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+    pub fn with_identity_update<F>(
+        &self,
+        lib: &str,
+        path: &str,
+        expected_hash: &str,
+        action: F,
+    ) -> Result<bool>
+    where
+        F: FnOnce() -> Result<Option<(String, u64, String)>>,
+    {
+        let mut db = self.lock()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let indexed: Option<(String, String)> = tx
+            .query_row(
+                "SELECT asset_id,content_hash FROM catalog_paths WHERE library_id=? AND path=?",
+                params![lib, path],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((id, hash)) = &indexed {
+            ensure!(
+                hash == expected_hash,
+                "identity update source changed in catalog"
+            );
+            let processing:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM media_cache WHERE library_id=? AND asset_id=? AND status='processing')",params![lib,id],|r|r.get(0))?;
+            if processing {
+                return Ok(false);
+            }
+        }
+        if let Some((hash, size, mtime)) = action()?
+            && let Some((id, old)) = indexed
+        {
+            metadata_identity_updated(&tx, lib, &id, path, &old, (&hash, size, &mtime))?;
+        }
+        crate::revisions::flush(&tx)?;
+        tx.commit()?;
+        Ok(true)
+    }
     pub fn original_is_online(&self, lib: &str, path: &str, hash: &str) -> Result<bool> {
         Ok(self.lock()?.query_row("SELECT EXISTS(SELECT 1 FROM catalog_paths p JOIN catalog_files f ON f.library_id=p.library_id AND f.asset_id=p.asset_id AND f.content_hash=p.content_hash AND f.role=p.role WHERE p.library_id=? AND p.path=? AND p.content_hash=? AND f.holder='keeps-nas' AND f.availability='online')",params![lib,path,hash],|r|r.get(0))?)
     }
@@ -613,85 +717,189 @@ impl Store {
         file: &Value,
         snapshot: &Value,
     ) -> Result<String> {
+        self.ingest_original_with_evidence(lib, path, file, snapshot, &Default::default())
+    }
+    pub fn ingest_original_with_evidence(
+        &self,
+        lib: &str,
+        path: &str,
+        file: &Value,
+        snapshot: &Value,
+        evidence: &crate::versions::VersionEvidence,
+    ) -> Result<String> {
+        self.ingest_original_with_revision(lib, path, file, snapshot, evidence, None)
+    }
+    pub(crate) fn ingest_original_with_revision(
+        &self,
+        lib: &str,
+        path: &str,
+        file: &Value,
+        snapshot: &Value,
+        evidence: &crate::versions::VersionEvidence,
+        batch_id: Option<&str>,
+    ) -> Result<String> {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let hash = text(file, "contentHash")?;
-        let fingerprint = text(snapshot, "metadataFingerprint")?;
-        let by_hash: Option<String> = tx
+        let directory = std::path::Path::new(path)
+            .parent()
+            .context("original has no parent directory")?
+            .to_str()
+            .context("original directory must be UTF-8")?;
+        let prefix = format!("{}/", directory.trim_end_matches('/'));
+        // Missing version paths retain identity when an original reappears.
+        let by_path: Option<String> = tx.query_row("SELECT asset_id FROM catalog_paths WHERE library_id=?1 AND path=?2 AND content_hash=?3 UNION ALL SELECT asset_id FROM catalog_version_paths WHERE library_id=?1 AND path=?2 AND content_hash=?3 LIMIT 1",params![lib,path,hash],|r|r.get(0)).optional()?;
+        let root = snapshot["originalDocumentID"]
+            .as_str()
+            .map(|value| Uuid::parse_str(value).map(|id| id.to_string()))
+            .transpose()
+            .context("invalid originalDocumentID")?;
+        let previous_path_asset: Option<String> = tx
             .query_row(
-                "SELECT asset_id FROM catalog_files WHERE library_id=? AND content_hash=? LIMIT 1",
-                params![lib, hash],
+                "SELECT asset_id FROM catalog_paths WHERE library_id=? AND path=?",
+                params![lib, path],
                 |r| r.get(0),
             )
             .optional()?;
-        let matched = if by_hash.is_some() {
-            by_hash
+        let identity_match = if let Some(root) = &root {
+            let known: Option<String> = tx.query_row("SELECT asset_id FROM catalog_identity_aliases WHERE library_id=? AND root_id=?",params![lib,root],|r|r.get(0)).optional()?;
+            known.or_else(|| previous_path_asset.clone())
         } else {
-            tx.query_row("SELECT id FROM catalog_assets WHERE library_id=? AND (content_hash=? OR fingerprint=?) ORDER BY CASE WHEN content_hash=? THEN 0 ELSE 1 END,id LIMIT 1",params![lib,hash,fingerprint,hash],|r|r.get(0)).optional()?
+            None
+        };
+        let matched = if identity_match.is_some() {
+            identity_match
+        } else if root.is_some() {
+            None
+        } else if by_path.is_some() {
+            by_path
+        } else {
+            let by_hash: Option<String> = tx.query_row("SELECT c.asset_id FROM (SELECT asset_id FROM catalog_files WHERE library_id=?1 AND content_hash=?3 AND role IN ('jpeg_original','raw_original') UNION SELECT id FROM catalog_assets WHERE library_id=?1 AND content_hash=?3) c WHERE EXISTS(SELECT 1 FROM catalog_paths p WHERE p.library_id=?1 AND p.asset_id=c.asset_id AND p.content_hash=?3 AND p.role IN ('jpeg_original','raw_original') AND substr(p.path,1,length(?2))=?2 AND instr(substr(p.path,length(?2)+1),'/')=0) ORDER BY c.asset_id LIMIT 1",params![lib,prefix,hash],|r|r.get(0)).optional()?;
+            by_hash.or(crate::versions::exact_match(&tx, lib, &prefix, evidence)?)
+        };
+        let moved = if root.is_none() && matched.is_none() && std::path::Path::new(path).is_file() {
+            moved_original(&tx, lib, hash)?
+        } else {
+            None
         };
         let id = matched
-            .clone()
+            .or_else(|| moved.as_ref().map(|(id, _)| id.clone()))
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         if existing(&tx, lib, &id)?.is_none() {
             let mut snapshot = snapshot.clone();
-            snapshot["assetID"] = json!(id);
-            server_event(
-                &tx,
-                lib,
-                "asset",
-                &id,
-                "asset_snapshot_declared",
-                json!({"assetSnapshotDeclared":{"snapshot":snapshot}}),
-            )?;
+            snapshot
+                .as_object_mut()
+                .context("snapshot is not an object")?
+                .remove("assetID");
+            snapshot["id"] = json!(id);
+            snapshot["trashed"] = json!(false);
+            save(&tx, lib, &snapshot)?;
         }
-        let present:Option<String>=tx.query_row("SELECT availability FROM catalog_files WHERE library_id=? AND asset_id=? AND content_hash=? AND role=? AND holder='keeps-nas'",params![lib,id,hash,text(file,"role")?],|r|r.get(0)).optional()?;
-        if present.as_deref() != Some("online") {
-            let placement = json!({"fileObjectID":file,"holderID":"keeps-nas","storageKind":"nas","authorityRole":"canonical","availability":"online"});
-            server_event(
-                &tx,
-                lib,
-                "file_placement",
-                &id,
-                "file_placement_snapshot_declared",
-                json!({"filePlacementSnapshotDeclared":{"assetID":id,"fileObject":file,"placement":placement}}),
-            )?;
-            if file["role"] != "sidecar" {
-                server_event(
-                    &tx,
-                    lib,
-                    "file_placement",
-                    &id,
-                    "original_archive_receipt_recorded",
-                    json!({"originalArchiveReceiptRecorded":{"assetID":id,"fileObject":file,"serverPlacement":placement}}),
+        let canonical = root.as_deref().unwrap_or(&id);
+        tx.execute(
+            "INSERT OR IGNORE INTO catalog_identity_aliases VALUES(?,?,?)",
+            params![lib, canonical, id],
+        )?;
+        tx.execute("INSERT INTO catalog_identity_roots VALUES(?,?,?) ON CONFLICT(library_id,asset_id) DO UPDATE SET root_id=CASE WHEN ? THEN excluded.root_id ELSE root_id END",params![lib,id,canonical,root.is_some()])?;
+        register_file(&tx, lib, &id, file, "online")?;
+        tx.execute("INSERT INTO catalog_paths VALUES(?,?,?,?,?) ON CONFLICT(library_id,path) DO UPDATE SET asset_id=excluded.asset_id,content_hash=excluded.content_hash,role=excluded.role",params![lib,path,id,hash,text(file,"role")?])?;
+        crate::versions::register(&tx, lib, &id, path, file, snapshot, evidence)?;
+        if let Some((_, paths)) = moved {
+            // Register the replacement first so the selected version and its preview remain valid.
+            for old in paths {
+                tx.execute(
+                    "DELETE FROM catalog_paths WHERE library_id=? AND path=? AND asset_id=?",
+                    params![lib, old, id],
                 )?;
+                crate::versions::missing_path(&tx, lib, &id, &old)?;
             }
         }
-        tx.execute("INSERT INTO catalog_paths VALUES(?,?,?,?,?) ON CONFLICT(library_id,path) DO UPDATE SET asset_id=excluded.asset_id,content_hash=excluded.content_hash,role=excluded.role",params![lib,path,id,hash,text(file,"role")?])?;
+        if root.is_some() {
+            let paths = {
+                let mut q = tx.prepare(
+                    "SELECT path FROM catalog_paths WHERE library_id=? AND asset_id=? AND path<>?",
+                )?;
+                q.query_map(params![lib, id, path], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for old in paths {
+                match std::fs::symlink_metadata(&old) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        tx.execute(
+                            "DELETE FROM catalog_paths WHERE library_id=? AND path=?",
+                            params![lib, old],
+                        )?;
+                        crate::versions::missing_path(&tx, lib, &id, &old)?;
+                    }
+                    Err(e) => return Err(e).with_context(|| format!("check identity path {old}")),
+                    Ok(_) => {}
+                }
+            }
+        }
+        if let Some(previous) = previous_path_asset.filter(|previous| previous != &id) {
+            merge_unlocated_identity(&tx, lib, &previous, &id)?;
+        }
+        crate::revisions::flush_for_batch(&tx, batch_id)?;
         tx.commit()?;
         Ok(id)
     }
     pub fn declare_generated_preview(&self, lib: &str, id: &str, derivative: &Value) -> Result<()> {
+        self.declare_preview_with_revision(lib, id, None, derivative, None)
+            .map(|_| ())
+    }
+    pub fn declare_generated_preview_for_version(
+        &self,
+        lib: &str,
+        id: &str,
+        hash: &str,
+        derivative: &Value,
+    ) -> Result<bool> {
+        self.declare_preview_with_revision(lib, id, Some(hash), derivative, None)
+    }
+    pub(crate) fn declare_preview_with_revision(
+        &self,
+        lib: &str,
+        id: &str,
+        hash: Option<&str>,
+        derivative: &Value,
+        batch_id: Option<&str>,
+    ) -> Result<bool> {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current:Option<String>=tx.query_row("SELECT object_key FROM derivative_objects WHERE library_id=? AND asset_id=? AND role='preview'",params![lib,id],|r|r.get(0)).optional()?;
-        if current.as_deref() != derivative["objectRef"]["key"].as_str() {
-            let entity = format!(
-                "{id}:preview:{}",
-                text(&derivative["fileObject"], "contentHash")?
-            );
-            server_event(
-                &tx,
-                lib,
-                "derivative_object",
-                &entity,
-                "derivative_declared",
-                json!({"derivativeDeclared":{"assetID":id,"derivative":derivative}}),
-            )?;
+        if let Some(hash) = hash {
+            let selected: Option<String> = tx
+                .query_row(
+                    "SELECT content_hash FROM catalog_defaults WHERE library_id=? AND asset_id=?",
+                    params![lib, id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if selected.as_deref() != Some(hash) {
+                return Ok(false);
+            }
         }
+        let current:Option<String>=tx.query_row("SELECT json_object('fileObject',json(file_object),'bucket',object_bucket,'key',object_key,'eTag',object_etag,'width',pixel_width,'height',pixel_height) FROM derivative_objects WHERE library_id=? AND asset_id=? AND role='preview'",params![lib,id],|r|r.get(0)).optional()?;
+        let current = current
+            .map(|value| serde_json::from_str::<Value>(&value))
+            .transpose()?;
+        let next = json!({"fileObject":derivative["fileObject"],"bucket":derivative["objectRef"]["bucket"],"key":derivative["objectRef"]["key"],"eTag":derivative["objectRef"]["eTag"],"width":derivative["pixelSize"]["width"],"height":derivative["pixelSize"]["height"]});
+        if current.as_ref() != Some(&next) {
+            register_derivative(&tx, lib, id, derivative)?;
+        }
+
+        crate::revisions::flush_for_batch(&tx, batch_id)?;
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
     pub fn mark_missing_under(&self, lib: &str, directory: &str) -> Result<usize> {
+        self.mark_missing_under_with_revision(lib, directory, None)
+    }
+    pub(crate) fn mark_missing_under_with_revision(
+        &self,
+        lib: &str,
+        directory: &str,
+        batch_id: Option<&str>,
+    ) -> Result<usize> {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let files = {
@@ -725,22 +933,16 @@ impl Store {
                 "DELETE FROM catalog_paths WHERE library_id=? AND path=?",
                 params![lib, path],
             )?;
+            crate::versions::missing_path(&tx, lib, &id, &path)?;
             let other:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM catalog_paths WHERE library_id=? AND asset_id=? AND content_hash=? AND role=?)",params![lib,id,hash,role],|r|r.get(0))?;
             if other {
                 continue;
             }
             let file = json!({"contentHash":hash,"sizeBytes":size,"role":role});
-            let placement = json!({"fileObjectID":file,"holderID":"keeps-nas","storageKind":"nas","authorityRole":"canonical","availability":"missing"});
-            server_event(
-                &tx,
-                lib,
-                "file_placement",
-                &id,
-                "file_placement_snapshot_declared",
-                json!({"filePlacementSnapshotDeclared":{"assetID":id,"fileObject":file,"placement":placement}}),
-            )?;
+            register_file(&tx, lib, &id, &file, "missing")?;
             missing += 1;
         }
+        crate::revisions::flush_for_batch(&tx, batch_id)?;
         tx.commit()?;
         Ok(missing)
     }
@@ -753,13 +955,221 @@ mod tests {
         json!({"assetID":Uuid::new_v4(),"captureTime":"2024-01-01T00:00:00Z","cameraMake":"Canon","cameraModel":"R3","lensModel":"50mm","originalFilename":"photo.jpg","contentFingerprint":"photo-hash","metadataFingerprint":"2024|Canon|R3|photo","rating":1,"flagState":"unflagged","tags":[],"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z"})
     }
     #[test]
+    fn trusted_root_merges_unlocated_previous_asset_and_user_metadata() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("db"), true)?;
+        let a = dir.path().join("a.jpg");
+        let b = dir.path().join("b.jpg");
+        std::fs::write(&a, b"first")?;
+        std::fs::write(&b, b"second")?;
+        let file = json!({"contentHash":"photo-hash","sizeBytes":5,"role":"jpeg_original"});
+        let first = store.ingest_original("lib", a.to_str().unwrap(), &file, &snapshot())?;
+        let other = json!({"contentHash":"second-hash","sizeBytes":6,"role":"jpeg_original"});
+        let mut snap = snapshot();
+        snap["contentFingerprint"] = json!("second-hash");
+        snap["rating"] = json!(5);
+        snap["tags"] = json!(["wedding"]);
+        snap["colorLabel"] = json!("red");
+        let second = store.ingest_original("lib", b.to_str().unwrap(), &other, &snap)?;
+        assert_ne!(first, second);
+        store.reconcile_cache()?;
+        snap["originalDocumentID"] = json!(first);
+        assert_eq!(
+            store.ingest_original("lib", b.to_str().unwrap(), &other, &snap)?,
+            first
+        );
+        let db = store.lock()?;
+        assert!(existing(&db, "lib", &second)?.is_none());
+        let merged = existing(&db, "lib", &first)?.unwrap();
+        assert_eq!(merged["rating"], 5);
+        assert_eq!(merged["tags"], json!(["wedding"]));
+        assert_eq!(merged["identityMergedFrom"][0]["id"], second);
+        assert_eq!(
+            db.query_row(
+                "SELECT asset_id FROM catalog_identity_aliases WHERE root_id=?",
+                [&second],
+                |r| r.get::<_, String>(0)
+            )?,
+            first
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM media_cache WHERE asset_id=?",
+                [&second],
+                |r| r.get::<_, i64>(0)
+            )?,
+            0
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM catalog_versions WHERE asset_id=?",
+                [&first],
+                |r| r.get::<_, i64>(0)
+            )?,
+            2
+        );
+        assert_eq!(std::fs::read(&a)?, b"first");
+        assert_eq!(std::fs::read(&b)?, b"second");
+        Ok(())
+    }
+    #[test]
+    fn root_identity_joins_versions_and_preserves_existing_asset() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("db"), true)?;
+        let a = dir.path().join("a.jpg");
+        let b = dir.path().join("b.jpg");
+        std::fs::write(&a, b"first")?;
+        std::fs::write(&b, b"edited")?;
+        let file = json!({"contentHash":"photo-hash","sizeBytes":5,"role":"jpeg_original"});
+        let id = store.ingest_original("lib", a.to_str().unwrap(), &file, &snapshot())?;
+        assert_eq!(store.root_id("lib", &id)?, id);
+        let root = Uuid::new_v4().to_string();
+        let mut snap = snapshot();
+        snap["originalDocumentID"] = json!(root);
+        assert_eq!(
+            store.ingest_original("lib", a.to_str().unwrap(), &file, &snap)?,
+            id
+        );
+        assert_eq!(store.root_id("lib", &id)?, root);
+        let edited = json!({"contentHash":"edited-hash","sizeBytes":6,"role":"jpeg_original"});
+        assert_eq!(
+            store.ingest_original("lib", b.to_str().unwrap(), &edited, &snap)?,
+            id
+        );
+        assert_eq!(
+            store
+                .lock()?
+                .query_row("SELECT count(*) FROM catalog_paths", [], |r| r
+                    .get::<_, i64>(0))?,
+            2
+        );
+        std::fs::remove_file(&a)?;
+        store.ingest_original("lib", b.to_str().unwrap(), &edited, &snap)?;
+        assert_eq!(
+            store
+                .lock()?
+                .query_row("SELECT count(*) FROM catalog_paths", [], |r| r
+                    .get::<_, i64>(0))?,
+            1
+        );
+        Ok(())
+    }
+    #[test]
+    fn metadata_update_preserves_other_copy_of_original_hash() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("db"), true)?;
+        let file = json!({"contentHash":"photo-hash","sizeBytes":5,"role":"jpeg_original"});
+        let id = store.ingest_original("lib", "/a.jpg", &file, &snapshot())?;
+        assert_eq!(
+            store.ingest_original("lib", "/b.jpg", &file, &snapshot())?,
+            id
+        );
+        store.with_identity_update("lib", "/a.jpg", "photo-hash", || {
+            Ok(Some(("new-hash".into(), 9, "2".into())))
+        })?;
+        let db = store.lock()?;
+        let old: String = db.query_row(
+            "SELECT content_hash FROM catalog_paths WHERE path='/b.jpg'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(old, "photo-hash");
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM catalog_versions", [], |r| r
+                .get::<_, i64>(0))?,
+            2
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM catalog_files WHERE content_hash='photo-hash'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?,
+            1
+        );
+        Ok(())
+    }
+    #[test]
+    fn identity_metadata_update_keeps_ready_cache_and_defers_processing() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("db"), true)?;
+        let file = json!({"contentHash":"photo-hash","sizeBytes":5,"role":"jpeg_original"});
+        let id = store.ingest_original("lib", "/a.jpg", &file, &snapshot())?;
+        store.lock()?.execute("INSERT INTO media_cache(library_id,asset_id,source_hash,spec,status,thumbnail,standard) VALUES('lib',?,'photo-hash','test','ready','{}',?)",params![id,json!({"path":"/a.jpg","version":"photo-hash","sizeBytes":5,"mtimeNs":"1"}).to_string()])?;
+        for (task, path, completed) in [
+            ("done", "/a.jpg", 1),
+            ("other", "/copy.jpg", 1),
+            ("cancelled", "/a.jpg", -1),
+        ] {
+            store.lock()?.execute("INSERT INTO remote_cache_tasks VALUES(?,'lib',?,'photo-hash','photo-hash',?,'worker',0,?)",params![task,id,path,completed])?;
+        }
+        assert!(
+            store.with_identity_update("lib", "/a.jpg", "photo-hash", || Ok(Some((
+                "new-hash".into(),
+                9,
+                "2".into()
+            ))))?
+        );
+        let result: (String, String, String) = store.lock()?.query_row(
+            "SELECT status,source_hash,json_extract(standard,'$.version') FROM media_cache",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        assert_eq!(
+            result,
+            ("ready".into(), "new-hash".into(), "new-hash".into())
+        );
+        let tasks = {
+            let db = store.lock()?;
+            let mut q =
+                db.prepare("SELECT id,source_hash,input_hash FROM remote_cache_tasks ORDER BY id")?;
+            q.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        assert_eq!(
+            tasks,
+            vec![
+                ("cancelled".into(), "new-hash".into(), "new-hash".into()),
+                ("done".into(), "new-hash".into(), "new-hash".into()),
+                ("other".into(), "new-hash".into(), "photo-hash".into())
+            ]
+        );
+
+        store
+            .lock()?
+            .execute("UPDATE media_cache SET status='processing'", [])?;
+        assert!(
+            !store.with_identity_update("lib", "/a.jpg", "new-hash", || panic!(
+                "must not write a processing source"
+            ))?
+        );
+        Ok(())
+    }
+    #[test]
     fn mixed_paths_remain_hidden_and_v1_migration_preserves_assets() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("db");
-        let store = Store::open(&path, true, Default::default())?;
+        let store = Store::open(&path, true)?;
         let file = json!({"contentHash":"photo-hash","sizeBytes":100,"role":"jpeg_original"});
         let asset = snapshot();
         let id = store.ingest_original("lib", "/private/photo.jpg", &file, &asset)?;
+        // Preserve the historical cross-directory association without creating new ones.
+        store.lock()?.execute(
+            "INSERT INTO catalog_paths VALUES(?,?,?,?,?)",
+            params![
+                "lib",
+                "/public/photo.jpg",
+                id,
+                "photo-hash",
+                "jpeg_original"
+            ],
+        )?;
         assert_eq!(
             store.ingest_original("lib", "/public/photo.jpg", &file, &asset)?,
             id
@@ -802,20 +1212,21 @@ mod tests {
         );
         drop(store);
         let db = Connection::open(&path)?;
-        db.execute_batch("DROP TABLE catalog_hidden_directories; PRAGMA user_version=1;")?;
+        crate::revisions::remove_schema(&db)?;
+        db.execute_batch("DROP TABLE catalog_identity_roots; DROP TABLE catalog_identity_aliases; DROP TABLE catalog_hidden_directories; DROP TABLE catalog_versions; DROP TABLE catalog_version_paths; DROP TABLE catalog_defaults; PRAGMA user_version=1;")?;
         drop(db);
-        assert!(Store::open(&path, false, Default::default()).is_err());
-        let store = Store::open(&path, true, Default::default())?;
+        assert!(Store::open(&path, false).is_err());
+        let store = Store::open(&path, true)?;
         assert_eq!(store.counts("lib", false)?["all"], 1);
         assert_eq!(store.hidden_directories("lib")?, json!({"paths":[]}));
         drop(store);
-        Store::open(&path, false, Default::default())?;
+        Store::open(&path, false)?;
         Ok(())
     }
     #[test]
     fn nas_commands_projection_and_idempotency() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("db"), true, Default::default()).unwrap();
+        let store = Store::open(&dir.path().join("db"), true).unwrap();
         let file = json!({"contentHash":"photo-hash","sizeBytes":100,"role":"jpeg_original"});
         let id = store
             .ingest_original("lib", "/photos/photo.jpg", &file, &snapshot())
@@ -835,9 +1246,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result["rating"], 5);
-        let before = store.fetch_operations("lib", 0, 100).unwrap();
+        let before = store.asset("lib", &id).unwrap();
         store.patch_asset("lib", &id, &json!({"rating":5})).unwrap();
-        assert_eq!(store.fetch_operations("lib", 0, 100).unwrap(), before);
+        assert_eq!(store.asset("lib", &id).unwrap(), before);
         let q = AssetQuery {
             tag: Some("北京".into()),
             min_rating: Some(4),
@@ -855,59 +1266,111 @@ mod tests {
         assert_eq!(store.asset("lib", &id).unwrap()["rating"], 5);
     }
     #[test]
-    fn lifecycle_before_snapshot_and_invalid_legacy_metadata() -> Result<()> {
+    fn moved_legacy_original_preserves_imported_holder_identity() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let store = Store::open(&dir.path().join("db"), true, Default::default())?;
-        let mut a = snapshot();
-        let id = a["assetID"].as_str().unwrap().to_owned();
-        let mut db = store.lock()?;
-        let tx = db.transaction()?;
-        server_event(
-            &tx,
-            "lib",
-            "asset",
-            &id,
-            "move_to_trash",
-            json!({"moveToTrash":{"assetID":id,"reason":"user"}}),
-        )?;
-        server_event(
-            &tx,
-            "lib",
-            "asset",
-            &id,
-            "asset_snapshot_declared",
-            json!({"assetSnapshotDeclared":{"snapshot":a}}),
-        )?;
-        server_event(
-            &tx,
-            "lib",
-            "asset",
-            &id,
-            "metadata_set",
-            json!({"metadataSet":{"assetID":id,"field":"rating","value":{"null":{}}}}),
-        )?;
-        assert_eq!(existing(&tx, "lib", &id)?.unwrap()["rating"], 1);
-        assert_eq!(existing(&tx, "lib", &id)?.unwrap()["trashed"], true);
-        server_event(
-            &tx,
-            "lib",
-            "asset",
-            &id,
-            "restore_from_trash",
-            json!({"restoreFromTrash":{"assetID":id}}),
-        )?;
-        a["rating"] = json!(3);
-        server_event(
-            &tx,
-            "lib",
-            "asset",
-            &id,
-            "asset_snapshot_declared",
-            json!({"assetSnapshotDeclared":{"snapshot":a}}),
-        )?;
-        assert_eq!(existing(&tx, "lib", &id)?.unwrap()["rating"], 3);
-        assert_eq!(existing(&tx, "lib", &id)?.unwrap()["trashed"], false);
-        tx.commit()?;
+        let old = dir.path().join("old/photo.jpg");
+        let new = dir.path().join("new/photo.jpg");
+        std::fs::create_dir_all(old.parent().unwrap())?;
+        std::fs::create_dir_all(new.parent().unwrap())?;
+        std::fs::write(&old, b"same")?;
+        let store = Store::open(&dir.path().join("db"), true)?;
+        let file = json!({"contentHash":"same","sizeBytes":4,"role":"jpeg_original"});
+        let id = store.ingest_original("lib", old.to_str().unwrap(), &file, &snapshot())?;
+        store
+            .lock()?
+            .execute("UPDATE catalog_files SET holder='legacy-mac'", [])?;
+        store
+            .lock()?
+            .execute("DELETE FROM catalog_version_paths", [])?;
+        std::fs::rename(&old, &new)?;
+        assert_eq!(
+            store.ingest_original("lib", new.to_str().unwrap(), &file, &snapshot())?,
+            id
+        );
+        assert!(store.original_is_online("lib", new.to_str().unwrap(), "same")?);
+        assert!(!store.original_is_online("lib", old.to_str().unwrap(), "same")?);
+        assert_eq!(store.counts("lib", false)?["all"], 1);
+        Ok(())
+    }
+    #[test]
+    fn cross_directory_move_preserves_identity_and_default() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let old = dir.path().join("old/photo.jpg");
+        let new = dir.path().join("new/photo.jpg");
+        std::fs::create_dir_all(old.parent().unwrap())?;
+        std::fs::create_dir_all(new.parent().unwrap())?;
+        std::fs::write(&old, b"same")?;
+        let store = Store::open(&dir.path().join("db"), true)?;
+        let file = json!({"contentHash":"same","sizeBytes":4,"role":"jpeg_original"});
+        let id = store.ingest_original("lib", old.to_str().unwrap(), &file, &snapshot())?;
+        store.patch_asset("lib", &id, &json!({"rating":5,"tags":["keep"]}))?;
+        store.set_default_version("lib", &id, "same")?;
+        store.declare_generated_preview("lib", &id, &json!({"role":"preview","fileObject":{},"objectRef":{"bucket":"local","key":"preview"},"pixelSize":{"width":10,"height":10}}))?;
+        std::fs::rename(&old, &new)?;
+        assert_eq!(
+            store.ingest_original("lib", new.to_str().unwrap(), &file, &snapshot())?,
+            id
+        );
+        assert_eq!(
+            store.default_version("lib", &id)?.unwrap().path,
+            new.to_str().unwrap()
+        );
+        assert_eq!(store.asset("lib", &id)?["rating"], 5);
+        assert_eq!(store.asset("lib", &id)?["tags"], json!(["keep"]));
+        assert!(!store.original_is_online("lib", old.to_str().unwrap(), "same")?);
+        assert!(store.original_is_online("lib", new.to_str().unwrap(), "same")?);
+        let db = store.lock()?;
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM derivative_objects WHERE asset_id=? AND role='preview'",
+                params![id],
+                |r| r.get::<_, i64>(0)
+            )?,
+            1
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT available FROM catalog_version_paths WHERE path=?",
+                params![old.to_str().unwrap()],
+                |r| r.get::<_, i64>(0)
+            )?,
+            0
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT user_selected FROM catalog_defaults WHERE asset_id=?",
+                params![id],
+                |r| r.get::<_, i64>(0)
+            )?,
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cross_directory_live_copies_and_ambiguous_moves_stay_separate() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("db"), true)?;
+        let file = json!({"contentHash":"same","sizeBytes":4,"role":"jpeg_original"});
+        let mut ids = Vec::new();
+        let mut paths = Vec::new();
+        for name in ["a", "b"] {
+            let path = dir.path().join(name).join("photo.jpg");
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            std::fs::write(&path, b"same")?;
+            ids.push(store.ingest_original("lib", path.to_str().unwrap(), &file, &snapshot())?);
+            paths.push(path);
+        }
+        assert_ne!(ids[0], ids[1]);
+        for path in paths {
+            std::fs::remove_file(path)?;
+        }
+        let new = dir.path().join("c/photo.jpg");
+        std::fs::create_dir_all(new.parent().unwrap())?;
+        std::fs::write(&new, b"same")?;
+        let id = store.ingest_original("lib", new.to_str().unwrap(), &file, &snapshot())?;
+        assert!(!ids.contains(&id));
+        assert_eq!(store.counts("lib", false)?["all"], 3);
         Ok(())
     }
     #[test]
@@ -919,7 +1382,7 @@ mod tests {
         let b = photos.join("two.jpg");
         std::fs::write(&a, b"same")?;
         std::fs::write(&b, b"same")?;
-        let store = Store::open(&dir.path().join("db"), true, Default::default())?;
+        let store = Store::open(&dir.path().join("db"), true)?;
         let file = json!({"contentHash":"same","sizeBytes":4,"role":"jpeg_original"});
         let id = store.ingest_original("lib", a.to_str().unwrap(), &file, &snapshot())?;
         assert_eq!(
@@ -946,26 +1409,6 @@ mod tests {
         assert!(store.original_is_online("lib", a.to_str().unwrap(), "same")?);
         assert_eq!(store.counts("lib", false)?["all"], 1);
         Ok(())
-    }
-    #[test]
-    fn explicit_migration_gate_and_legacy_replay() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("db");
-        let db = Connection::open(&path).unwrap();
-        db.execute_batch(include_str!("../tests/fixtures/python_ledger.sql"))
-            .unwrap();
-        drop(db);
-        assert!(Store::open(&path, false, Default::default()).is_err());
-        let store = Store::open(&path, true, Default::default()).unwrap();
-        assert_eq!(
-            store.fetch_operations("library-a", 0, 100).unwrap()["operations"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        drop(store);
-        Store::open(&path, false, Default::default()).unwrap();
     }
 }
 
