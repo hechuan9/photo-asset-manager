@@ -15,122 +15,199 @@ final class IOSLibraryStore: ObservableObject {
     @Published var directory: String?
     let sort = "capture_desc"
     var chronologicalAssets: [KeepsAsset] { assets.reversed() }
-    var followsLatest = true
     private var nextCursor: String?
     private var generation = 0
-    private var displayedQuery: String?
+    private var displayedQuery: KeepsAssetQuery?
+    private var displayedPage: KeepsAssetPage?
+    private let cache = KeepsAssetCache()
+    private let session: URLSession
+    private var requestTask: Task<Void, Never>?
+    private var paginationNeedsRefresh = false
 
-    private var revisionTask: Task<Void, Never>?
-    private var observedRevision: Int64?
-    private var isActive = false
-
-    func setActive(_ active: Bool) {
-        isActive = active
-        revisionTask?.cancel()
-        revisionTask = nil
-        guard active, let configuration else { return }
-        let client = KeepsClient(configuration: configuration)
-        revisionTask = Task {
-            var pollingError: String?
-            while !Task.isCancelled {
-                do {
-                    let revision = try await client.revision()
-                    try Task.checkCancellation()
-                    guard self.configuration == configuration else { return }
-                    if let pollingError, lastError == pollingError { lastError = nil }
-                    pollingError = nil
-                    if observedRevision != revision && followsLatest {
-                        await refresh()
-                        try Task.checkCancellation()
-                        guard self.configuration == configuration else { return }
-                        if lastError == nil { observedRevision = revision }
-                    }
-                } catch {
-                    if Task.isCancelled { return }
-                    guard self.configuration == configuration else { return }
-                    pollingError = String(reflecting: error)
-                    lastError = pollingError
-                }
-                do { try await Task.sleep(for: .seconds(5)) }
-                catch { return }
-            }
-        }
+    init(configuration: KeepsConfiguration? = nil, session: URLSession = KeepsClient.apiSession,
+         loadSettings: Bool = true) {
+        self.session = session
+        if let configuration { self.configuration = configuration }
+        else if loadSettings { reloadConfiguration() }
     }
 
-    init() { reloadConfiguration() }
-
-    func reloadConfiguration() {
+    func configure(_ configuration: KeepsConfiguration?) {
+        guard self.configuration != configuration else { return }
         generation += 1
+        requestTask?.cancel()
+        requestTask = nil
+        cache.removeAll()
+        displayedQuery = nil
+        displayedPage = nil
         assets = []
         total = 0
         nextCursor = nil
+        paginationNeedsRefresh = false
         isLoading = false
-        configuration = nil
         lastError = nil
-        do { configuration = try KeepsSettings.load() }
-        catch { lastError = String(reflecting: error) }
-        observedRevision = nil
-        setActive(isActive)
+        self.configuration = configuration
     }
 
-    func refresh() async {
-        generation += 1
-        let requestGeneration = generation
-        let queryKey = "\(search)|\(showingTrash)|\(showingPicked)|\(directory ?? "")"
-        if displayedQuery != queryKey {
-            assets = []
-            total = 0
-            nextCursor = nil
-        }
-        displayedQuery = queryKey
-        await fetchPage(cursor: nil, generation: requestGeneration)
+    func reloadConfiguration() {
+        do { configure(try KeepsSettings.load()) }
+        catch { configure(nil); lastError = String(reflecting: error) }
     }
 
-    func loadMore() async {
-        guard !isLoading, let nextCursor else { return }
-        await fetchPage(cursor: nextCursor, generation: generation)
-    }
-
-    private func fetchPage(cursor: String?, generation requestGeneration: Int) async {
-        guard let configuration else { isLoading = false; return }
-        isLoading = true
-        lastError = nil
+    private var query: KeepsAssetQuery {
         var query = KeepsAssetQuery()
         query.q = search
         query.trashed = showingTrash
         query.flagState = showingPicked ? "picked" : nil
         query.directory = directory
         query.sort = sort
-        query.cursor = cursor
         query.limit = 200
-        do {
-            let client = KeepsClient(configuration: configuration)
-            let countToReload = cursor == nil ? max(200, assets.count) : 200
-            var loaded: [KeepsAsset] = []
-            var page: KeepsAssetPage
-            repeat {
-                page = try await client.assets(query: query)
-                guard generation == requestGeneration else { return }
-                loaded.append(contentsOf: page.items)
-                query.cursor = page.nextCursor
-            } while cursor == nil && loaded.count < countToReload && page.nextCursor != nil
-            if cursor == nil { assets = [] }
-            var existing = Set(assets.map(\.id))
-            assets.append(contentsOf: loaded.filter { existing.insert($0.id).inserted })
-            total = page.total
-            nextCursor = page.nextCursor
-        } catch {
-            guard generation == requestGeneration else { return }
-            lastError = String(reflecting: error)
+        return query
+    }
+
+    func refresh() async {
+        await load(validateRevision: false)
+    }
+
+    func refreshFromBottom() async {
+        await load(validateRevision: true)
+    }
+
+    private func load(validateRevision: Bool) async {
+        guard let configuration else { return }
+        let query = query
+        if displayedQuery != query {
+            generation += 1
+            requestTask?.cancel()
+            requestTask = nil
+            displayedQuery = query
+            displayedPage = cache.page(for: query)
+            assets = displayedPage?.items ?? []
+            total = displayedPage?.total ?? 0
+            nextCursor = displayedPage?.nextCursor
+            paginationNeedsRefresh = false
+            lastError = nil
+            isLoading = false
+        } else if let requestTask {
+            await requestTask.value
+            return
         }
-        if generation == requestGeneration { isLoading = false }
+        guard validateRevision || displayedPage == nil else { return }
+        let requestGeneration = generation
+        let client = KeepsClient(configuration: configuration, session: session)
+        isLoading = displayedPage == nil
+        lastError = nil
+        let task = Task {
+            defer {
+                if generation == requestGeneration {
+                    isLoading = false
+                    requestTask = nil
+                }
+            }
+            do {
+                if validateRevision, let displayedPage {
+                    let revision = try await client.revision(path: query.directory)
+                    try Task.checkCancellation()
+                    guard generation == requestGeneration else { return }
+                    if displayedPage.isCurrent(at: revision) { return }
+                }
+                isLoading = true
+                try await fetchPages(client: client, query: query, cursor: nil, generation: requestGeneration)
+            } catch {
+                guard generation == requestGeneration, !Task.isCancelled else { return }
+                lastError = String(reflecting: error)
+            }
+        }
+        requestTask = task
+        await task.value
+    }
+
+    func loadMore() async {
+        guard !paginationNeedsRefresh, requestTask == nil, let nextCursor, let configuration, displayedQuery == query else { return }
+        let requestGeneration = generation
+        let query = query
+        let client = KeepsClient(configuration: configuration, session: session)
+        isLoading = true
+        lastError = nil
+        let task = Task {
+            defer {
+                if generation == requestGeneration { isLoading = false; requestTask = nil }
+            }
+            do { try await fetchPages(client: client, query: query, cursor: nextCursor, generation: requestGeneration) }
+            catch {
+                guard generation == requestGeneration, !Task.isCancelled else { return }
+                lastError = String(reflecting: error)
+            }
+        }
+        requestTask = task
+        await task.value
+    }
+
+    private func fetchPages(client: KeepsClient, query: KeepsAssetQuery, cursor: String?, generation requestGeneration: Int) async throws {
+        var request = query
+        request.cursor = cursor
+        var loaded = cursor == nil ? [] : assets
+        let countToReload = cursor == nil ? assets.count : 0
+        var previous = cursor == nil ? nil : displayedPage
+        var isUpdating = previous?.isUpdating ?? false
+        var page: KeepsAssetPage
+        repeat {
+            page = try await client.assets(query: request)
+            try Task.checkCancellation()
+            guard generation == requestGeneration else { return }
+            // A moving catalog cannot safely combine offset pages from different snapshots.
+            if let previous, previous.revision != page.revision {
+                if cursor != nil {
+                    paginationNeedsRefresh = true
+                    lastError = "内容已变化，请从底部上拉刷新"
+                    return
+                }
+                var first = query
+                first.cursor = nil
+                let fresh = try await client.assets(query: first)
+                try Task.checkCancellation()
+                guard generation == requestGeneration else { return }
+                publish(fresh, query: query)
+                return
+            }
+            var existing = Set(loaded.map(\.id))
+            loaded.append(contentsOf: page.items.filter { existing.insert($0.id).inserted })
+            isUpdating = isUpdating || page.isUpdating
+            previous = page
+            request.cursor = page.nextCursor
+        } while cursor == nil && loaded.count < countToReload && page.nextCursor != nil
+        publish(KeepsAssetPage(items: loaded, total: page.total, nextCursor: page.nextCursor,
+                               revision: page.revision, isUpdating: isUpdating), query: query)
+    }
+
+    private func publish(_ page: KeepsAssetPage, query: KeepsAssetQuery) {
+        displayedPage = page
+        assets = page.items
+        total = page.total
+        nextCursor = page.nextCursor
+        paginationNeedsRefresh = false
+        cache.store(page, for: query)
     }
 
     func update(_ asset: KeepsAsset) {
-        guard let index = assets.firstIndex(where: { $0.id == asset.id }) else { return }
-        if asset.trashed != showingTrash || (showingPicked && asset.flagState != "picked") { assets.remove(at: index); total = max(0, total - 1) }
-        else { assets[index] = asset }
+        // An asset can appear under several directory aliases and filter combinations.
+        cache.removeAll()
+        generation += 1
+        requestTask?.cancel()
+        requestTask = nil
+        isLoading = false
+        if let index = assets.firstIndex(where: { $0.id == asset.id }) {
+            if asset.trashed != showingTrash || (showingPicked && asset.flagState != "picked") {
+                assets.remove(at: index); total = max(0, total - 1)
+            } else { assets[index] = asset }
+        }
+        if let displayedQuery, let page = displayedPage {
+            let updated = KeepsAssetPage(items: assets, total: total, nextCursor: nextCursor,
+                                         revision: page.revision, isUpdating: true)
+            displayedPage = updated
+            cache.store(updated, for: displayedQuery)
+        }
     }
 
-    var canLoadMore: Bool { nextCursor != nil }
+    var canLoadMore: Bool { nextCursor != nil && !paginationNeedsRefresh }
+    var hasLoadedResults: Bool { displayedPage != nil }
 }

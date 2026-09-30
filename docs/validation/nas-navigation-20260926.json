@@ -1,0 +1,56 @@
+{
+  "navigation": {
+    "directories": [
+      {
+        "hasChildren": true,
+        "name": "library",
+        "path": "/originals/library"
+      },
+      {
+        "hasChildren": true,
+        "name": "personal",
+        "path": "/originals/personal"
+      },
+      {
+        "hasChildren": true,
+        "name": "raw-processed",
+        "path": "/originals/raw-processed"
+      },
+      {
+        "hasChildren": true,
+        "name": "raw-unprocessed",
+        "path": "/originals/raw-unprocessed"
+      }
+    ],
+    "local": {
+      "status": "not_configured"
+    },
+    "location": "nas",
+    "path": null
+  },
+  "childDirectoryCount": 1,
+  "counts": {
+    "all": 117229,
+    "picked": 0,
+    "trashed": 0
+  },
+  "jobs": {
+    "jobs": [
+      {
+        "currentPath": "/originals/personal/照片/2003/453747803_10161778394026812_545740044763953469_n.jpg",
+        "error": null,
+        "failed": 0,
+        "finishedAt": null,
+        "folderID": "dec88e4e-1955-43c8-8c7b-c320bdc8d20e",
+        "id": "34d27418-7f2c-4434-9144-d8d1f063280c",
+        "libraryID": "local-library",
+        "path": "/originals",
+        "processed": 2,
+        "skipped": 0,
+        "startedAt": 1790452837,
+        "status": "running"
+      }
+    ]
+  },
+  "originalMountsReadOnly": true
+}

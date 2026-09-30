@@ -11,7 +11,7 @@ struct KeepsIOSApp: App {
 
 struct IOSRootView: View {
     @EnvironmentObject private var library: IOSLibraryStore
-    @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var directories = IOSDirectoryStore()
     @State private var showingSettings = false
     @State private var showingSearch = false
     @State private var collections = false
@@ -36,7 +36,7 @@ struct IOSRootView: View {
             Color.black.ignoresSafeArea()
             if collections {
                 NavigationStack(path: $collectionPath) {
-                    IOSCollectionsView(configuration: library.configuration)
+                    IOSCollectionsView(configuration: library.configuration, navigation: directories)
                         .overlay(alignment: .bottom) { bottomBar }
                         .navigationTitle("精选集")
                         .toolbar {
@@ -66,7 +66,7 @@ struct IOSRootView: View {
             IOSSearchSheet(query: library.search) { query in
                 collections = false; collectionPath = []
                 library.showingTrash = false; library.showingPicked = false; library.directory = nil
-                library.search = query; library.followsLatest = true; resetSelection()
+                library.search = query; resetSelection()
                 Task { await library.refresh() }
             }
         }
@@ -74,8 +74,9 @@ struct IOSRootView: View {
             Button("移入回收站", role: .destructive) { Task { await changeSelection(trash: true) } }
         }
         .task { await library.refresh() }
-        .onChange(of: scenePhase, initial: true) { _, phase in library.setActive(phase == .active) }
-        .onChange(of: library.configuration) { _, _ in
+        .prefetchKeepsThumbnails(configuration: library.configuration)
+        .onChange(of: library.configuration, initial: true) { _, configuration in
+            directories.configure(configuration)
             collectionPath = []
             library.directory = nil
             library.showingPicked = false
@@ -97,15 +98,20 @@ struct IOSRootView: View {
             if let error = library.lastError {
                 VStack {
                     Text(error).font(.caption).lineLimit(3)
-                    Button("重试") { Task { await library.refresh() } }
+                    Text("从底部上拉刷新").font(.caption)
                 }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)).padding(.horizontal)
             }
             ZStack {
                 if library.configuration == nil {
                     ContentUnavailableView("连接 NAS 图库", systemImage: "externaldrive", description: Text("在连接设置中填写服务地址和访问令牌。"))
                 } else if library.assets.isEmpty {
-                    if library.isLoading { ProgressView("正在载入图库") }
-                    else { ContentUnavailableView(library.lastError == nil ? "没有照片" : "无法加载图库", systemImage: library.lastError == nil ? "photo" : "wifi.exclamationmark") }
+                    ScrollView {
+                        Group {
+                            if library.isLoading && !library.hasLoadedResults { ProgressView("正在载入图库") }
+                            else { ContentUnavailableView(library.lastError == nil ? "没有照片" : "无法加载图库", systemImage: library.lastError == nil ? "photo" : "wifi.exclamationmark", description: Text("从底部上拉刷新")) }
+                        }.frame(maxWidth: .infinity, minHeight: 300)
+                    }
+                    .bottomPullRefresh(bottomInset: 90) { await library.refreshFromBottom() }
                 } else {
                     IOSWaterfallGallery(selecting: $selecting, selectedIDs: $selectedIDs, density: $density, visibleDates: $visibleDates)
                         .id("\(library.showingTrash)|\(library.showingPicked)|\(library.search)|\(library.directory ?? "")")
@@ -117,7 +123,7 @@ struct IOSRootView: View {
             .backgroundExtensionEffect()
             .overlay(alignment: .top) {
                 if let route, route.hasChildren, showingDirectories, !selecting {
-                    IOSDirectoryBrowser(configuration: library.configuration, path: route.directory)
+                    IOSDirectoryBrowser(configuration: library.configuration, path: route.directory, navigation: directories)
                         .id(route.directory)
                         .disabled(changing)
                 }
@@ -159,7 +165,6 @@ struct IOSRootView: View {
                             Text("密集 · 小方块").tag(KeepsGalleryDensity.compact)
                         }
                         Divider()
-                        Button("刷新", systemImage: "arrow.clockwise") { Task { await library.refresh() } }
                         Button("连接设置", systemImage: "gearshape") { showingSettings = true }
                     } label: { Image(systemName: "line.3.horizontal.decrease").frame(width: 44, height: 44) }
                         .glassEffect(.regular.interactive(), in: Circle()).accessibilityLabel("图库选项")
@@ -235,7 +240,7 @@ struct IOSRootView: View {
         library.showingTrash = false
         library.directory = route?.directory
         library.search = ""
-        library.followsLatest = true
+
         resetSelection()
         Task { await library.refresh() }
     }

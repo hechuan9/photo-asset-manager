@@ -299,8 +299,8 @@ def plan(keeps, roots, run, inspector, resume=False):
     for name in ('control_plane', 'jobs'):
         copy_database(keeps / 'db' / (name + '.sqlite'), run / (name + '.sqlite'))
     with closing(sqlite3.connect(run / 'control_plane.sqlite')) as db, closing(sqlite3.connect(run / 'cache.sqlite')) as cache:
-        if db.execute('PRAGMA user_version').fetchone()[0] != 3:
-            raise ValueError('需要 catalog schema 3')
+        if db.execute('PRAGMA user_version').fetchone()[0] not in (3, 4, 5):
+            raise ValueError('需要 catalog schema 3、4 或 5')
         db.execute('ATTACH DATABASE ? AS jobsdb', (str(run / 'jobs.sqlite'),))
         db.execute('CREATE INDEX IF NOT EXISTS jobsdb.maintenance_files_asset ON files(asset_id)')
         cache.execute('CREATE TABLE IF NOT EXISTS evidence(path TEXT PRIMARY KEY,stamp TEXT NOT NULL,evidence TEXT NOT NULL)')

@@ -1,5 +1,9 @@
 //! Filesystem events are hints; durable scans and periodic reconciliation are authoritative.
-use crate::jobs::{Folder, Jobs};
+use crate::{
+    jobs::{Folder, Jobs},
+    store::Store,
+    worker::maintain_revisions,
+};
 use anyhow::{Context, Result};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
@@ -14,7 +18,7 @@ use std::{
 };
 
 /// Run on a dedicated blocking thread. Periodic full reconciliation remains in the worker.
-pub fn run(jobs: Arc<Jobs>, stop: Arc<AtomicBool>) -> Result<()> {
+pub fn run(jobs: Arc<Jobs>, store: Arc<Store>, stop: Arc<AtomicBool>) -> Result<()> {
     let (sender, receiver) = mpsc::sync_channel(4096);
     let overflow = Arc::new(AtomicBool::new(false));
     let callback_overflow = overflow.clone();
@@ -31,6 +35,7 @@ pub fn run(jobs: Arc<Jobs>, stop: Arc<AtomicBool>) -> Result<()> {
     let mut refresh = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         if Instant::now() >= refresh {
+            maintain_revisions(&store, &jobs)?;
             let active: Vec<_> = jobs.folders()?.into_iter().filter(|f| f.active).collect();
             let changed = active.iter().map(|f| &f.id).collect::<Vec<_>>()
                 != folders.iter().map(|f| &f.id).collect::<Vec<_>>();
@@ -51,7 +56,18 @@ pub fn run(jobs: Arc<Jobs>, stop: Arc<AtomicBool>) -> Result<()> {
                     reconcile(&jobs, &folders)?;
                 } else if !matches!(event.kind, EventKind::Access(_)) {
                     for path in &event.paths {
-                        queue_path(&jobs, &folders, path)?;
+                        queue_path_kind(
+                            &store,
+                            &jobs,
+                            &folders,
+                            path,
+                            matches!(
+                                event.kind,
+                                EventKind::Create(_)
+                                    | EventKind::Remove(_)
+                                    | EventKind::Modify(notify::event::ModifyKind::Name(_))
+                            ),
+                        )?;
                     }
                     if matches!(
                         event.kind,
@@ -83,7 +99,7 @@ pub fn run(jobs: Arc<Jobs>, stop: Arc<AtomicBool>) -> Result<()> {
 
 fn reconcile(jobs: &Jobs, folders: &[Folder]) -> Result<()> {
     for folder in folders {
-        if let Err(error) = jobs.enqueue_scan(&folder.id)
+        if let Err(error) = jobs.enqueue_external_scan(&folder.id)
             && jobs.is_active(&folder.id)?
         {
             tracing::error!(folder_id = %folder.id, error = %format!("{error:#}"), "could not queue reconciliation");
@@ -92,17 +108,42 @@ fn reconcile(jobs: &Jobs, folders: &[Folder]) -> Result<()> {
     Ok(())
 }
 
-fn enqueue_if_active(jobs: &Jobs, folder: &Folder, path: &Path, delay: i64) -> Result<()> {
-    if let Err(error) = jobs.enqueue_change(&folder.id, path, delay)
-        && jobs.is_active(&folder.id)?
-    {
-        // An unavailable NAS mount must not kill monitoring for healthy roots.
-        tracing::error!(folder_id = %folder.id, error = %format!("{error:#}"), "could not queue filesystem change");
+fn enqueue_if_active(
+    store: &Store,
+    jobs: &Jobs,
+    folder: &Folder,
+    path: &Path,
+    delay: i64,
+    path_sync: bool,
+) -> Result<()> {
+    let queued = if path_sync {
+        jobs.enqueue_path_change(&folder.id, path, delay)
+    } else {
+        jobs.enqueue_change(&folder.id, path, delay)
+    };
+    match queued {
+        Ok(job) => store.note_revision_activity(&job.library_id, &job.id, &job.path)?,
+        Err(error) if jobs.is_active(&folder.id)? => {
+            // An unavailable NAS mount must not kill monitoring for healthy roots.
+            tracing::error!(folder_id = %folder.id, error = %format!("{error:#}"), "could not queue filesystem change");
+        }
+        Err(_) => {}
     }
     Ok(())
 }
 
-fn queue_path(jobs: &Jobs, folders: &[Folder], path: &Path) -> Result<()> {
+#[cfg(test)]
+fn queue_path(store: &Store, jobs: &Jobs, folders: &[Folder], path: &Path) -> Result<()> {
+    queue_path_kind(store, jobs, folders, path, true)
+}
+
+fn queue_path_kind(
+    store: &Store,
+    jobs: &Jobs,
+    folders: &[Folder],
+    path: &Path,
+    path_sync: bool,
+) -> Result<()> {
     if excluded_path(jobs.root(), path) {
         return Ok(());
     }
@@ -123,7 +164,7 @@ fn queue_path(jobs: &Jobs, folders: &[Folder], path: &Path) -> Result<()> {
                 break;
             }
         }
-        enqueue_if_active(jobs, folder, scope, 2)?;
+        enqueue_if_active(store, jobs, folder, scope, 2, path_sync)?;
     }
     Ok(())
 }
@@ -203,8 +244,11 @@ fn synchronize(
                     .is_some_and(|parent| newly_watched.contains(parent))
                 {
                     for folder in folders.iter().filter(|f| path.starts_with(&f.path)) {
-                        if let Err(error) = jobs.enqueue_reconcile_scope(&folder.id, path)
-                            && jobs.is_active(&folder.id)?
+                        if let Err(error) = (if path == Path::new(&folder.path) {
+                            jobs.enqueue_external_scan(&folder.id)
+                        } else {
+                            jobs.enqueue_external_reconcile_scope(&folder.id, path)
+                        }) && jobs.is_active(&folder.id)?
                         {
                             tracing::error!(path = %path.display(), error = %format!("{error:#}"), "could not queue new watch reconciliation");
                         }
@@ -229,9 +273,11 @@ mod tests {
         let root = dir.path().join("originals");
         std::fs::create_dir(&root).unwrap();
         let jobs = Jobs::open(&dir.path().join("jobs.sqlite"), &root).unwrap();
+        let store = Store::open(&dir.path().join("catalog.sqlite"), true).unwrap();
         let folder = jobs.add_folder("library", ".").unwrap();
         let root = jobs.root().to_path_buf();
         queue_path(
+            &store,
             &jobs,
             std::slice::from_ref(&folder),
             &root.join("@eaDir/a.jpg"),
@@ -241,6 +287,7 @@ mod tests {
         {
             std::os::unix::fs::symlink(dir.path(), root.join("link")).unwrap();
             queue_path(
+                &store,
                 &jobs,
                 std::slice::from_ref(&folder),
                 &root.join("link/outside.jpg"),
@@ -248,8 +295,29 @@ mod tests {
             .unwrap();
         }
         assert!(jobs.jobs(10).unwrap().is_empty());
-        queue_path(&jobs, &[folder], &root.join("deleted.jpg")).unwrap();
+        queue_path(&store, &jobs, &[folder], &root.join("deleted.jpg")).unwrap();
         assert_eq!(jobs.jobs(10).unwrap()[0].path, root.to_str().unwrap());
+        assert!(jobs.jobs(10).unwrap()[0].path_sync);
+        assert!(
+            jobs.path_sync_pending("library", &root.join("deleted.jpg"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn metadata_event_does_not_mark_path_sync_but_rename_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("originals");
+        std::fs::create_dir_all(root.join("destination")).unwrap();
+        let jobs = Jobs::open(&dir.path().join("jobs.sqlite"), &root).unwrap();
+        let store = Store::open(&dir.path().join("catalog.sqlite"), true).unwrap();
+        let folder = jobs.add_folder("library", ".").unwrap();
+        let target = jobs.root().join("destination/a.raw");
+        queue_path_kind(&store, &jobs, std::slice::from_ref(&folder), &target, false).unwrap();
+        assert!(!jobs.path_sync_pending("library", &target).unwrap());
+        queue_path_kind(&store, &jobs, &[folder], &target, true).unwrap();
+        assert!(jobs.path_sync_pending("library", &target).unwrap());
+        assert!(jobs.claim_next().unwrap().is_none());
     }
 
     #[cfg(target_os = "linux")]
@@ -264,7 +332,8 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_jobs = jobs.clone();
         let worker_stop = stop.clone();
-        let handle = std::thread::spawn(move || run(worker_jobs, worker_stop));
+        let store = Arc::new(Store::open(&dir.path().join("catalog.sqlite"), true).unwrap());
+        let handle = std::thread::spawn(move || run(worker_jobs, store, worker_stop));
         let deadline = Instant::now() + Duration::from_secs(10);
         while jobs.claim_next().unwrap().is_none() {
             assert!(Instant::now() < deadline);

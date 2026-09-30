@@ -11,7 +11,6 @@ final class LibraryStore: ObservableObject {
         didSet {
             guard hiddenDirectoryFilterEnabled != oldValue else { return }
             preferences.set(hiddenDirectoryFilterEnabled, forKey: "keeps.hiddenDirectoryFilterEnabled")
-            clearResults()
             refresh()
         }
     }
@@ -31,6 +30,8 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var nextCursor: String?
     @Published private(set) var isLoading = false
     @Published private(set) var isMutating = false
+    @Published private(set) var isCheckingRevision = false
+    var hasLoadedResults: Bool { displayedPage != nil }
     @Published private(set) var configuration: KeepsConfiguration?
     @Published var lastError: String?
     @Published private(set) var isCheckingConnection = false
@@ -47,38 +48,24 @@ final class LibraryStore: ObservableObject {
     private let persistConfiguration: (KeepsConfiguration) throws -> Void
 
     private var revisionTask: Task<Void, Never>?
-    private var observedRevision: Int64?
     private var isActive = false
+    private let assetCache = KeepsAssetCache()
+    private var displayedQuery: KeepsAssetQuery?
+    private var displayedPage: KeepsAssetPage?
+    private var lastAssetFetch = Date.distantPast
+    private var lastNavigationFetch = Date.distantPast
+    private var lastCountsFetch = Date.distantPast
+    private var countsShowHidden: Bool?
 
     func setActive(_ active: Bool) {
         isActive = active
         revisionTask?.cancel()
         revisionTask = nil
-        guard active, let configuration else { return }
-        let client = KeepsClient(configuration: configuration, session: session)
+        guard active, configuration != nil else { return }
         revisionTask = Task {
-            var pollingError: String?
             while !Task.isCancelled {
-                do {
-                    let revision = try await client.revision()
-                    try Task.checkCancellation()
-                    guard self.configuration == configuration else { return }
-                    if let pollingError, lastError == pollingError { lastError = nil }
-                    pollingError = nil
-                    if observedRevision != revision {
-                        refreshNavigation()
-                        refresh()
-                        await loadTask?.value
-                        try Task.checkCancellation()
-                        guard self.configuration == configuration else { return }
-                        if lastError == nil { observedRevision = revision }
-                    }
-                } catch {
-                    if Task.isCancelled { return }
-                    guard self.configuration == configuration else { return }
-                    pollingError = String(reflecting: error)
-                    lastError = pollingError
-                }
+                if Date().timeIntervalSince(lastNavigationFetch) >= 300 { refreshNavigation(force: false) }
+                if !isLoading { refresh() }
                 do { try await Task.sleep(for: .seconds(5)) }
                 catch { return }
             }
@@ -128,14 +115,14 @@ final class LibraryStore: ObservableObject {
         guard let client, !isUpdatingHiddenDirectory else { return }
         let generation = navigationGeneration
         isUpdatingHiddenDirectory = true
-        clearResults()
+        assetCache.removeAll()
         Task {
             defer { isUpdatingHiddenDirectory = false }
             do {
                 let response = try await client.setDirectoryHidden(path: path, hidden: hidden)
                 guard generation == navigationGeneration else { return }
                 hiddenDirectoryPaths = Set(response.paths)
-                refresh()
+                refresh(force: true)
             } catch {
                 if generation == navigationGeneration { lastError = Self.describe(error) }
             }
@@ -150,7 +137,6 @@ final class LibraryStore: ObservableObject {
     }
 
     func showLibrary(directory: String? = nil, trashed: Bool = false, picked: Bool = false) {
-        clearResults()
         query = KeepsAssetQuery()
         query.directory = directory
         query.recursive = true
@@ -167,11 +153,13 @@ final class LibraryStore: ObservableObject {
         assets = []; selectedIDs = []; total = 0; nextCursor = nil; lastError = nil
     }
 
-    func refreshNavigation() {
+    func refreshNavigation(force: Bool = true) {
         guard let client else { return }
+        if !force && navigationError == nil && Date().timeIntervalSince(lastNavigationFetch) < 300 { return }
         rootRequestGeneration += 1
         let requestGeneration = rootRequestGeneration
         let generation = navigationGeneration
+        lastNavigationFetch = Date()
         isLoadingNavigation = true
         navigationError = nil
         Task {
@@ -265,7 +253,12 @@ final class LibraryStore: ObservableObject {
                 try persistConfiguration(candidate)
                 configuration = candidate
                 client = candidateClient
-                observedRevision = nil
+                clearResults()
+                assetCache.removeAll()
+                displayedQuery = nil
+                displayedPage = nil
+                lastCountsFetch = .distantPast
+                lastNavigationFetch = .distantPast
                 setActive(isActive)
                 assets = []; selectedIDs = []; counts = nil
                 resetNavigation()
@@ -283,30 +276,84 @@ final class LibraryStore: ObservableObject {
         }
     }
 
-    func refresh() {
+    private var effectiveQuery: KeepsAssetQuery {
+        var value = query
+        value.cursor = nil
+        value.showHidden = !hiddenDirectoryFilterEnabled
+        return value
+    }
+
+    private func display(_ page: KeepsAssetPage) {
+        displayedPage = page
+        assets = page.items
+        total = page.total
+        nextCursor = page.nextCursor
+        selectedIDs.formIntersection(Set(assets.map(\.id)))
+    }
+
+    func refresh(force: Bool = false) {
+        guard let client else { isLoading = false; return }
+        let requestedQuery = effectiveQuery
+        let changedQuery = displayedQuery != requestedQuery
+        if !changedQuery && isLoading && !force { return }
         loadTask?.cancel()
         loadGeneration += 1
-        let generation = loadGeneration
-        guard let client else { isLoading = false; return }
-        query.cursor = nil
-        var requestedQuery = query
-        requestedQuery.showHidden = !hiddenDirectoryFilterEnabled
+        if changedQuery {
+            clearResults()
+            displayedQuery = requestedQuery
+            displayedPage = nil
+            if let cached = assetCache.page(for: requestedQuery) { display(cached) }
+        }
+        let requestGeneration = loadGeneration
+        if force { assetCache.removeAll() }
+        let targetCount = max(assets.count, 1)
         isLoading = true
+        isCheckingRevision = !force && displayedPage != nil
         lastError = nil
         loadTask = Task {
-            defer { finishLoading(generation: generation) }
+            defer { finishLoading(generation: requestGeneration) }
             do {
-                let page = try await client.assets(query: requestedQuery)
-                let summary = try await client.counts(showHidden: requestedQuery.showHidden)
-                try Task.checkCancellation()
-                guard generation == loadGeneration else { return }
-                assets = page.items
-                total = page.total
-                nextCursor = page.nextCursor
-                counts = summary
-                selectedIDs.formIntersection(Set(assets.map(\.id)))
+                var needsFetch = force || displayedPage == nil
+                if !force {
+                    let revision = try await client.revision(path: requestedQuery.directory)
+                    try Task.checkCancellation()
+                    guard requestGeneration == loadGeneration else { return }
+                    needsFetch = displayedPage.map { !$0.isCurrent(at: revision) } ?? true
+                    if !changedQuery, let current = displayedPage, revision.isUpdating && current.isUpdating && revision.revision == current.revision
+                        && Date().timeIntervalSince(lastAssetFetch) < 30 { needsFetch = false }
+                }
+                isCheckingRevision = false
+                if needsFetch {
+                    var nextQuery = requestedQuery
+                    var combined = try await client.assets(query: nextQuery)
+                    while combined.items.count < targetCount, let cursor = combined.nextCursor {
+                        nextQuery.cursor = cursor
+                        let next = try await client.assets(query: nextQuery)
+                        guard next.revision == combined.revision else {
+                            combined = try await client.assets(query: requestedQuery)
+                            break
+                        }
+                        let known = Set(combined.items.map(\.id))
+                        combined = KeepsAssetPage(items: combined.items + next.items.filter { !known.contains($0.id) }, total: next.total,
+                            nextCursor: next.nextCursor, revision: next.revision, isUpdating: combined.isUpdating || next.isUpdating)
+                    }
+                    try Task.checkCancellation()
+                    guard requestGeneration == loadGeneration else { return }
+                    display(combined)
+                    assetCache.store(combined, for: requestedQuery)
+                    lastAssetFetch = Date()
+                }
+                // Counts describe the whole library, independently of the selected directory.
+                if force || counts == nil || countsShowHidden != requestedQuery.showHidden || Date().timeIntervalSince(lastCountsFetch) >= 60 {
+                    let summary = try await client.counts(showHidden: requestedQuery.showHidden)
+                    try Task.checkCancellation()
+                    guard requestGeneration == loadGeneration else { return }
+                    counts = summary
+                    countsShowHidden = requestedQuery.showHidden
+                    lastCountsFetch = Date()
+                }
             } catch {
-                if !Task.isCancelled && generation == loadGeneration { lastError = Self.describe(error) }
+                if !Task.isCancelled && requestGeneration == loadGeneration { lastError = Self.describe(error) }
             }
         }
     }
@@ -324,11 +371,12 @@ final class LibraryStore: ObservableObject {
     private func finishLoading(generation: Int) {
         guard generation == loadGeneration else { return }
         isLoading = false
+        isCheckingRevision = false
         loadMoreIfNeeded()
     }
 
     func loadMore() {
-        guard let client, let cursor = nextCursor, !isLoading else { return }
+        guard let client, let cursor = nextCursor, !isLoading, displayedQuery == effectiveQuery else { return }
         let generation = loadGeneration
         var requestedQuery = query
         requestedQuery.cursor = cursor
@@ -341,10 +389,16 @@ final class LibraryStore: ObservableObject {
                 let page = try await client.assets(query: requestedQuery)
                 try Task.checkCancellation()
                 guard generation == loadGeneration else { return }
+                guard let current = displayedPage, current.revision == page.revision else {
+                    isLoading = false
+                    refresh(force: true)
+                    return
+                }
                 let known = Set(assets.map(\.id))
-                assets.append(contentsOf: page.items.filter { !known.contains($0.id) })
-                total = page.total
-                nextCursor = page.nextCursor
+                let combined = KeepsAssetPage(items: assets + page.items.filter { !known.contains($0.id) },
+                    total: page.total, nextCursor: page.nextCursor, revision: page.revision, isUpdating: current.isUpdating || page.isUpdating)
+                display(combined)
+                assetCache.store(combined, for: effectiveQuery)
             } catch {
                 if !Task.isCancelled && generation == loadGeneration { lastError = Self.describe(error) }
             }
@@ -376,9 +430,10 @@ final class LibraryStore: ObservableObject {
         let ids = selectedIDs
         let generation = loadGeneration
         isMutating = true
+        assetCache.removeAll()
         lastError = nil
         Task {
-            defer { isMutating = false }
+            defer { isMutating = false; assetCache.removeAll() }
             var completed = 0
             do {
                 for id in ids {
@@ -386,7 +441,7 @@ final class LibraryStore: ObservableObject {
                     if generation == loadGeneration, let index = assets.firstIndex(where: { $0.id == id }) { assets[index] = updated }
                     completed += 1
                 }
-                if generation == loadGeneration { refresh(); if refreshDirectories { refreshNavigation() } }
+                if generation == loadGeneration { refresh(force: true); if refreshDirectories { refreshNavigation() } }
             } catch { if generation == loadGeneration { lastError = "已完成 \(completed)/\(ids.count) 项。\n" + Self.describe(error) } }
         }
     }

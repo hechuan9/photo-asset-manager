@@ -26,6 +26,35 @@ struct PreviewCacheTests {
         return data as Data
     }
 
+    @Test func mediaRolesHaveIndependentIdentityAndBudgets() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let small = PreviewCache(directory: root.appendingPathComponent("thumbnail"), diskLimit: 4096, role: .thumbnail)
+        let standard = PreviewCache(directory: root.appendingPathComponent("standard"), diskLimit: 1, role: .standard)
+        let smallKey = PreviewCache.key(assetID: id, preview: preview, configuration: configuration, role: .thumbnail)
+        let largeKey = PreviewCache.key(assetID: id, preview: preview, configuration: configuration, role: .standard)
+        #expect(smallKey != largeKey)
+        try await small.store(Data([1, 2]), key: smallKey)
+        try await standard.store(Data([1, 2]), key: largeKey)
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("thumbnail/" + smallKey).path))
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("standard/" + largeKey).path))
+    }
+
+    @Test func legacyMigrationOnlyRemovesDedicatedCacheOnce() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let legacy = root.appendingPathComponent("KeepsPreviews")
+        try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+        let photo = root.appendingPathComponent("original.jpg")
+        try Data([1, 2, 3]).write(to: photo)
+        try PreviewCache.migrateLegacyCache(in: root)
+        #expect(!FileManager.default.fileExists(atPath: legacy.path))
+        #expect(try Data(contentsOf: photo) == Data([1, 2, 3]))
+        try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+        try PreviewCache.migrateLegacyCache(in: root)
+        #expect(FileManager.default.fileExists(atPath: legacy.path))
+    }
+
     @Test func fullDiskSkipsPersistenceButOtherWriteFailuresRemainVisible() async throws {
         let (cache, directory, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory); session.invalidateAndCancel() }
@@ -94,6 +123,26 @@ struct PreviewCacheTests {
         #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent(oldKey).path))
         #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent(newKey).path))
         _ = try await cache.image(assetID: id, preview: fresh, configuration: configuration, maxPixelSize: 8)
+        #expect(CacheProtocol.count == 3)
+    }
+
+    @Test func thumbnailExpiryRefreshesItsRoleAndSurvivesRestart() async throws {
+        let (_, directory, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory); session.invalidateAndCancel() }
+        let cache = PreviewCache(directory: directory, session: session, role: .thumbnail)
+        let data = try png()
+        CacheProtocol.reset { request in
+            if request.url!.path == "/old" { return (403, Data(#"{"detail":{"code":"preview_token_expired"}}"#.utf8)) }
+            if request.url!.path.hasPrefix("/derivatives/") {
+                let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+                #expect(query.contains(URLQueryItem(name: "role", value: "thumbnail")))
+                return (200, Data(#"{"downloadURL":"https://cache.invalid/new","width":32,"height":16,"version":"v1"}"#.utf8))
+            }
+            return (200, data)
+        }
+        _ = try await cache.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 8)
+        let restarted = PreviewCache(directory: directory, session: session, role: .thumbnail)
+        _ = try await restarted.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 8)
         #expect(CacheProtocol.count == 3)
     }
 

@@ -52,9 +52,12 @@ def main():
         state = inspect['State']
         assert state['Running'] and state['Health']['Status'] == 'healthy'
         assert not state['OOMKilled']
-        mounts = [m for m in inspect['Mounts'] if m['Destination'].startswith('/originals/')]
-        assert len(mounts) == 4 and all(not m['RW'] for m in mounts)
-        passed('container_health_and_original_mounts', image=inspect['Image'], restarts=inspect['RestartCount'], readOnlyMounts=len(mounts))
+        mounts = inspect['Mounts']
+        photo_mounts = [m for m in mounts if m['Destination'] == '/volume2/photo']
+        assert len(photo_mounts) == 1 and photo_mounts[0]['RW']
+        assert all('/myphoto' not in m['Source'] and '/myphoto' not in m['Destination'] for m in mounts)
+        assert len(mounts) == 2 and any(m['Destination'] == '/keeps' and m['RW'] for m in mounts)
+        passed('container_health_and_single_photo_mount', image=inspect['Image'], restarts=inspect['RestartCount'], photoMounts=len(photo_mounts))
         assert get('/healthz', False) == {'status':'ok'}
         status(prefix+'/assets',401,False)
         status(prefix+'/ops',404)
@@ -75,7 +78,7 @@ def main():
         counts = get(prefix+'/counts')
         assert counts['all'] >= page['total']
         directories = get(prefix+'/directories')['directories']
-        assert all(d['path'].startswith('/originals/') and d['count'] > 0 for d in directories)
+        assert all((d['path'] == '/volume2/photo' or d['path'].startswith('/volume2/photo/')) and d['count'] > 0 for d in directories)
         passed('catalog_pagination_filters_detail_directories', assets=page['total'], directoryCount=len(directories), ratedSample=len(rated['items']))
         previews = [a['preview'] for a in page['items'] if a.get('preview')][:5]
         assert previews
@@ -93,23 +96,29 @@ def main():
         root = Path(args.root)
         db = sqlite3.connect('file:'+str(root/'db/control_plane.sqlite')+'?mode=ro',uri=True,timeout=30)
         assert db.execute('PRAGMA quick_check').fetchall() == [('ok',)]
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 1
-        db.execute('ATTACH DATABASE ? AS baseline',('file:'+args.backup+'?mode=ro',))
-        old_count = db.execute('SELECT count(*) FROM baseline.ledger_events').fetchone()[0]
-        changed = db.execute('''SELECT count(*) FROM baseline.ledger_events b LEFT JOIN main.ledger_events c ON c.op_id=b.op_id
-            WHERE c.op_id IS NULL OR c.payload_json<>b.payload_json OR c.payload_hash<>b.payload_hash
-            OR c.library_id<>b.library_id OR c.global_seq<>b.global_seq''').fetchone()[0]
-        assert changed == 0
-        missing = db.execute("""SELECT count(*) FROM (SELECT DISTINCT library_id,lower(json_extract(payload_json,'$.assetSnapshotDeclared.snapshot.assetID')) AS id
-            FROM baseline.ledger_events WHERE op_type='asset_snapshot_declared') b
-            LEFT JOIN main.catalog_assets a ON a.library_id=b.library_id AND a.id=b.id WHERE a.id IS NULL""").fetchone()[0]
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 7
+        assert db.execute("SELECT count(*) FROM sqlite_schema WHERE name IN ('ledger_events','ledger_sequence_counters','device_states','archive_receipts','sync_conflicts')").fetchone()[0] == 0
+        db.execute('ATTACH DATABASE ? AS baseline', ('file:' + args.backup + '?mode=ro',))
+        old_count = db.execute('SELECT count(*) FROM baseline.catalog_assets').fetchone()[0]
+        missing = db.execute("""SELECT count(*) FROM baseline.catalog_assets b
+            LEFT JOIN main.catalog_assets c ON c.library_id=b.library_id AND c.id=b.id
+            WHERE c.id IS NULL""").fetchone()[0]
         assert missing == 0
+        changed = db.execute("""SELECT count(*) FROM baseline.catalog_assets b
+            JOIN main.catalog_assets c ON c.library_id=b.library_id AND c.id=b.id
+            WHERE c.snapshot IS NOT b.snapshot OR c.rating IS NOT b.rating
+            OR c.flag IS NOT b.flag OR c.color IS NOT b.color OR c.trashed IS NOT b.trashed""").fetchone()[0]
+        assert changed == 0, 'baseline user metadata changed'
+        selected_changed = db.execute("""SELECT count(*) FROM baseline.catalog_defaults b
+            LEFT JOIN main.catalog_defaults c ON c.library_id=b.library_id AND c.asset_id=b.asset_id
+            WHERE b.user_selected=1 AND (c.content_hash IS NOT b.content_hash OR c.user_selected IS NOT 1)""").fetchone()[0]
+        assert selected_changed == 0, 'user selected versions changed'
         db.close()
         jobs = sqlite3.connect('file:'+str(root/'db/jobs.sqlite')+'?mode=ro',uri=True,timeout=30)
         assert jobs.execute('PRAGMA quick_check').fetchall() == [('ok',)]
         file_errors = jobs.execute('SELECT count(*) FROM files WHERE error IS NOT NULL').fetchone()[0]
         jobs.close()
-        passed('databases_integrity_and_complete_legacy_preservation', legacyEvents=old_count, changedLegacyEvents=changed, missingLegacyAssets=missing)
+        passed('database_integrity_and_business_state_preservation', baselineAssets=old_count, changedSnapshots=changed, missingAssets=missing, changedSelectedVersions=selected_changed)
         final_jobs = get(prefix+'/jobs')['jobs']
         before = {j['id']:j for j in initial_jobs}
         progress = []

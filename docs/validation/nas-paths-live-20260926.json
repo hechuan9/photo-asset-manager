@@ -1,0 +1,79 @@
+{
+  "navigation": {
+    "directories": [
+      {
+        "hasChildren": true,
+        "name": "myphoto",
+        "path": "/volume2/myphoto"
+      },
+      {
+        "hasChildren": true,
+        "name": "photo",
+        "path": "/volume2/photo"
+      }
+    ],
+    "local": {
+      "status": "not_configured"
+    },
+    "location": "nas",
+    "path": null
+  },
+  "checks": [
+    {
+      "path": "/volume2/photo",
+      "directories": 3,
+      "assets": 87717,
+      "leafNodes": 0
+    },
+    {
+      "path": "/volume2/photo/照片",
+      "directories": 10,
+      "assets": 29560,
+      "leafNodes": 1
+    },
+    {
+      "path": "/volume2/photo/未处理",
+      "directories": 6,
+      "assets": 42056,
+      "leafNodes": 0
+    },
+    {
+      "path": "/volume2/myphoto",
+      "directories": 3,
+      "assets": 30998,
+      "leafNodes": 0
+    },
+    {
+      "path": "/volume2/myphoto/和川专属",
+      "directories": 2,
+      "assets": 29140,
+      "leafNodes": 0
+    },
+    {
+      "path": "/volume2/myphoto/和川专属/照片/2005/2005年音乐会",
+      "directories": 0,
+      "assets": 2,
+      "leafNodes": 0
+    }
+  ],
+  "catalogPaths": 143866,
+  "originalMountsReadOnlyAndSamePath": true,
+  "jobs": {
+    "jobs": [
+      {
+        "currentPath": "/volume2/myphoto/和川专属/照片/2003/453773024_10161778390836812_6580110027825437827_n.jpg",
+        "error": null,
+        "failed": 0,
+        "finishedAt": null,
+        "folderID": "dec88e4e-1955-43c8-8c7b-c320bdc8d20e",
+        "id": "34d27418-7f2c-4434-9144-d8d1f063280c",
+        "libraryID": "local-library",
+        "path": "/volume2",
+        "processed": 0,
+        "skipped": 45,
+        "startedAt": 1790458933,
+        "status": "running"
+      }
+    ]
+  }
+}

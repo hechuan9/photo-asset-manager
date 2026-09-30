@@ -29,6 +29,8 @@ jobs:
   apple:
     name: Apple clients and release scripts
     runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -45,6 +47,7 @@ jobs:
           swift --version
           xcodebuild -version
       - run: swift test --package-path shared
+      - run: swift test --package-path ios
       - run: swift test --package-path macos
       - run: bash macos/scripts/package_app.sh
       - name: Build iOS Simulator
@@ -68,4 +71,7 @@ jobs:
       - run: python -m pytest
         working-directory: control_plane
       - run: python -m unittest discover -s scripts -p 'test_migrate_nas_paths.py'
+      - run: python -m unittest discover -s scripts -p 'test_migrate_nas_storage.py'
       - run: python -m unittest discover -s scripts -p 'test_merge_tracked_folders.py'
+      - run: python -m unittest discover -s scripts -p 'test_backfill_standard_names.py'
+      - run: python -m unittest discover -s scripts -p 'test_linux_cache_worker.py'

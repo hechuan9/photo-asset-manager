@@ -9,14 +9,12 @@ struct IOSCollectionRoute: Hashable {
 
 struct IOSCollectionsView: View {
     let configuration: KeepsConfiguration?
-    @StateObject private var navigation = IOSDirectoryStore()
+    @ObservedObject var navigation: IOSDirectoryStore
 
     var body: some View {
         List {
             Section {
-                IOSDirectoryRows(navigation: navigation, connected: configuration != nil, path: nil) {
-                    Task { await navigation.load(configuration: configuration, path: nil) }
-                }
+                IOSDirectoryRows(state: navigation.state(for: nil, configuration: configuration), connected: configuration != nil, path: nil)
             } header: {
                 Text("服务器").font(.title2.bold()).foregroundStyle(.primary).textCase(nil)
             }
@@ -32,90 +30,132 @@ struct IOSCollectionsView: View {
         .background(.black)
         .contentMargins(.bottom, 100, for: .scrollContent)
         .task(id: configuration) { await navigation.load(configuration: configuration, path: nil) }
-        .refreshable { await navigation.load(configuration: configuration, path: nil) }
+        .bottomPullRefresh(bottomInset: 90) { await navigation.load(configuration: configuration, path: nil, force: true) }
     }
 }
 
 struct IOSDirectoryBrowser: View {
     let configuration: KeepsConfiguration?
     let path: String
-    @StateObject private var navigation = IOSDirectoryStore()
+    @ObservedObject var navigation: IOSDirectoryStore
+
+    @State private var contentHeight: CGFloat = 0
 
     var body: some View {
-        List {
-            IOSDirectoryRows(navigation: navigation, connected: configuration != nil, path: path) {
-                Task { await navigation.load(configuration: configuration, path: path) }
-            }.listRowBackground(Color.clear)
-        }
-            .listStyle(.plain).scrollContentBackground(.hidden)
-            .frame(height: 220)
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 0) {
+                    IOSDirectoryRows(state: navigation.state(for: path, configuration: configuration),
+                                     connected: configuration != nil, path: path, menu: true)
+                    .padding(.horizontal, 16).padding(.vertical, 8)
+                }
+                .frame(maxWidth: .infinity)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
+            }
+            .contentMargins(.bottom, contentHeight > geometry.size.height - 100 ? 100 : 0, for: .scrollContent)
+            .bottomPullRefresh { await navigation.load(configuration: configuration, path: path, force: true) }
+            .frame(height: min(contentHeight, geometry.size.height))
             .background(.ultraThinMaterial)
             .clipped()
-            .task(id: configuration) { await navigation.load(configuration: configuration, path: path) }
+        }
+        .task(id: configuration) { await navigation.load(configuration: configuration, path: path) }
     }
 }
 
 private struct IOSDirectoryRows: View {
-    @ObservedObject var navigation: IOSDirectoryStore
+    let state: IOSDirectoryStore.Entry
     let connected: Bool
     let path: String?
-    let retry: () -> Void
+    var menu = false
 
     var body: some View {
         Group {
+            if let error = state.error, state.directories != nil {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("目录刷新失败，显示已缓存内容").font(.caption)
+                    Text(error).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                    Text("从底部上拉刷新").font(.caption)
+                }
+            }
             if !connected {
                 Label("连接服务器后显示目录", systemImage: "server.rack")
                     .foregroundStyle(.secondary).frame(minHeight: 60)
-            } else if navigation.loading {
+            } else if state.loading && state.directories == nil {
                 ProgressView("正在读取目录…").frame(minHeight: 60)
-            } else if let error = navigation.error {
+            } else if let error = state.error, state.directories == nil {
                 VStack(alignment: .leading, spacing: 8) {
                     Label("无法读取目录", systemImage: "wifi.exclamationmark")
                     Text(error).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                    Button("重试目录", action: retry)
+                    Text("从底部上拉刷新").font(.caption)
                 }.padding(.vertical, 8)
-            } else if navigation.directories.isEmpty {
+            } else if state.directories?.isEmpty != false {
                 Text(path == nil ? "暂无服务器目录" : "没有子目录")
                     .foregroundStyle(.secondary).frame(minHeight: 44)
             } else {
-                ForEach(navigation.directories) { directory in
+                ForEach(state.directories ?? []) { directory in
                     NavigationLink(value: IOSCollectionRoute(directory: directory.path, title: directory.name, hasChildren: directory.hasChildren)) {
                         HStack(spacing: 12) {
                             Image(systemName: "folder").foregroundStyle(.secondary)
                             Text(directory.name).lineLimit(2)
                             Spacer(minLength: 8)
                             Text(directory.photoCount.formatted()).foregroundStyle(.secondary).monospacedDigit()
-                        }.frame(minHeight: 44)
+                            if menu { Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary) }
+                        }.frame(minHeight: 44).contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
                 }
             }
         }
     }
 }
 
-@MainActor
-private final class IOSDirectoryStore: ObservableObject {
-    @Published private(set) var directories: [KeepsNavigationDirectory] = []
-    @Published private(set) var loading = true
-    @Published private(set) var error: String?
-    private var generation = 0
+/// Only an upward finger drag beyond the bottom edge can request a refresh.
+private struct BottomPullRefresh: ViewModifier {
+    let action: () async -> Void
+    var bottomInset: CGFloat = 0
+    @State private var overscroll: CGFloat = 0
+    @State private var translation: CGFloat = 0
+    @State private var dragging = false
+    @State private var armed = false
+    @State private var refreshing = false
 
-    func load(configuration: KeepsConfiguration?, path: String?) async {
-        generation += 1
-        let requestGeneration = generation
-        loading = true
-        error = nil
-        directories = []
-        guard let configuration else { loading = false; return }
-        do {
-            let result = try await KeepsClient(configuration: configuration).navigation(path: path)
-            try Task.checkCancellation()
-            guard generation == requestGeneration else { return }
-            directories = result.directories
-        } catch {
-            guard generation == requestGeneration, !Task.isCancelled else { return }
-            self.error = String(reflecting: error)
-        }
-        loading = false
+    func body(content: Content) -> some View {
+        content
+            .scrollBounceBehavior(.always)
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                let bottom = max(-geometry.contentInsets.top,
+                    geometry.contentSize.height + geometry.contentInsets.bottom - geometry.containerSize.height)
+                return max(0, geometry.contentOffset.y - bottom)
+            } action: { _, distance in
+                overscroll = distance
+                if dragging && translation < -60 && distance > 60 { armed = true }
+            }
+            .simultaneousGesture(DragGesture().onChanged { value in
+                dragging = true
+                translation = value.translation.height
+                if translation < -60 && overscroll > 60 { armed = true }
+            }.onEnded { _ in
+                let shouldRefresh = armed && !refreshing
+                dragging = false; armed = false; translation = 0
+                guard shouldRefresh else { return }
+                refreshing = true
+                Task {
+                    await action()
+                    refreshing = false
+                }
+            })
+            .overlay(alignment: .bottom) {
+                if refreshing { ProgressView().padding(12).background(.regularMaterial, in: Capsule()).padding(.bottom, bottomInset) }
+                else if dragging && overscroll > 15 {
+                    Text(armed ? "松开刷新" : "继续上拉刷新")
+                        .font(.caption).padding(10).background(.regularMaterial, in: Capsule()).padding(.bottom, bottomInset)
+                }
+            }
+    }
+}
+
+extension View {
+    func bottomPullRefresh(bottomInset: CGFloat = 0, _ action: @escaping () async -> Void) -> some View {
+        modifier(BottomPullRefresh(action: action, bottomInset: bottomInset))
     }
 }

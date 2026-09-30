@@ -42,26 +42,30 @@ def fixture_png(red=255):
             + chunk(b"IDAT", zlib.compress((b"\0" + bytes([red, 32, 64]) * 16) * 8)) + chunk(b"IEND", b""))
 
 
-def legacy_database(path):
+def schema_six_database(path):
     asset = "00000000-0000-0000-0000-00000000a001"
-    snapshot = {"assetID": asset, "captureTime": "2024-01-01T00:00:00.000Z", "cameraMake": "Canon",
+    snapshot = {"id": asset, "captureTime": "2024-01-01T00:00:00.000Z", "cameraMake": "Canon",
                 "cameraModel": "R3", "lensModel": "50mm", "originalFilename": "legacy.jpg",
                 "contentFingerprint": "legacy-hash", "metadataFingerprint": "legacy-fingerprint",
-                "rating": 1, "flagState": "unflagged", "tags": [],
+                "rating": 1, "flagState": "unflagged", "tags": [], "trashed": False,
                 "createdAt": "2024-01-01T00:00:00.000Z", "updatedAt": "2024-01-01T00:00:00.000Z"}
-    payload = json.dumps({"assetSnapshotDeclared": {"snapshot": snapshot}}, separators=(",", ":"), sort_keys=True)
+    payload = json.dumps({"assetSnapshotDeclared": {"snapshot": {"assetID": "removed-myphoto-asset"}}}, separators=(",", ":"), sort_keys=True)
     with sqlite3.connect(path) as db:
         db.executescript((Path(__file__).parent / "fixtures/legacy_schema.sql").read_text())
+        db.execute("INSERT INTO catalog_assets VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                   ("smoke", asset, json.dumps(snapshot), "legacy-hash", "legacy-fingerprint",
+                    snapshot["captureTime"], "legacy.jpg", 1, "unflagged", None, 0))
+        db.execute("ALTER TABLE derivative_objects ADD COLUMN declared_event_seq INTEGER NOT NULL DEFAULT 0")
         db.execute("INSERT INTO ledger_sequence_counters VALUES ('smoke',2)")
         db.execute("""INSERT INTO ledger_events(library_id,global_seq,op_id,device_id,device_seq,
                       hybrid_logical_time,actor_id,entity_type,entity_id,op_type,payload_json,payload_hash,
                       base_version,committed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                    ("smoke", 1, str(uuid.uuid4()), "legacy-mac", 1,
                     json.dumps({"wallTimeMilliseconds": 1704067200000, "counter": 0, "nodeID": "legacy-mac"}),
-                    "user", "asset", asset, "asset_snapshot_declared", payload,
+                    "user", "asset", "removed-myphoto-asset", "asset_snapshot_declared", payload,
                     hashlib.sha256(payload.encode()).hexdigest(), None, "2024-01-01 00:00:00.000"))
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 0
-    return asset, payload
+        db.execute("PRAGMA user_version=6")
+    return asset, snapshot
 
 
 def main():
@@ -78,8 +82,7 @@ def main():
         photo.write_bytes(fixture_png())
         original_hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in originals.iterdir()}
         database = keeps / "db/control_plane.sqlite"
-        legacy_id, legacy_payload = legacy_database(database)
-        mount = f"type=bind,src={keeps},dst=/myphoto/keeps"
+        mount = f"type=bind,src={keeps},dst=/keeps"
         started = False
         evidence = {"image": image, "container": container, "checks": [], "status": "running"}
 
@@ -88,9 +91,10 @@ def main():
             print("PASS: " + name, flush=True)
             (root / "validation.json").write_text(json.dumps(evidence, indent=2, ensure_ascii=False))
 
-        def event_count():
+        def catalog_revision():
             with sqlite3.connect(str(database)) as db:
-                return db.execute("SELECT count(*) FROM ledger_events").fetchone()[0]
+                row = db.execute("SELECT revision FROM catalog_version_revision WHERE library_id='smoke'").fetchone()
+                return row[0] if row else 0
 
         def add_original(relative, content):
             path = originals / relative
@@ -100,19 +104,22 @@ def main():
             original_hashes[relative] = hashlib.sha256(content).hexdigest()
 
         try:
-            docker("run", "--rm", "-e", "KEEPS_ROOT=/myphoto/keeps", "--mount", mount, image, "migrate")
+            docker("run", "--rm", "-e", "KEEPS_ROOT=/keeps", "--mount", mount, image, "migrate")
+            legacy_id, legacy_snapshot = schema_six_database(database)
+            docker("run", "--rm", "-e", "KEEPS_ROOT=/keeps", "--mount", mount, image, "migrate")
             with sqlite3.connect(database) as db:
-                assert db.execute("PRAGMA user_version").fetchone()[0] == 3
-                assert db.execute("SELECT payload_json FROM ledger_events WHERE global_seq=1").fetchone()[0] == legacy_payload
+                assert db.execute("PRAGMA user_version").fetchone()[0] == 7
+                assert json.loads(db.execute("SELECT snapshot FROM catalog_assets WHERE id=?", (legacy_id,)).fetchone()[0]) == legacy_snapshot
                 assert db.execute("SELECT count(*) FROM catalog_assets").fetchone()[0] == 1
-            record("legacy migration preserves event payload")
+                assert db.execute("SELECT count(*) FROM sqlite_schema WHERE name IN ('ledger_events','ledger_sequence_counters','device_states','archive_receipts','sync_conflicts')").fetchone()[0] == 0
+            record("schema six migration preserves business state without replaying removed assets")
             docker("run", "-d", "--name", container, "-p", "127.0.0.1::2283",
-                   "-e", "KEEPS_ACCESS_TOKEN", "-e", "KEEPS_ROOT=/myphoto/keeps",
-                   "-e", "KEEPS_LIBRARY_ID=smoke", "-e", "ORIGINAL_ROOT=/myphoto/library", "-e", "CONTROL_PLANE_AUTO_CREATE_SCHEMA=0",
+                   "-e", "KEEPS_ACCESS_TOKEN", "-e", "KEEPS_ROOT=/keeps",
+                   "-e", "KEEPS_LIBRARY_ID=smoke", "-e", "ORIGINAL_ROOT=/photos", "-e", "CONTROL_PLANE_AUTO_CREATE_SCHEMA=0",
                    "-e", "CONTROL_PLANE_PUBLIC_BASE_URL=http://localhost:2283",
                    "-e", "TZ=America/New_York", "-e", "KEEPS_SCAN_INTERVAL_SECONDS=3600",
                    "--mount", mount,
-                   "--mount", f"type=bind,src={originals},dst=/myphoto/library,readonly", image)
+                   "--mount", f"type=bind,src={originals},dst=/photos,readonly", image)
             started = True
             address = "http://" + docker("port", container, "2283/tcp")
 
@@ -165,10 +172,10 @@ def main():
             legacy_path = f"/libraries/smoke/assets/{legacy_id}"
             patch = {"rating": 4, "flagState": "picked", "tags": ["smoke"]}
             assert request(legacy_path, patch, method="PATCH")["rating"] == 4
-            before_repeat = event_count()
+            before_repeat = catalog_revision()
             assert request(legacy_path, patch, method="PATCH")["rating"] == 4
-            assert event_count() == before_repeat
-            record("repeated metadata command creates no events", {"eventCount": before_repeat})
+            assert catalog_revision() == before_repeat
+            record("repeated metadata command preserves revision", {"revision": before_repeat})
             reject(legacy_path, 422, {"rating": 6}, "PATCH")
             reject(legacy_path, 422, {"originalFilename": "changed.jpg"}, "PATCH")
             reject(legacy_path, 400, b"{broken", "PATCH")
@@ -194,13 +201,13 @@ def main():
             assert hashlib.sha256(preview_bytes).hexdigest() == scanned["preview"]["version"]
             reject(preview_path + "tampered", 400, auth=False)
             record("preview content hash and signed URL tamper rejection")
-            before_rescan = event_count()
+            before_rescan = catalog_revision()
             repeat_job = request(f"/libraries/smoke/folders/{folder['id']}/scan", method="POST")
             repeat_job = wait_job(job_id=repeat_job["id"])
             assert repeat_job["skipped"] == 1 and repeat_job["processed"] == 0, repeat_job
             assert request("/libraries/smoke/assets")["total"] == 2
-            assert event_count() == before_rescan
-            record("unchanged rescan skips photo without duplicate asset or event", repeat_job)
+            assert catalog_revision() == before_rescan
+            record("unchanged rescan skips photo without duplicate asset or revision", repeat_job)
             request(f"/libraries/smoke/folders/{folder['id']}", method="DELETE")
             assert request("/libraries/smoke/folders")["folders"] == []
             reject("/libraries/smoke/ops", 404, {"operations": []})
@@ -269,11 +276,11 @@ def main():
             assert request("/libraries/smoke/assets")["total"] == 3 + resume_count
             assert request("/libraries/smoke/folders")["folders"] == []
             mounts = json.loads(docker("inspect", container))[0]["Mounts"]
-            assert next(m for m in mounts if m["Destination"] == "/myphoto/library")["RW"] is False
+            assert next(m for m in mounts if m["Destination"] == "/photos")["RW"] is False
             assert {str(p.relative_to(originals)): hashlib.sha256(p.read_bytes()).hexdigest()
                     for p in originals.rglob("*") if p.is_file()} == original_hashes
             with sqlite3.connect(database) as db:
-                assert db.execute("SELECT payload_json FROM ledger_events WHERE global_seq=1").fetchone()[0] == legacy_payload
+                assert db.execute("SELECT count(*) FROM sqlite_schema WHERE name='ledger_events'").fetchone()[0] == 0
             record("restart persists catalog and inactive folders; every original hash remains unchanged",
                    {"assets": 3 + resume_count, "originalFiles": len(original_hashes)})
             evidence["status"] = "passed"

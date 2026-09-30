@@ -4,7 +4,14 @@ import ImageIO
 import OSLog
 
 public actor PreviewCache {
-    public static let shared = PreviewCache()
+    public static let shared = PreviewCache(role: .preview)
+    public static let thumbnails = PreviewCache(diskLimit: Int.max, role: .thumbnail)
+    public static let standards = PreviewCache(role: .standard)
+    public static func cache(for role: KeepsMediaRole) -> PreviewCache {
+        switch role { case .thumbnail: thumbnails; case .standard: standards; case .preview: shared }
+    }
+    private let role: KeepsMediaRole
+    private let migrateLegacy: Bool
     public static let diskLimit = 5 * 1024 * 1024 * 1024
     private let directory: URL
     private let limit: Int
@@ -15,9 +22,11 @@ public actor PreviewCache {
     private var indexed = false
     private var pending: [String: Task<(Data, String), Error>] = [:]
 
-    public init(directory: URL = URL.cachesDirectory.appendingPathComponent("KeepsPreviews", isDirectory: true),
-                diskLimit: Int = PreviewCache.diskLimit, session: URLSession? = nil) {
-        self.directory = directory
+    public init(directory: URL? = nil,
+                diskLimit: Int = PreviewCache.diskLimit, session: URLSession? = nil, role: KeepsMediaRole = .preview) {
+        self.directory = directory ?? URL.cachesDirectory.appendingPathComponent("KeepsMediaV2/" + role.rawValue, isDirectory: true)
+        self.role = role
+        self.migrateLegacy = directory == nil
         self.limit = diskLimit
         if let session { self.session = session }
         else {
@@ -26,21 +35,21 @@ public actor PreviewCache {
             self.session = URLSession(configuration: config)
         }
         #if os(iOS)
-        images.totalCostLimit = 64 * 1024 * 1024
+        images.totalCostLimit = (role == .standard ? 32 : role == .thumbnail ? 24 : 8) * 1024 * 1024
         #else
-        images.totalCostLimit = 256 * 1024 * 1024
+        images.totalCostLimit = (role == .standard ? 128 : role == .thumbnail ? 96 : 32) * 1024 * 1024
         #endif
     }
 
-    public nonisolated static func key(assetID: UUID, preview: KeepsPreview, configuration: KeepsConfiguration) -> String {
+    public nonisolated static func key(assetID: UUID, preview: KeepsPreview, configuration: KeepsConfiguration, role: KeepsMediaRole = .preview) -> String {
         // Length-delimited encoding prevents ambiguous namespace boundaries.
-        let parts = [configuration.baseURL.absoluteString, configuration.libraryID, assetID.uuidString, preview.version]
+        let parts = [configuration.baseURL.absoluteString, configuration.libraryID, assetID.uuidString, role.rawValue, preview.version]
         let encoded = parts.map { "\($0.utf8.count):\($0)" }.joined()
         return SHA256.hash(data: Data(encoded.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     public func image(assetID: UUID, preview: KeepsPreview, configuration: KeepsConfiguration, maxPixelSize: Int) async throws -> CGImage {
-        let key = Self.key(assetID: assetID, preview: preview, configuration: configuration)
+        let key = Self.key(assetID: assetID, preview: preview, configuration: configuration, role: role)
         let pixels = max(1, maxPixelSize)
         let memoryKey = "\(key):\(pixels)" as NSString
         if let image = images.object(forKey: memoryKey) {
@@ -52,6 +61,18 @@ public actor PreviewCache {
         let image = try Self.decode(data, pixels: pixels)
         images.setObject(image, forKey: "\(actualKey):\(pixels)" as NSString, cost: image.bytesPerRow * image.height)
         return image
+    }
+
+    public var isDownloading: Bool { !pending.isEmpty }
+
+    public func prefetch(assetID: UUID, preview: KeepsPreview, configuration: KeepsConfiguration) async throws -> Bool {
+        try prepare()
+        let free = try directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage ?? 0
+        guard free > 2 * 1024 * 1024 * 1024 else { return false }
+        guard pending.isEmpty else { return false }
+        let key = Self.key(assetID: assetID, preview: preview, configuration: configuration, role: role)
+        _ = try await bytes(key: key, assetID: assetID, preview: preview, configuration: configuration)
+        return true
     }
 
     private func bytes(key: String, assetID: UUID, preview: KeepsPreview, configuration: KeepsConfiguration) async throws -> (Data, String) {
@@ -81,7 +102,7 @@ public actor PreviewCache {
             var descriptor = preview
             var (data, response) = try await session.data(from: descriptor.downloadURL)
             if Self.isExpired(data: data, response: response) {
-                descriptor = try await KeepsClient(configuration: configuration, session: session).refreshPreviewDescriptor(assetID: assetID)
+                descriptor = try await KeepsClient(configuration: configuration, session: session).refreshPreviewDescriptor(assetID: assetID, role: self.role)
                 (data, response) = try await session.data(from: descriptor.downloadURL)
             }
             guard let http = response as? HTTPURLResponse else { throw KeepsAPIError.invalidResponse }
@@ -89,7 +110,7 @@ public actor PreviewCache {
                 throw KeepsAPIError.http(http.statusCode, String(decoding: data, as: UTF8.self))
             }
             guard Self.isImage(data) else { throw URLError(.cannotDecodeContentData) }
-            let actualKey = Self.key(assetID: assetID, preview: descriptor, configuration: configuration)
+            let actualKey = Self.key(assetID: assetID, preview: descriptor, configuration: configuration, role: self.role)
             try self.store(data, key: actualKey)
             return (data, actualKey)
         }
@@ -101,7 +122,7 @@ public actor PreviewCache {
     static func isExpired(data: Data, response: URLResponse) -> Bool {
         guard let http = response as? HTTPURLResponse, http.statusCode == 403,
               let body = try? JSONDecoder().decode(Failure.self, from: data) else { return false }
-        return body.detail.code == "preview_token_expired"
+        return ["preview_token_expired", "derivative_token_expired"].contains(body.detail.code)
     }
     private struct Failure: Decodable { var detail: Detail; struct Detail: Decodable { var code: String } }
     private static func isImage(_ data: Data) -> Bool {
@@ -119,8 +140,23 @@ public actor PreviewCache {
         return image
     }
 
+    private static let migrationLock = NSLock()
+    static func migrateLegacyCache(in root: URL) throws {
+        migrationLock.lock()
+        defer { migrationLock.unlock() }
+        let marker = root.appendingPathComponent("KeepsMediaV2/.legacy-removed")
+        guard !FileManager.default.fileExists(atPath: marker.path) else { return }
+        let legacy = root.appendingPathComponent("KeepsPreviews", isDirectory: true)
+        if FileManager.default.fileExists(atPath: legacy.path) { try FileManager.default.removeItem(at: legacy) }
+        try FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: marker, options: .atomic)
+    }
+
     private func prepare() throws {
         guard !indexed || !FileManager.default.fileExists(atPath: directory.path) else { return }
+        if migrateLegacy {
+            try Self.migrateLegacyCache(in: URL.cachesDirectory)
+        }
         entries.removeAll()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]) {
@@ -158,11 +194,12 @@ public actor PreviewCache {
         try trim()
     }
     private func trim() throws {
-        var total = entries.values.reduce(0) { $0 + $1.size }
         let available = try directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage
         let lowSpace = available.map { $0 < 1024 * 1024 * 1024 } ?? false
+        guard limit != Int.max || lowSpace else { return }
+        var total = entries.values.reduce(0) { $0 + $1.size }
         guard total > limit || lowSpace else { return }
-        let target = lowSpace ? 0 : limit * 4 / 5
+        let target = lowSpace ? max(0, total - 256 * 1024 * 1024) : limit / 5 * 4
         for (key, entry) in entries.sorted(by: { $0.value.accessed < $1.value.accessed }) {
             guard total > target else { break }
             do { try FileManager.default.removeItem(at: directory.appendingPathComponent(key)) }

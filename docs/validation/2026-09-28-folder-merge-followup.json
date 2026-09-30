@@ -1,0 +1,1 @@
+{"health": {"status": "ok"}, "preview_verified": true, "merged_originals_verified": 76, "groups_versions_verified": 20, "original_mounts_readonly": true, "jobs": [["completed", 96], ["pending", 1], ["running", 1]], "folders": {"folders": [{"active": true, "id": "dec88e4e-1955-43c8-8c7b-c320bdc8d20e", "libraryID": "local-library", "path": "/volume2"}], "rootPath": "/volume2"}}

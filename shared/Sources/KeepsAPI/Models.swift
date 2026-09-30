@@ -11,6 +11,8 @@ public struct KeepsConfiguration: Equatable, Sendable {
     }
 }
 
+public enum KeepsMediaRole: String, Sendable { case thumbnail, standard, preview }
+
 public struct KeepsPreview: Codable, Equatable, Sendable {
     public var downloadURL: URL
     public var width: Int
@@ -35,12 +37,49 @@ public struct KeepsAsset: Codable, Identifiable, Equatable, Sendable {
     public var updatedAt: String
     public var trashed: Bool
     public var preview: KeepsPreview?
+    public var thumbnail: KeepsPreview? = nil
+    public var standard: KeepsPreview? = nil
+    public var gridPreview: KeepsPreview? { thumbnail ?? preview }
 }
 
 public struct KeepsAssetPage: Decodable, Sendable {
     public var items: [KeepsAsset]
     public var total: Int
     public var nextCursor: String?
+    public var revision: Int64
+    public var isUpdating: Bool
+
+    public init(items: [KeepsAsset], total: Int, nextCursor: String?, revision: Int64, isUpdating: Bool) {
+        self.items = items
+        self.total = total
+        self.nextCursor = nextCursor
+        self.revision = revision
+        self.isUpdating = isUpdating
+    }
+
+    public func isCurrent(at current: KeepsCatalogRevision) -> Bool {
+        !isUpdating && !current.isUpdating && revision == current.revision
+    }
+}
+
+public struct KeepsCatalogRevision: Decodable, Equatable, Sendable {
+    public var revision: Int64
+    public var isUpdating: Bool
+    public var path: String?
+    public var children: [KeepsDirectoryRevision]?
+
+    public init(revision: Int64, isUpdating: Bool, path: String? = nil, children: [KeepsDirectoryRevision]? = nil) {
+        self.revision = revision
+        self.isUpdating = isUpdating
+        self.path = path
+        self.children = children
+    }
+}
+
+public struct KeepsDirectoryRevision: Decodable, Equatable, Sendable {
+    public var path: String
+    public var revision: Int64
+    public var isUpdating: Bool
 }
 
 public struct KeepsHiddenDirectories: Decodable, Equatable, Sendable {
@@ -103,7 +142,7 @@ public struct KeepsJobsResponse: Decodable, Sendable {
     public var jobs: [KeepsJob]
 }
 
-public struct KeepsAssetQuery: Equatable, Sendable {
+public struct KeepsAssetQuery: Hashable, Sendable {
     public var q = ""
     public var minRating = 0
     public var flagState: String?

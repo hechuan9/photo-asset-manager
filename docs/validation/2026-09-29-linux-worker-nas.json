@@ -1,0 +1,358 @@
+{
+  "sourceArchiveSHA256": "a6463815ac32e578ad4cea8fd1a6793051233f348919912e2ab7c694babeb8e7",
+  "linuxImage": "sha256:2eacdd985809a8ec95ee1b588c3a1578ecc17fb67c4c9452e2d9ee7b333f0dfb",
+  "nasImage": "sha256:d4be507c65f18c6c5eebb6cf10779ac0d015851c5badd8d984581a24417a75a8",
+  "serverBinarySHA256": "7e931c708e43c409a49a6418970f54174f8563aa7376d3f7001df81ecdb0711c",
+  "rendererBinarySHA256": "3c5cad00a8c0a9a4fe2299311a1151c35241e86fcf53c6b1eae9f8ac035e6757",
+  "smoke": {
+    "status": "PASS",
+    "checks": [
+      {
+        "test": "health_and_auth",
+        "status": "PASS"
+      },
+      {
+        "test": "schema8_no_ledger_and_raw_same_asset_standard",
+        "status": "PASS"
+      },
+      {
+        "test": "all_four_remote_tasks_and_duplicate_complete",
+        "status": "PASS"
+      },
+      {
+        "test": "signed_download_hashes_jpeg_heif_reuse_3fr_thumbnail_only",
+        "status": "PASS"
+      },
+      {
+        "test": "rescan_stable_original_hashes_and_resource_limits",
+        "status": "PASS"
+      }
+    ],
+    "fixtureRoot": "/home/hechuan/keeps-worker/releases/worker-20260929/smoke/20260929-125840-ef5da9",
+    "samples": {
+      "raw": {
+        "source": "/home/hechuan/keeps-worker/releases/worker-20260929/fixtures/raw/DSC06294.ARW",
+        "fixture": "/home/hechuan/keeps-worker/releases/worker-20260929/smoke/20260929-125840-ef5da9/originals/raw/DSC06294.ARW",
+        "container": "/originals/raw/DSC06294.ARW",
+        "hash": "92b796166c914d5bc402c252047b8125d8c025edc823cbaadd0ccfead9f615a7"
+      },
+      "jpeg": {
+        "source": "/home/hechuan/keeps-worker/releases/worker-20260929/fixtures/jpeg/DSC05392.jpg",
+        "fixture": "/home/hechuan/keeps-worker/releases/worker-20260929/smoke/20260929-125840-ef5da9/originals/jpeg/DSC05392.jpg",
+        "container": "/originals/jpeg/DSC05392.jpg",
+        "hash": "0337223e6a436a4110386d8f152f7e3ba2b3a18553dbedf1b7ff63da04becdf8"
+      },
+      "heif": {
+        "source": "/home/hechuan/keeps-worker/releases/worker-20260929/fixtures/heif/IMG_4438.HEIC",
+        "fixture": "/home/hechuan/keeps-worker/releases/worker-20260929/smoke/20260929-125840-ef5da9/originals/heif/IMG_4438.HEIC",
+        "container": "/originals/heif/IMG_4438.HEIC",
+        "hash": "8ae8af893b00f888a3b175a9f7422332d64bcfd35c2ce393bde9a277dc4ed045"
+      },
+      "3fr": {
+        "source": "/home/hechuan/keeps-worker/releases/worker-20260929/fixtures/3fr/B0002737.3FR",
+        "fixture": "/home/hechuan/keeps-worker/releases/worker-20260929/smoke/20260929-125840-ef5da9/originals/3fr/B0002737.3FR",
+        "container": "/originals/3fr/B0002737.3FR",
+        "hash": "ea12bf5e726dbff5876a4eb7549392b1748f72349287c203ccf004ab4a92674e"
+      }
+    },
+    "lastCacheStatus": {
+      "batchLimit": 20,
+      "concurrency": 1,
+      "counts": {
+        "failed": 0,
+        "pending": 0,
+        "processing": 0,
+        "ready": 4
+      },
+      "eligibleAssets": 4,
+      "enabled": true,
+      "encoderThreads": 1,
+      "errors": [],
+      "gc": {
+        "batchLimit": 20,
+        "enabled": false,
+        "errors": [],
+        "failed": 0,
+        "graceSeconds": 1200,
+        "nextEligibleAt": null,
+        "pending": 0
+      },
+      "lastSuccessAt": 1790701169,
+      "maxAttempts": 4,
+      "pendingInventory": 0,
+      "restSeconds": 60,
+      "runtime": {
+        "freeBytes": 483866980352,
+        "lastBatchAt": 1790701120,
+        "lastBatchCount": 0,
+        "lastError": null,
+        "nextBatchAt": 253402300799
+      },
+      "spec": "thumbnail-heic-512-q50-v1",
+      "totalAssets": 4
+    },
+    "containers": {
+      "api": "keeps-worker-smoke-20260929-125840-ef5da9",
+      "worker": "keeps-worker-smoke-20260929-125840-ef5da9-worker"
+    },
+    "elapsedSeconds": 53.04
+  },
+  "rawFourConcurrentBenchmark": {
+    "tasks": 4,
+    "elapsedSeconds": 37.61275025400005
+  },
+  "automatedTests": {
+    "rustLibrary": 75,
+    "http": 17,
+    "cli": 1,
+    "pythonWorker": 4,
+    "clippy": "PASS"
+  },
+  "deployment": {
+    "status": "PASS",
+    "startedAt": 1790701461.3049405,
+    "oldImage": "sha256:0c622b9f94248b5137e64a2e35bb35993be3e2d58237690df1247922b3646079",
+    "newImage": "sha256:d4be507c65f18c6c5eebb6cf10779ac0d015851c5badd8d984581a24417a75a8",
+    "before": {
+      "batchLimit": 20,
+      "concurrency": 1,
+      "counts": {
+        "failed": 0,
+        "pending": 90035,
+        "processing": 1,
+        "ready": 37
+      },
+      "eligibleAssets": 90073,
+      "enabled": true,
+      "encoderThreads": 1,
+      "errors": [],
+      "gc": {
+        "batchLimit": 20,
+        "enabled": true,
+        "errors": [],
+        "failed": 0,
+        "graceSeconds": 1200,
+        "nextEligibleAt": 1790701981,
+        "pending": 5
+      },
+      "lastSuccessAt": 1790701432,
+      "maxAttempts": 4,
+      "pendingInventory": 0,
+      "restSeconds": 60,
+      "runtime": {
+        "freeBytes": 35038227488768,
+        "lastBatchAt": 1790701339,
+        "lastBatchCount": 2,
+        "lastError": null,
+        "nextBatchAt": 1790701399
+      },
+      "spec": "thumbnail-heic-512-q50-v1",
+      "totalAssets": 90073
+    },
+    "assetCountBefore": 90073,
+    "after": {
+      "batchLimit": 20,
+      "concurrency": 1,
+      "counts": {
+        "failed": 0,
+        "pending": 90035,
+        "processing": 0,
+        "ready": 38
+      },
+      "eligibleAssets": 90073,
+      "enabled": true,
+      "encoderThreads": 1,
+      "errors": [],
+      "gc": {
+        "batchLimit": 20,
+        "enabled": true,
+        "errors": [],
+        "failed": 0,
+        "graceSeconds": 1200,
+        "nextEligibleAt": 1790701981,
+        "pending": 5
+      },
+      "lastSuccessAt": 1790701669,
+      "maxAttempts": 4,
+      "pendingInventory": 0,
+      "restSeconds": 60,
+      "runtime": {
+        "freeBytes": 35038227488768,
+        "lastBatchAt": 1790701670,
+        "lastBatchCount": 4,
+        "lastError": null,
+        "nextBatchAt": 253402300799
+      },
+      "spec": "thumbnail-heic-512-q50-v1",
+      "totalAssets": 90073
+    },
+    "finishedAt": 1790701745.9896545,
+    "schema": 8,
+    "localWorkerResumed": true
+  },
+  "productionVerification": {
+    "observedAt": 1790701827.1710837,
+    "schema": 8,
+    "remoteStates": [
+      [
+        0,
+        3
+      ],
+      [
+        1,
+        20
+      ]
+    ],
+    "workers": [
+      [
+        "linux-0",
+        6
+      ],
+      [
+        "linux-1",
+        6
+      ],
+      [
+        "linux-2",
+        5
+      ],
+      [
+        "linux-3",
+        6
+      ]
+    ],
+    "checks": [
+      {
+        "asset": "004393bf-1ce2-408b-84bc-d635c0d73bc7",
+        "thumbnailHashValid": true,
+        "originalHashUnchanged": true
+      },
+      {
+        "asset": "0041cbe5-1ae4-4bea-97cd-867b1e2c663a",
+        "thumbnailHashValid": true,
+        "originalHashUnchanged": true
+      },
+      {
+        "asset": "004183cf-9c40-4518-a146-e43b39df2415",
+        "thumbnailHashValid": true,
+        "originalHashUnchanged": true
+      }
+    ],
+    "status": "PASS"
+  },
+  "linuxWorker": {
+    "observedAt": 1790701862.9883847,
+    "status": "running",
+    "restartCount": 0,
+    "oomKilled": false,
+    "nanoCpus": 8000000000,
+    "memory": 12884901888,
+    "portBindings": {},
+    "mounts": [
+      {
+        "source": "/home/hechuan/keeps-worker/work",
+        "destination": "/work",
+        "rw": true
+      },
+      {
+        "source": "/home/hechuan/keeps-worker/secrets/keeps_token",
+        "destination": "/run/secrets/keeps_token",
+        "rw": false
+      }
+    ],
+    "usage": {
+      "BlockIO": "0B / 967kB",
+      "CPUPerc": "0.28%",
+      "Container": "keeps-worker-worker-1",
+      "ID": "9686a3a83f04",
+      "MemPerc": "0.16%",
+      "MemUsage": "19.99MiB / 12GiB",
+      "Name": "keeps-worker-worker-1",
+      "NetIO": "438MB / 2.44MB",
+      "PIDs": "8"
+    }
+  },
+  "nasStatus": {
+    "observedAtUTC": "2026-09-29T17:09:57Z",
+    "container": {
+      "image": "sha256:d4be507c65f18c6c5eebb6cf10779ac0d015851c5badd8d984581a24417a75a8",
+      "status": "running",
+      "health": "healthy",
+      "restartCount": 0,
+      "oomKilled": false,
+      "cpuSet": "3",
+      "memoryLimitBytes": 2147483648
+    },
+    "disk": {
+      "freeBytes": 35036324847616,
+      "totalBytes": 69077505212416
+    },
+    "cache": {
+      "batchLimit": 20,
+      "concurrency": 1,
+      "counts": {
+        "failed": 0,
+        "pending": 90020,
+        "processing": 4,
+        "ready": 49
+      },
+      "eligibleAssets": 90073,
+      "enabled": true,
+      "encoderThreads": 1,
+      "errors": [],
+      "gc": {
+        "batchLimit": 20,
+        "enabled": true,
+        "errors": [],
+        "failed": 0,
+        "graceSeconds": 1200,
+        "nextEligibleAt": 1790701981,
+        "pending": 16
+      },
+      "lastSuccessAt": 1790701796,
+      "maxAttempts": 4,
+      "pendingInventory": 0,
+      "restSeconds": 60,
+      "runtime": {
+        "freeBytes": 35036439887872,
+        "lastBatchAt": 1790701670,
+        "lastBatchCount": 4,
+        "lastError": null,
+        "nextBatchAt": 0
+      },
+      "spec": "thumbnail-heic-512-q50-v1",
+      "totalAssets": 90073
+    },
+    "resourceUsage": {
+      "BlockIO": "0B / 0B",
+      "CPUPerc": "100.19%",
+      "Container": "keeps-control-plane",
+      "ID": "5a9b25adf279",
+      "MemPerc": "45.24%",
+      "MemUsage": "926.6MiB / 2GiB",
+      "Name": "keeps-control-plane",
+      "NetIO": "579kB / 128MB",
+      "PIDs": "0"
+    },
+    "nasLoadAverage": [
+      4.814453125,
+      4.7490234375,
+      4.67041015625
+    ]
+  },
+  "status": "PASS",
+  "monitorAutomation": "PAUSED",
+  "autonomyVerification": {
+    "observedAtUTC": "2026-09-29T17:13:20Z",
+    "linuxDockerEnabled": true,
+    "linuxDockerActive": true,
+    "linuxRestartPolicy": "unless-stopped",
+    "nasRestartPolicy": "unless-stopped",
+    "nasResolvedInsideWorker": "192.168.0.50",
+    "remoteCompleted": 83,
+    "cacheReady": 122,
+    "failed": 0,
+    "macRuntimeDependency": false,
+    "interactiveLinuxSessionClosed": true
+  }
+}

@@ -126,6 +126,28 @@ class MergeTests(unittest.TestCase):
         roots = merge.walk_roots([['ancestor', 'library', str(self.root)], ['inactive', 'other', str(inactive)]], [self.photos])
         self.assertEqual(roots, [('library', self.photos)])
 
+    def test_schema5_plan_and_apply_preserve_existing_merge_behavior(self):
+        self.check_revision_schema_plan_and_apply(5)
+
+    def test_schema4_plan_and_apply_preserve_existing_merge_behavior(self):
+        self.check_revision_schema_plan_and_apply(4)
+
+    def check_revision_schema_plan_and_apply(self, version):
+        # Schema 4 adds revision tracking without changing the tables used by merging.
+        with database(self.catalog) as db:
+            db.execute(f'PRAGMA user_version={version}')
+        paths = [self.photo('a.jpg', 'a'), self.photo('b.jpg', 'b')]
+        before = self.dump()
+        report = self.make_plan()
+        self.assertEqual(before, self.dump())
+        self.assertEqual(len(self.groups(report)), 1)
+        self.assertEqual(self.apply()['merged_assets'], 1)
+        with database(self.catalog) as db:
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], version)
+            self.assertEqual(db.execute('SELECT count(*) FROM catalog_assets').fetchone()[0], 1)
+            self.assertEqual({row[0] for row in db.execute('SELECT path FROM catalog_paths')}, set(map(str, paths)))
+        self.assertTrue(all(path.read_bytes() == b'same' for path in paths))
+
     def test_parent_child_same_prefix_are_separate(self):
         for directory in ['', 'child', 'child-extra']:
             for i in range(2):

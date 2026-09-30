@@ -1,0 +1,370 @@
+{
+  "deployment": {
+    "status": "PASS",
+    "observedAtUTC": "2026-09-29T22:11:24Z",
+    "image": "sha256:f01b492cfab03d7d8e6780e8bb89f97605417d39041cc0b009dd841369155c01",
+    "migrated": 3033,
+    "maintenanceStoppedAtUTC": "2026-09-29T21:17:12.247835684Z",
+    "countsUnchanged": {
+      "catalog_assets": 90491,
+      "catalog_paths": 112773,
+      "catalog_versions": 6786,
+      "catalog_files": 211147,
+      "media_cache": 90491
+    },
+    "thumbnailsAndReadyStateUnchanged": true,
+    "quickCheck": "ok",
+    "cpuset": "2-3",
+    "memoryLimitBytes": 2147483648,
+    "cache": {
+      "batchLimit": 20,
+      "concurrency": 1,
+      "counts": {
+        "failed": 0,
+        "pending": 84985,
+        "processing": 0,
+        "ready": 5506
+      },
+      "eligibleAssets": 90491,
+      "enabled": true,
+      "encoderThreads": 1,
+      "errors": [
+        {
+          "assetID": "0f96059e-c7ea-46ee-a767-069f0617b673",
+          "attempts": 1,
+          "error": "No such file or directory (os error 2)",
+          "retryAt": 1790716162
+        }
+      ],
+      "gc": {
+        "batchLimit": 20,
+        "enabled": true,
+        "errors": [],
+        "failed": 0,
+        "graceSeconds": 1200,
+        "nextEligibleAt": 1790716743,
+        "pending": 215
+      },
+      "lastSuccessAt": 1790716412,
+      "localEncodingEnabled": false,
+      "maxAttempts": 4,
+      "pendingInventory": 0,
+      "restSeconds": 60,
+      "runtime": {
+        "freeBytes": 34866757640192,
+        "lastBatchAt": 1790719856,
+        "lastBatchCount": 0,
+        "lastError": null,
+        "nextBatchAt": 1790719916
+      },
+      "spec": "thumbnail-heic-512-q50-v1",
+      "totalAssets": 90491
+    }
+  },
+  "worker-deployment": {
+    "status": "PASS",
+    "utc": "2026-09-29T22:11:50Z",
+    "image": "sha256:efc56151ab267b25cc5554b4056fc6f79f1e5dd9b7e5e65242fc924e49df59e7",
+    "concurrency": 16,
+    "cpu": 16,
+    "memoryBytes": 25769803776,
+    "addressSpaceBytes": "4294967296",
+    "restartCount": 0,
+    "oomKilled": false
+  },
+  "sample-verification": {
+    "status": "PASS",
+    "utc": "2026-09-29T22:10:19Z",
+    "samples": [
+      {
+        "filename": "DSC03248.heic",
+        "asset": "0660d625-de49-4711-b78d-5955dd8e7d52",
+        "standardHash": "PASS",
+        "rawHashUnchanged": "PASS",
+        "Software": "Keeps",
+        "CreatorTool": "Keeps"
+      },
+      {
+        "filename": "DSC06985.heic",
+        "asset": "0e2fbb7a-39b3-4c36-b8ec-56511a104a90",
+        "standardHash": "PASS",
+        "rawHashUnchanged": "PASS",
+        "Software": "Keeps",
+        "CreatorTool": "Keeps"
+      },
+      {
+        "filename": "DSC05481.heic",
+        "asset": "007df891-9e6e-41e4-8d75-7af66db1db55",
+        "standardHash": "PASS",
+        "rawHashUnchanged": "PASS",
+        "Software": "Keeps",
+        "CreatorTool": "Keeps"
+      }
+    ]
+  },
+  "fresh-task-verification": {
+    "status": "PASS",
+    "utc": "2026-09-29T22:13:28Z",
+    "freshGeneratedCount": 16,
+    "samples": [
+      {
+        "filename": "DSC00295.heic",
+        "asset": "1004fc15-4060-4243-9a13-625822f0358a",
+        "hash": "PASS",
+        "metadata": "PASS"
+      },
+      {
+        "filename": "DSC05319.heic",
+        "asset": "100eaf5b-50f3-49f9-a905-1926d470bf98",
+        "hash": "PASS",
+        "metadata": "PASS"
+      },
+      {
+        "filename": "DSC01337.heic",
+        "asset": "1001a14b-b6fc-4365-9915-3b2d49bb5b61",
+        "hash": "PASS",
+        "metadata": "PASS"
+      }
+    ]
+  },
+  "linux-smoke": {
+    "status": "PASS",
+    "checks": [
+      {
+        "test": "health_and_auth",
+        "status": "PASS"
+      },
+      {
+        "test": "schema8_no_ledger_and_raw_same_asset_standard",
+        "status": "PASS"
+      },
+      {
+        "test": "all_four_remote_tasks_and_duplicate_complete",
+        "status": "PASS"
+      },
+      {
+        "test": "signed_download_hashes_jpeg_heif_reuse_3fr_thumbnail_only",
+        "status": "PASS"
+      },
+      {
+        "test": "rescan_stable_original_hashes_and_resource_limits",
+        "status": "PASS"
+      }
+    ],
+    "fixtureRoot": "/home/hechuan/keeps-worker/releases/standard-names-20260929/smoke/20260929-171437-58d392",
+    "samples": {
+      "raw": {
+        "source": "/home/hechuan/keeps-worker/releases/worker-20260929/fixtures/raw/DSC06294.ARW",
+        "fixture": "/home/hechuan/keeps-worker/releases/standard-names-20260929/smoke/20260929-171437-58d392/originals/raw/DSC06294.ARW",
+        "container": "/originals/raw/DSC06294.ARW",
+        "hash": "92b796166c914d5bc402c252047b8125d8c025edc823cbaadd0ccfead9f615a7"
+      },
+      "jpeg": {
+        "source": "/home/hechuan/keeps-worker/releases/worker-20260929/fixtures/jpeg/DSC05392.jpg",
+        "fixture": "/home/hechuan/keeps-worker/releases/standard-names-20260929/smoke/20260929-171437-58d392/originals/jpeg/DSC05392.jpg",
+        "container": "/originals/jpeg/DSC05392.jpg",
+        "hash": "0337223e6a436a4110386d8f152f7e3ba2b3a18553dbedf1b7ff63da04becdf8"
+      },
+      "heif": {
+        "source": "/home/hechuan/keeps-worker/releases/worker-20260929/fixtures/heif/IMG_4438.HEIC",
+        "fixture": "/home/hechuan/keeps-worker/releases/standard-names-20260929/smoke/20260929-171437-58d392/originals/heif/IMG_4438.HEIC",
+        "container": "/originals/heif/IMG_4438.HEIC",
+        "hash": "8ae8af893b00f888a3b175a9f7422332d64bcfd35c2ce393bde9a277dc4ed045"
+      },
+      "3fr": {
+        "source": "/home/hechuan/keeps-worker/releases/worker-20260929/fixtures/3fr/B0002737.3FR",
+        "fixture": "/home/hechuan/keeps-worker/releases/standard-names-20260929/smoke/20260929-171437-58d392/originals/3fr/B0002737.3FR",
+        "container": "/originals/3fr/B0002737.3FR",
+        "hash": "ea12bf5e726dbff5876a4eb7549392b1748f72349287c203ccf004ab4a92674e"
+      }
+    },
+    "lastCacheStatus": {
+      "batchLimit": 20,
+      "concurrency": 1,
+      "counts": {
+        "failed": 0,
+        "pending": 0,
+        "processing": 0,
+        "ready": 4
+      },
+      "eligibleAssets": 4,
+      "enabled": true,
+      "encoderThreads": 1,
+      "errors": [],
+      "gc": {
+        "batchLimit": 20,
+        "enabled": false,
+        "errors": [],
+        "failed": 0,
+        "graceSeconds": 1200,
+        "nextEligibleAt": null,
+        "pending": 0
+      },
+      "lastSuccessAt": 1790716526,
+      "localEncodingEnabled": false,
+      "maxAttempts": 4,
+      "pendingInventory": 0,
+      "restSeconds": 60,
+      "runtime": {
+        "freeBytes": 480328577024,
+        "lastBatchAt": 1790716477,
+        "lastBatchCount": 0,
+        "lastError": null,
+        "nextBatchAt": 1790716537
+      },
+      "spec": "thumbnail-heic-512-q50-v1",
+      "totalAssets": 4
+    },
+    "containers": {
+      "api": "keeps-worker-smoke-20260929-171437-58d392",
+      "worker": "keeps-worker-smoke-20260929-171437-58d392-worker"
+    },
+    "elapsedSeconds": 53.1
+  },
+  "migration-smoke": {
+    "downloadHashes": "PASS",
+    "assets": 4,
+    "scanJob": {
+      "currentPath": null,
+      "error": null,
+      "failed": 0,
+      "finishedAt": null,
+      "folderID": "637ff027-a170-4c0c-be23-af348f6b93e6",
+      "id": "abacc673-ea05-4f34-b224-6f4f76628e91",
+      "libraryID": "smoke",
+      "path": "/originals",
+      "processed": 0,
+      "refreshMetadata": false,
+      "skipped": 0,
+      "startedAt": null,
+      "status": "pending",
+      "waitForQuiet": false
+    },
+    "finalCacheCounts": {
+      "ready": 4
+    },
+    "finalJobCounts": {
+      "completed": 10
+    },
+    "status": "PASS"
+  },
+  "nas-live": {
+    "observedAtUTC": "2026-09-29T22:14:00Z",
+    "container": {
+      "image": "sha256:f01b492cfab03d7d8e6780e8bb89f97605417d39041cc0b009dd841369155c01",
+      "status": "running",
+      "health": "healthy",
+      "restartCount": 0,
+      "oomKilled": false,
+      "cpuSet": "2-3",
+      "memoryLimitBytes": 2147483648
+    },
+    "disk": {
+      "freeBytes": 34866494541824,
+      "totalBytes": 69077505212416
+    },
+    "cache": {
+      "batchLimit": 20,
+      "concurrency": 1,
+      "counts": {
+        "failed": 0,
+        "pending": 84916,
+        "processing": 16,
+        "ready": 5559
+      },
+      "eligibleAssets": 90491,
+      "enabled": true,
+      "encoderThreads": 1,
+      "errors": [
+        {
+          "assetID": "0f96059e-c7ea-46ee-a767-069f0617b673",
+          "attempts": 1,
+          "error": "No such file or directory (os error 2)",
+          "retryAt": 1790716162
+        }
+      ],
+      "gc": {
+        "batchLimit": 20,
+        "enabled": true,
+        "errors": [],
+        "failed": 0,
+        "graceSeconds": 1200,
+        "nextEligibleAt": 1790716920,
+        "pending": 203
+      },
+      "lastSuccessAt": 1790720039,
+      "localEncodingEnabled": false,
+      "maxAttempts": 4,
+      "pendingInventory": 0,
+      "restSeconds": 60,
+      "runtime": {
+        "freeBytes": 34866589011968,
+        "lastBatchAt": 1790719996,
+        "lastBatchCount": 0,
+        "lastError": null,
+        "nextBatchAt": 1790720056
+      },
+      "spec": "thumbnail-heic-512-q50-v1",
+      "totalAssets": 90491
+    },
+    "resourceUsage": {
+      "BlockIO": "0B / 0B",
+      "CPUPerc": "186.31%",
+      "Container": "keeps-control-plane",
+      "ID": "726058edbf95",
+      "MemPerc": "50.45%",
+      "MemUsage": "1.009GiB / 2GiB",
+      "Name": "keeps-control-plane",
+      "NetIO": "449MB / 1.83GB",
+      "PIDs": "0"
+    },
+    "nasLoadAverage": [
+      2.298828125,
+      2.28173828125,
+      2.6533203125
+    ]
+  },
+  "linux-live": {
+    "observedAtUTC": "2026-09-29T22:13:24.034916+00:00",
+    "image": "sha256:efc56151ab267b25cc5554b4056fc6f79f1e5dd9b7e5e65242fc924e49df59e7",
+    "status": "running",
+    "restartCount": 0,
+    "oomKilled": false,
+    "cpuLimit": 16,
+    "memoryLimit": 25769803776,
+    "concurrency": "16",
+    "addressSpace": "4294967296",
+    "scratchBudget": "137438953472",
+    "resourceUsage": {
+      "BlockIO": "0B / 5.99GB",
+      "CPUPerc": "1598.16%",
+      "Container": "keeps-worker-worker-1",
+      "ID": "a9431b477bf1",
+      "MemPerc": "43.95%",
+      "MemUsage": "10.55GiB / 24GiB",
+      "Name": "keeps-worker-worker-1",
+      "NetIO": "1.48GB / 265MB",
+      "PIDs": "177"
+    },
+    "memoryEvents": {
+      "low": "0",
+      "high": "0",
+      "max": "0",
+      "oom": "0",
+      "oom_kill": "0",
+      "oom_group_kill": "0"
+    },
+    "diskFree": 477325733888,
+    "completedSinceRestart": 38,
+    "lastCompleted": "2026-09-29 22:13:16,987 INFO Completed task 7f7fbeb0-3be9-4746-b087-9c2e60f8498f elapsedSeconds=3.13 sourceBytes=8116603 outputBytes=16621",
+    "errorsSinceRestart": 0,
+    "errorExcerpt": []
+  },
+  "backfillSummary": {
+    "status": "complete",
+    "migrated": 3033,
+    "numberedNames": 0,
+    "generatedBytes": 51294335433,
+    "backupsRetained": true
+  }
+}

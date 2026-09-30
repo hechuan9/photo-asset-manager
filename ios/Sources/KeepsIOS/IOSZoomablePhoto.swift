@@ -33,7 +33,7 @@ final class PhotoZoomController: UIViewController, UIScrollViewDelegate, UIGestu
         self.configuration = configuration
         self.toggleControls = toggleControls
         self.close = close
-        host = UIHostingController(rootView: IOSPreviewImage(asset: asset, configuration: configuration))
+        host = UIHostingController(rootView: IOSPreviewImage(asset: asset, configuration: configuration, loadStandard: true))
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -80,7 +80,7 @@ final class PhotoZoomController: UIViewController, UIScrollViewDelegate, UIGestu
         guard self.asset != asset || self.configuration != configuration else { return }
         self.asset = asset
         self.configuration = configuration
-        host.rootView = IOSPreviewImage(asset: asset, configuration: configuration)
+        host.rootView = IOSPreviewImage(asset: asset, configuration: configuration, loadStandard: true)
     }
 
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { host.view }

@@ -15,7 +15,7 @@ struct IOSWaterfallGallery: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let ratios = library.assets.map { JustifiedAssetGridLayout.aspectRatio($0.preview) }
+            let ratios = library.assets.map { JustifiedAssetGridLayout.aspectRatio($0.gridPreview) }
             let rows = KeepsPhotoGrid.rows(aspectRatios: ratios, width: geometry.size.width, density: density)
             ScrollViewReader { proxy in
             ScrollView {
@@ -42,11 +42,7 @@ struct IOSWaterfallGallery: View {
             .contentMargins(.bottom, 0, for: .scrollContent)
             .defaultScrollAnchor(.bottom)
             .defaultScrollAnchor(.top, for: .alignment)
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 40
-            } action: { _, atBottom in
-                if hasScrolled { library.followsLatest = atBottom }
-            }
+            .bottomPullRefresh(bottomInset: 90) { await library.refreshFromBottom() }
             .simultaneousGesture(MagnifyGesture().onEnded { value in
                 let next = density.pinched(magnification: value.magnification)
                 if next != density { density = next }
@@ -146,7 +142,8 @@ struct IOSPreviewImage: View {
     let asset: KeepsAsset
     let configuration: KeepsConfiguration?
     var contentMode: ContentMode = .fit
-    var body: some View { KeepsPreviewImage(asset: asset, configuration: configuration, contentMode: contentMode) }
+    var loadStandard = false
+    var body: some View { KeepsPreviewImage(asset: asset, configuration: configuration, contentMode: contentMode, loadStandard: loadStandard) }
 }
 
 struct IOSPhotoViewer: View {
@@ -201,7 +198,7 @@ struct IOSPhotoViewer: View {
                                 ForEach(photos) { asset in
                                     Button { selection = asset.id } label: {
                                         IOSPreviewImage(asset: asset, configuration: library.configuration)
-                                            .frame(width: 48 * JustifiedAssetGridLayout.aspectRatio(asset.preview), height: 48)
+                                            .frame(width: 48 * JustifiedAssetGridLayout.aspectRatio(asset.gridPreview), height: 48)
                                             .overlay { if selection == asset.id { Rectangle().stroke(.white, lineWidth: 2) } }
                                     }.buttonStyle(.plain).id(asset.id)
                                         .accessibilityLabel(asset.originalFilename)

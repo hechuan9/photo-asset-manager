@@ -13,7 +13,7 @@ fn inspection_is_streaming_read_only_and_independent_of_catalog() {
     let exiftool = root.join("exiftool");
     std::fs::write(
         &exiftool,
-        "#!/bin/sh\nprintf '%s\\n' '[{\"PNG:ImageWidth\":2,\"PNG:ImageHeight\":3}]'\n",
+        "#!/bin/sh\nprintf '%s\\n' '[{\"EXIF:DateTimeOriginal\":\"0000:00:00 00:00:00\",\"PNG:ImageWidth\":2,\"PNG:ImageHeight\":3}]'\n",
     )
     .unwrap();
     std::fs::set_permissions(&exiftool, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -76,6 +76,13 @@ fn inspection_is_streaming_read_only_and_independent_of_catalog() {
     assert_eq!(
         result["sha256"],
         keeps_server::media::sha256_file(&photo).unwrap()
+    );
+    assert_eq!(
+        result["capture"]["captureTime"],
+        chrono::DateTime::<chrono::Utc>::from(
+            std::fs::metadata(&photo).unwrap().modified().unwrap()
+        )
+        .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
     );
     assert_eq!(result["width"], 2);
     assert_eq!(result["height"], 3);
