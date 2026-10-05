@@ -7,6 +7,18 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
+fn missing_paths_query(scope: &str) -> Result<String> {
+    let predicate = match scope {
+        "file" => "p.path=?2",
+        "directory" => "p.path>=?2 AND p.path<?3 AND instr(substr(p.path,length(?2)+1),'/')=0",
+        "recursive" => "p.path>=?2 AND p.path<?3",
+        _ => anyhow::bail!("invalid missing reconciliation scope"),
+    };
+    Ok(format!(
+        "SELECT p.asset_id,p.path,p.content_hash,f.size,p.role FROM catalog_paths p JOIN catalog_files f ON f.library_id=p.library_id AND f.asset_id=p.asset_id AND f.content_hash=p.content_hash AND f.role=p.role WHERE p.library_id=?1 AND f.holder='keeps-nas' AND {predicate}"
+    ))
+}
+
 const VERSION: i64 = 9;
 const DIRECTORY_ASSET_SET: &str =
     " AND a.id IN (SELECT f.asset_id FROM catalog_paths f WHERE f.library_id=? AND ";
@@ -900,26 +912,40 @@ impl Store {
         directory: &str,
         batch_id: Option<&str>,
     ) -> Result<usize> {
+        self.mark_missing_scope_with_revision(lib, directory, "recursive", batch_id)
+    }
+    pub(crate) fn mark_missing_scope_with_revision(
+        &self,
+        lib: &str,
+        directory: &str,
+        scope: &str,
+        batch_id: Option<&str>,
+    ) -> Result<usize> {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let files = {
-            let mut statement=tx.prepare("SELECT p.asset_id,p.path,p.content_hash,f.size,p.role FROM catalog_paths p JOIN catalog_files f ON f.library_id=p.library_id AND f.asset_id=p.asset_id AND f.content_hash=p.content_hash AND f.role=p.role WHERE p.library_id=? AND f.holder='keeps-nas' AND p.path LIKE ? ESCAPE '\\'")?;
+            let query = missing_paths_query(scope)?;
+            let mut statement = tx.prepare(&query)?;
+            let directory = directory.trim_end_matches('/');
+            let bindings = if scope == "file" {
+                vec![lib.to_owned(), directory.to_owned()]
+            } else {
+                vec![
+                    lib.to_owned(),
+                    format!("{directory}/"),
+                    format!("{directory}0"),
+                ]
+            };
             statement
-                .query_map(
-                    params![
-                        lib,
-                        format!("{}/%", escape_like(directory.trim_end_matches('/')))
-                    ],
-                    |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                            r.get::<_, i64>(3)?,
-                            r.get::<_, String>(4)?,
-                        ))
-                    },
-                )?
+                .query_map(rusqlite::params_from_iter(bindings), |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let mut missing = 0;
@@ -954,6 +980,52 @@ mod tests {
     fn snapshot() -> Value {
         json!({"assetID":Uuid::new_v4(),"captureTime":"2024-01-01T00:00:00Z","cameraMake":"Canon","cameraModel":"R3","lensModel":"50mm","originalFilename":"photo.jpg","contentFingerprint":"photo-hash","metadataFingerprint":"2024|Canon|R3|photo","rating":1,"flagState":"unflagged","tags":[],"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z"})
     }
+    #[test]
+    fn missing_reconciliation_respects_file_and_shallow_directory_scope() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("db"), true)?;
+        let paths = [
+            dir.path().join("first.jpg"),
+            dir.path().join("second.jpg"),
+            dir.path().join("child/nested.jpg"),
+        ];
+        for (index, path) in paths.iter().enumerate() {
+            let hash = format!("hash-{index}");
+            let file = json!({"contentHash":hash,"sizeBytes":5,"role":"jpeg_original"});
+            let mut snap = snapshot();
+            snap["contentFingerprint"] = json!(hash);
+            store.ingest_original("lib", path.to_str().unwrap(), &file, &snap)?;
+        }
+        assert_eq!(
+            store.mark_missing_scope_with_revision(
+                "lib",
+                paths[0].to_str().unwrap(),
+                "file",
+                None
+            )?,
+            1
+        );
+        assert_eq!(
+            store.mark_missing_scope_with_revision(
+                "lib",
+                dir.path().to_str().unwrap(),
+                "directory",
+                None
+            )?,
+            1
+        );
+        assert_eq!(
+            store.mark_missing_scope_with_revision(
+                "lib",
+                dir.path().to_str().unwrap(),
+                "recursive",
+                None
+            )?,
+            1
+        );
+        Ok(())
+    }
+
     #[test]
     fn trusted_root_merges_unlocated_previous_asset_and_user_metadata() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -1415,6 +1487,43 @@ mod tests {
 #[cfg(test)]
 mod directory_plan_tests {
     use super::*;
+
+    #[test]
+    fn missing_scope_queries_use_exact_or_bounded_path_index() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let store = Store::open(&directory.path().join("catalog.sqlite"), true)?;
+        let db = store.lock()?;
+        for scope in ["file", "directory", "recursive"] {
+            let bindings = if scope == "file" {
+                vec!["lib", "/photo/one.jpg"]
+            } else {
+                vec!["lib", "/photo/", "/photo0"]
+            };
+            let mut query = db.prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                missing_paths_query(scope)?
+            ))?;
+            let plan = query
+                .query_map(rusqlite::params_from_iter(bindings), |row| {
+                    row.get::<_, String>(3)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let paths = plan
+                .iter()
+                .find(|step| step.contains("SEARCH p "))
+                .expect("catalog path index search");
+            assert!(paths.contains("library_id=?"), "{scope}: {plan:?}");
+            if scope == "file" {
+                assert!(paths.contains("path=?"), "{scope}: {plan:?}");
+            } else {
+                assert!(
+                    paths.contains("path>?") && paths.contains("path<?"),
+                    "{scope}: {plan:?}"
+                );
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn directory_asset_set_is_not_correlated_per_catalog_asset() -> Result<()> {

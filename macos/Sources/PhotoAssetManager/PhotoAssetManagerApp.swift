@@ -32,7 +32,20 @@ struct PhotoAssetManagerApp: App {
             }
         }
         Settings {
-            ServerSettingsView().environmentObject(library)
+            TabView {
+                ServerSettingsView()
+                    .tabItem { Label("服务器", systemImage: "server.rack") }
+                Group {
+                    if let client = library.client {
+                        NASSourceSettingsView(client: client).id(ObjectIdentifier(client))
+                    } else {
+                        Text("请先在服务器设置中验证并保存连接。")
+                            .padding(24)
+                    }
+                }
+                .tabItem { Label("来源", systemImage: "folder") }
+            }
+            .environmentObject(library)
         }
     }
 }

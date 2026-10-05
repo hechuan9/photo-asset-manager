@@ -7,10 +7,11 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -25,30 +26,16 @@ pub fn run(
     jobs: Arc<Jobs>,
     previews: Arc<PreviewStorage>,
     stop: Arc<AtomicBool>,
-    interval: Duration,
 ) -> Result<()> {
     MediaProcessor::new()
         .probe()
         .context("NAS media runtime unavailable")?;
-    let interval = interval.max(Duration::from_secs(1));
-    let mut next_scan = Instant::now();
     let mut next_cache = Instant::now();
     store.recover_cache()?;
     while !stop.load(Ordering::Relaxed) {
         if Instant::now() >= next_cache {
             crate::cache_pipeline::process_batch(&store, &jobs, &previews, &stop)?;
             next_cache = Instant::now() + Duration::from_secs(crate::cache_pipeline::REST_SECONDS);
-        }
-        if Instant::now() >= next_scan {
-            for folder in jobs.folders()?.into_iter().filter(|folder| folder.active) {
-                // A concurrent stop-tracking request can legitimately win this race.
-                if let Err(error) = jobs.enqueue_external_scan(&folder.id)
-                    && jobs.is_active(&folder.id)?
-                {
-                    tracing::error!(folder_id = %folder.id, error = %format!("{error:#}"), "schedule tracked directory; will retry on next reconciliation");
-                }
-            }
-            next_scan = Instant::now() + interval;
         }
         if let Some(job) = jobs.claim_next()? {
             let result = run_one(&store, &jobs, &previews, &job, &stop);
@@ -105,84 +92,199 @@ pub fn run_one(
     if stopped(jobs, job, stop)? {
         return Ok(false);
     }
-    let root = jobs
-        .validate_path(Path::new(&job.path))
-        .context("validate tracked directory")?;
-    let mut directories = vec![root.clone()];
-    let mut progress = Progress::default();
-    let started = Instant::now();
-    while let Some(directory) = directories.pop() {
-        if stopped(jobs, job, stop)? {
-            return Ok(false);
+    let root = jobs.validate_scan_path(Path::new(&job.path), &job.scope_kind)?;
+    let mut progress = Progress {
+        processed: job.processed,
+        skipped: job.skipped,
+        failed: job.failed,
+        last_error: None,
+    };
+    if job.scope_kind == "file" {
+        match fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.is_file() => {
+                process_entry(store, jobs, previews, job, &root, stop, &mut progress)?
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect changed file"),
         }
-        jobs.validate_path(&directory)
-            .with_context(|| format!("validate scan directory {}", directory.display()))?;
-        store.record_directory(&job.library_id, &directory)?;
-        for entry in fs::read_dir(&directory)
-            .with_context(|| format!("read directory {}", directory.display()))?
-        {
+        publish(jobs, job, &progress, None)?;
+    } else {
+        let mut cursor: ScanCursor = match jobs.load_checkpoint(&job.id)? {
+            Some(value) => serde_json::from_str(&value).context("read scan checkpoint")?,
+            None => ScanCursor {
+                pending: vec![root.clone()],
+                current: None,
+                last_name: None,
+            },
+        };
+        let started = Instant::now();
+        loop {
             if stopped(jobs, job, stop)? {
                 return Ok(false);
             }
-            if jobs.should_yield(job)?
-                || (!job.path_sync
-                    && !job.refresh_metadata
-                    && started.elapsed() > Duration::from_secs(30)
-                    && jobs.has_pending_changes(&job.id)?)
-            {
-                jobs.yield_job(&job.id)?;
-                return Ok(false);
+            if cursor.current.is_none() {
+                cursor.current = cursor.pending.pop();
+                cursor.last_name = None;
+                save_cursor(jobs, job, &cursor, &progress)?;
             }
-            let entry = entry.with_context(|| format!("read entry in {}", directory.display()))?;
-            let name = entry.file_name();
-            if excluded(&name.to_string_lossy()) {
+            let Some(directory) = cursor.current.clone() else {
+                break;
+            };
+            if !directory.try_exists()? {
+                cursor.current = None;
+                save_cursor(jobs, job, &cursor, &progress)?;
                 continue;
             }
-            let kind = entry
-                .file_type()
-                .with_context(|| format!("read file type {}", entry.path().display()))?;
-            if kind.is_symlink() {
-                continue;
-            }
-            let path = entry.path();
-            if kind.is_dir() {
-                directories.push(path);
-                continue;
-            }
-            if !kind.is_file() || !(media::is_photo(&path) || media::is_video(&path)) {
-                continue;
-            }
-            let path_text = path.to_str().context("original path must be UTF-8")?;
-            publish(jobs, job, &progress, Some(path_text))?;
-            match process_file(store, jobs, previews, job, &path, stop) {
-                Ok(true) => progress.processed += 1,
-                Ok(false) => progress.skipped += 1,
-                Err(error) => {
-                    let trace = format!("processing {}: {error:#}", path.display());
-                    tracing::error!(job_id = %job.id, error = %trace, "NAS photo processing failed");
-                    progress.failed += 1;
-                    progress.last_error = Some(trace);
+            jobs.validate_scan_path(&directory, "directory")?;
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    cursor.current = None;
+                    save_cursor(jobs, job, &cursor, &progress)?;
+                    continue;
                 }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("read directory {}", directory.display()));
+                }
+            };
+            store.record_directory(&job.library_id, &directory)?;
+            let mut entries = entries.collect::<std::io::Result<Vec<_>>>()?;
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("original filename must be UTF-8"))?;
+                if cursor.last_name.as_ref().is_some_and(|last| name <= *last) {
+                    continue;
+                }
+                if stopped(jobs, job, stop)? {
+                    return Ok(false);
+                }
+                if jobs.should_yield(job)?
+                    || (!job.path_sync
+                        && !job.refresh_metadata
+                        && started.elapsed() > Duration::from_secs(30)
+                        && jobs.has_pending_changes(&job.id)?)
+                {
+                    jobs.yield_job(&job.id)?;
+                    return Ok(false);
+                }
+                if !excluded(&name) {
+                    let kind = match entry.file_type() {
+                        Ok(kind) => Some(kind),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(error) => {
+                            return Err(error)
+                                .with_context(|| format!("read entry {}", entry.path().display()));
+                        }
+                    };
+                    if kind.is_some_and(|kind| kind.is_dir()) && job.scope_kind == "recursive" {
+                        cursor.pending.push(entry.path());
+                    } else if kind.is_some_and(|kind| kind.is_file())
+                        && (media::is_photo(&entry.path()) || media::is_video(&entry.path()))
+                    {
+                        process_entry(
+                            store,
+                            jobs,
+                            previews,
+                            job,
+                            &entry.path(),
+                            stop,
+                            &mut progress,
+                        )?;
+                        if stopped(jobs, job, stop)? {
+                            return Ok(false);
+                        }
+                    }
+                }
+                cursor.last_name = Some(name);
+                save_cursor(jobs, job, &cursor, &progress)?;
             }
-            publish(jobs, job, &progress, None)?;
-            if (progress.processed + progress.skipped + progress.failed) % 20 == 0 {
-                crate::cache_pipeline::process_batch(store, jobs, previews, stop)?;
-            }
+            cursor.current = None;
+            save_cursor(jobs, job, &cursor, &progress)?;
         }
     }
     if stopped(jobs, job, stop)? {
         return Ok(false);
     }
-    store.mark_missing_under_with_revision(
+    store.mark_missing_scope_with_revision(
         &job.library_id,
-        root.to_str().context("original path must be UTF-8")?,
+        &job.path,
+        &job.scope_kind,
         Some(&job.id),
     )?;
     store.reconcile_cache()?;
-    if let Some(error) = progress.last_error {
-        bail!("{} files failed; latest failure: {error}", progress.failed);
+    if job.scope_kind == "file" && progress.failed > 0 {
+        bail!(
+            "{} files failed; latest failure: {}",
+            progress.failed,
+            progress
+                .last_error
+                .as_deref()
+                .unwrap_or("see earlier scan errors")
+        );
     }
     Ok(true)
+}
+
+#[derive(Serialize, Deserialize)]
+struct ScanCursor {
+    pending: Vec<PathBuf>,
+    current: Option<PathBuf>,
+    last_name: Option<String>,
+}
+
+fn save_cursor(jobs: &Jobs, job: &Job, cursor: &ScanCursor, progress: &Progress) -> Result<()> {
+    jobs.save_scan_progress(
+        &job.id,
+        &serde_json::to_string(cursor)?,
+        progress.processed,
+        progress.skipped,
+        progress.failed,
+    )
+}
+
+fn process_entry(
+    store: &Store,
+    jobs: &Jobs,
+    previews: &PreviewStorage,
+    job: &Job,
+    path: &Path,
+    stop: &AtomicBool,
+    progress: &mut Progress,
+) -> Result<()> {
+    publish(
+        jobs,
+        job,
+        progress,
+        Some(path.to_str().context("original path must be UTF-8")?),
+    )?;
+    let result = process_file(store, jobs, previews, job, path, stop);
+    if stopped(jobs, job, stop)? {
+        return Ok(());
+    }
+    match result {
+        Ok(true) => progress.processed += 1,
+        Ok(false) => progress.skipped += 1,
+        Err(_) if !path.try_exists()? => progress.skipped += 1,
+        Err(error) => {
+            let trace = format!("processing {}: {error:#}", path.display());
+            tracing::error!(job_id = %job.id, error = %trace, "NAS photo processing failed");
+            progress.failed += 1;
+            progress.last_error = Some(trace);
+            if job.scope_kind != "file" {
+                let queued = jobs.enqueue_file_change(&job.folder_id, path, 0)?;
+                store.note_revision_activity(&queued.library_id, &queued.id, &queued.path)?;
+            }
+        }
+    }
+    if (progress.processed + progress.skipped + progress.failed) % 20 == 0 {
+        crate::cache_pipeline::process_batch(store, jobs, previews, stop)?;
+    }
+    Ok(())
 }
 
 fn stopped(jobs: &Jobs, job: &Job, stop: &AtomicBool) -> Result<bool> {
@@ -248,7 +350,19 @@ fn process_file_with_identity(
         .map(|p| p.version.clone())
         .unwrap_or_default();
     if !backfill
-        && !job.refresh_metadata
+        && job.scope_kind != "file"
+        && let Some(previous) = &previous
+        && previous.size == size
+        && previous.mtime_ns == mtime
+        && previous.metadata_stamp == sidecars
+        && previous.error.is_some()
+    {
+        if let Some(queued) = jobs.ensure_file_retry(&job.folder_id, path)? {
+            store.note_revision_activity(&queued.library_id, &queued.id, &queued.path)?;
+        }
+        return Ok(false);
+    }
+    if !backfill
         && let Some(previous) = &previous
         && previous.size == size
         && previous.mtime_ns == mtime
@@ -262,11 +376,7 @@ fn process_file_with_identity(
     // Debouncing is normally handled by the event queue; reconciliation can also
     // discover a file during a copy, before the close/write notification arrives.
     if recently_modified(mtime) {
-        let queued = jobs.enqueue_change(
-            &job.folder_id,
-            path.parent().context("original has no parent")?,
-            2,
-        )?;
+        let queued = jobs.enqueue_file_change(&job.folder_id, path, 2)?;
         store.note_revision_activity(&queued.library_id, &queued.id, &queued.path)?;
         return Ok(false);
     }
@@ -325,7 +435,11 @@ fn process_file_with_identity(
             identity_checked = true;
             return Ok(true);
         }
-        if previous.is_some() && !backfill {
+        if previous
+            .as_ref()
+            .is_some_and(|previous| previous.error.is_none())
+            && !backfill
+        {
             jobs.identity_pending(&job.folder_id, text)?;
             return Ok(true);
         }
@@ -348,6 +462,9 @@ fn process_file_with_identity(
         identity_checked = true;
         Ok(true)
     })();
+    if stopped(jobs, job, stop)? {
+        return Ok(false);
+    }
     match &result {
         Ok(true) => {
             jobs.record_file(&job.folder_id, text, size, mtime, &asset_id, &hash, None)?;
@@ -356,15 +473,18 @@ fn process_file_with_identity(
                 jobs.identity_result(&job.folder_id, text, None)?;
             }
         }
-        Err(error) => jobs.record_file(
-            &job.folder_id,
-            text,
-            size,
-            mtime,
-            &asset_id,
-            &hash,
-            Some(&format!("{error:#}")),
-        )?,
+        Err(error) => {
+            jobs.record_file(
+                &job.folder_id,
+                text,
+                size,
+                mtime,
+                &asset_id,
+                &hash,
+                Some(&format!("{error:#}")),
+            )?;
+            jobs.record_metadata_stamp(&job.folder_id, text, &sidecars)?;
+        }
         Ok(false) => {}
     }
     result
@@ -387,6 +507,7 @@ pub fn process_identity_batch(
         }
         let job = Job {
             id: "identity-backfill".into(),
+            scope_kind: "file".into(),
             folder_id: folder.id.clone(),
             library_id: folder.library_id,
             path: folder.path,
@@ -421,6 +542,183 @@ fn recently_modified(mtime_ns: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bad_file_retries_are_exact_and_do_not_restart_parent_scan() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let originals = directory.path().join("originals");
+        fs::create_dir(&originals)?;
+        let bad = originals.join("bad.jpg");
+        fs::write(&bad, b"")?;
+        fs::File::open(&bad)?
+            .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))?;
+        let store = Store::open(&directory.path().join("catalog.sqlite"), true)?;
+        let jobs_path = directory.path().join("jobs.sqlite");
+        let jobs = Jobs::open(&jobs_path, &originals)?;
+        let previews = PreviewStorage::new(
+            &directory.path().join("keeps"),
+            Some(&originals),
+            "http://localhost:2283",
+            "test-key",
+        )?;
+        let folder = jobs.add_folder("library", ".")?;
+        let parent = jobs.enqueue_external_scan(&folder.id)?;
+        let job = jobs.claim_next()?.unwrap();
+        assert!(run_one(
+            &store,
+            &jobs,
+            &previews,
+            &job,
+            &AtomicBool::new(false)
+        )?);
+        jobs.finish(&job.id, None)?;
+        let parent = jobs.job(&parent.id)?.unwrap();
+        assert_eq!(parent.status, "completed");
+        assert_eq!(parent.failed, 1);
+        let mut failed_id = None;
+        for _ in 0..4 {
+            rusqlite::Connection::open(&jobs_path)?
+                .execute("UPDATE jobs SET available_at=0 WHERE status='pending'", [])?;
+            let exact = jobs.claim_next()?.expect("failed file has a bounded retry");
+            assert_eq!(exact.scope_kind, "file");
+            assert_eq!(Path::new(&exact.path), bad.canonicalize()?);
+            let error =
+                run_one(&store, &jobs, &previews, &exact, &AtomicBool::new(false)).unwrap_err();
+            jobs.finish(&exact.id, Some(&format!("{error:#}")))?;
+            failed_id = Some(exact.id);
+        }
+        let exact = jobs.job(&failed_id.unwrap())?.unwrap();
+        assert_eq!(exact.status, "failed");
+        assert!(jobs.claim_next()?.is_none());
+        let error_before = jobs
+            .file_state(&folder.id, bad.canonicalize()?.to_str().unwrap())?
+            .unwrap()
+            .error;
+        jobs.enqueue_external_scan(&folder.id)?;
+        let next_parent = jobs.claim_next()?.unwrap();
+        assert!(run_one(
+            &store,
+            &jobs,
+            &previews,
+            &next_parent,
+            &AtomicBool::new(false)
+        )?);
+        jobs.finish(&next_parent.id, None)?;
+        let completed = jobs.job(&next_parent.id)?.unwrap();
+        assert_eq!((completed.skipped, completed.failed), (1, 0));
+        assert!(jobs.claim_next()?.is_none());
+        assert_eq!(
+            jobs.jobs(100)?
+                .iter()
+                .filter(|job| job.scope_kind == "file")
+                .count(),
+            1
+        );
+        assert_eq!(
+            jobs.file_state(&folder.id, bad.canonicalize()?.to_str().unwrap())?
+                .unwrap()
+                .error,
+            error_before
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn historical_unchanged_error_gets_one_exact_retry_without_parent_failure() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let originals = directory.path().join("originals");
+        fs::create_dir(&originals)?;
+        let bad = originals.join("interrupted.jpg");
+        fs::write(&bad, b"")?;
+        let bad = bad.canonicalize()?;
+        let store = Store::open(&directory.path().join("catalog.sqlite"), true)?;
+        let jobs = Jobs::open(&directory.path().join("jobs.sqlite"), &originals)?;
+        let previews = PreviewStorage::new(
+            &directory.path().join("keeps"),
+            Some(&originals),
+            "http://localhost:2283",
+            "test-key",
+        )?;
+        let folder = jobs.add_folder("library", ".")?;
+        let (size, mtime) = file_stamp(&bad)?;
+        jobs.record_file(
+            &folder.id,
+            bad.to_str().unwrap(),
+            size,
+            mtime,
+            "",
+            "",
+            Some("external tool interrupted by SIGTERM"),
+        )?;
+        jobs.record_metadata_stamp(
+            &folder.id,
+            bad.to_str().unwrap(),
+            &media::sidecar_stamp(&bad)?,
+        )?;
+        jobs.enqueue_external_scan(&folder.id)?;
+        let parent = jobs.claim_next()?.unwrap();
+        assert!(run_one(
+            &store,
+            &jobs,
+            &previews,
+            &parent,
+            &AtomicBool::new(false)
+        )?);
+        jobs.finish(&parent.id, None)?;
+        let complete = jobs.job(&parent.id)?.unwrap();
+        assert_eq!(
+            (complete.status.as_str(), complete.failed, complete.skipped),
+            ("completed", 0, 1)
+        );
+        let exact = jobs
+            .claim_next()?
+            .expect("historical error gets an exact retry");
+        assert_eq!(exact.scope_kind, "file");
+        assert_eq!(exact.path, bad.to_str().unwrap());
+        assert_eq!(
+            jobs.file_state(&folder.id, bad.to_str().unwrap())?
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("external tool interrupted by SIGTERM")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_media_failure_does_not_persist_file_error() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let originals = directory.path().join("originals");
+        fs::create_dir(&originals)?;
+        let bad = originals.join("bad.jpg");
+        fs::write(&bad, b"")?;
+        fs::File::open(&bad)?
+            .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))?;
+        let store = Store::open(&directory.path().join("catalog.sqlite"), true)?;
+        let jobs = Jobs::open(&directory.path().join("jobs.sqlite"), &originals)?;
+        let previews = PreviewStorage::new(
+            &directory.path().join("keeps"),
+            Some(&originals),
+            "http://localhost:2283",
+            "test-key",
+        )?;
+        let folder = jobs.add_folder("library", ".")?;
+        jobs.enqueue_external_scan(&folder.id)?;
+        let job = jobs.claim_next()?.unwrap();
+        assert!(!process_file(
+            &store,
+            &jobs,
+            &previews,
+            &job,
+            &bad.canonicalize()?,
+            &AtomicBool::new(true)
+        )?);
+        assert!(
+            jobs.file_state(&folder.id, bad.canonicalize()?.to_str().unwrap())?
+                .is_none()
+        );
+        Ok(())
+    }
 
     #[test]
     fn traversal_excludes_hidden_recycle_and_symlinks_without_touching_files() -> Result<()> {
@@ -496,7 +794,8 @@ mod tests {
         let claimed = jobs.claim_next()?.unwrap();
         drop(jobs);
         let jobs = Jobs::open(&jobs_path, &originals)?;
-        let recovered = jobs.claim_next()?.unwrap();
+        let mut recovered = jobs.claim_next()?.unwrap();
+        recovered.refresh_metadata = true;
         assert_eq!(recovered.id, claimed.id);
         run_one(
             &store,
@@ -511,6 +810,96 @@ mod tests {
             (0, 1, 0)
         );
         assert_eq!(media::sha256_file(&original)?, hash);
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_resumes_after_last_entry_and_preserves_progress() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let originals = directory.path().join("originals");
+        fs::create_dir(&originals)?;
+        fs::write(
+            originals.join("already.jpg"),
+            b"invalid media must never be parsed",
+        )?;
+        fs::write(originals.join("z.txt"), b"ignored")?;
+        let store = Store::open(&directory.path().join("catalog.sqlite"), true)?;
+        let jobs_path = directory.path().join("jobs.sqlite");
+        let jobs = Jobs::open(&jobs_path, &originals)?;
+        let previews = PreviewStorage::new(
+            &directory.path().join("keeps"),
+            Some(&originals),
+            "http://localhost:2283",
+            "test-key",
+        )?;
+        let folder = jobs.add_folder("library", ".")?;
+        jobs.enqueue_external_scan(&folder.id)?;
+        let job = jobs.claim_next()?.unwrap();
+        jobs.update_progress(&job.id, 7, 11, 0, None)?;
+        save_cursor(
+            &jobs,
+            &job,
+            &ScanCursor {
+                pending: vec![jobs.root().join("removed-directory")],
+                current: Some(jobs.root().to_path_buf()),
+                last_name: Some("already.jpg".into()),
+            },
+            &Progress {
+                processed: 7,
+                skipped: 11,
+                ..Progress::default()
+            },
+        )?;
+        drop(jobs);
+        let jobs = Jobs::open(&jobs_path, &originals)?;
+        let recovered = jobs.claim_next()?.unwrap();
+        assert!(run_one(
+            &store,
+            &jobs,
+            &previews,
+            &recovered,
+            &AtomicBool::new(false)
+        )?);
+        let finished = jobs.job(&job.id)?.unwrap();
+        assert_eq!(
+            (finished.processed, finished.skipped, finished.failed),
+            (7, 11, 0)
+        );
+        let cursor: ScanCursor = serde_json::from_str(&jobs.load_checkpoint(&job.id)?.unwrap())?;
+        assert!(cursor.current.is_none() && cursor.pending.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn missing_file_task_does_not_scan_siblings_or_descendants() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let originals = directory.path().join("originals");
+        fs::create_dir_all(originals.join("child"))?;
+        fs::write(originals.join("sibling.jpg"), b"invalid media")?;
+        fs::write(originals.join("child/nested.jpg"), b"invalid media")?;
+        let store = Store::open(&directory.path().join("catalog.sqlite"), true)?;
+        let jobs = Jobs::open(&directory.path().join("jobs.sqlite"), &originals)?;
+        let previews = PreviewStorage::new(
+            &directory.path().join("keeps"),
+            Some(&originals),
+            "http://localhost:2283",
+            "test-key",
+        )?;
+        let folder = jobs.add_folder("library", ".")?;
+        jobs.enqueue_file_change(&folder.id, &jobs.root().join("missing.jpg"), 0)?;
+        let job = jobs.claim_next()?.unwrap();
+        assert!(run_one(
+            &store,
+            &jobs,
+            &previews,
+            &job,
+            &AtomicBool::new(false)
+        )?);
+        let finished = jobs.job(&job.id)?.unwrap();
+        assert_eq!(
+            (finished.processed, finished.skipped, finished.failed),
+            (0, 0, 0)
+        );
         Ok(())
     }
 

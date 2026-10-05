@@ -9,6 +9,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Path, State},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
@@ -172,7 +173,7 @@ fn claim_pending(
     let mut db = store.lock()?;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     expire(&tx)?;
-    let row = tx.query_row("SELECT asset_id,source_hash FROM media_cache WHERE library_id=? AND status='pending' AND available_at<=unixepoch() LIMIT 1", [lib], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional()?;
+    let row = tx.query_row("SELECT asset_id,source_hash FROM media_cache WHERE library_id=? AND status='pending' AND available_at<=unixepoch() AND EXISTS(SELECT 1 FROM catalog_assets a WHERE a.library_id=media_cache.library_id AND a.id=media_cache.asset_id AND a.trashed=0) LIMIT 1", [lib], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional()?;
     let Some((asset, hash)) = row else {
         tx.commit()?;
         return Ok(None);
@@ -187,7 +188,12 @@ fn claim_pending(
     Ok(Some((id, asset, hash)))
 }
 fn claim_sync(s: &AppState, lib: &str, body: Value) -> Result<Value> {
-    cleanup_expired(s)?;
+    {
+        let _guard = COMMIT
+            .lock()
+            .map_err(|_| anyhow::anyhow!("worker commit poisoned"))?;
+        cleanup_expired(s)?;
+    }
     let worker = body["workerID"].as_str().context("workerID required")?;
     ensure!(
         !worker.is_empty() && worker.len() <= 128,
@@ -230,7 +236,7 @@ fn claim_sync(s: &AppState, lib: &str, body: Value) -> Result<Value> {
         Ok(None) => Ok(json!({"task":null})),
         Ok(Some(t)) => Ok(json!({
         "task":{
-        "taskID":t.id,"assetID":t.asset,"sourceHash":t.hash,"inputHash":t.input_hash,"filename":t.path.file_name().context("filename")?.to_str().context("filename utf8")?,"sizeBytes":fs::metadata(&t.path)?.len(),"generateStandard":needs_standard(&t),"deferred":deferred(&t),"thumbnailEdge":512,"thumbnailQuality":cache::thumbnail_quality()?,"leaseSeconds":LEASE}
+        "taskID":t.id,"assetID":t.asset,"sourceHash":t.hash,"inputHash":t.input_hash,"filename":t.path.file_name().context("filename")?.to_str().context("filename utf8")?,"sizeBytes":fs::metadata(&t.path)?.len(),"mediaType":if media::is_video(&t.path) { "video" } else { "photo" },"generateStandard":needs_standard(&t),"deferred":deferred(&t),"thumbnailEdge":512,"thumbnailQuality":cache::thumbnail_quality()?,"leaseSeconds":LEASE}
         }
         )),
         Err(e) => {
@@ -239,9 +245,31 @@ fn claim_sync(s: &AppState, lib: &str, body: Value) -> Result<Value> {
         }
     }
 }
+fn byte_range(value: &str, size: u64) -> Result<(u64, u64)> {
+    ensure!(size > 0, "empty source");
+    let (start, end) = value
+        .strip_prefix("bytes=")
+        .context("byte range required")?
+        .split_once('-')
+        .context("invalid byte range")?;
+    if start.is_empty() {
+        let suffix: u64 = end.parse()?;
+        ensure!(suffix > 0, "empty suffix");
+        return Ok((size.saturating_sub(suffix), size - 1));
+    }
+    let start: u64 = start.parse()?;
+    let end = if end.is_empty() {
+        size - 1
+    } else {
+        end.parse::<u64>()?.min(size - 1)
+    };
+    ensure!(start < size && end >= start, "range outside source");
+    Ok((start, end))
+}
 async fn source(
     State(s): State<Arc<AppState>>,
     Path((lib, id)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let t = task(&s.store, &lib, &id)?;
     s.jobs
@@ -253,10 +281,48 @@ async fn source(
     {
         return Err(anyhow::anyhow!("source symlink forbidden").into());
     }
-    let file = tokio::fs::File::open(&t.path)
+    let mut file = tokio::fs::File::open(&t.path)
         .await
         .map_err(anyhow::Error::from)?;
-    Ok(Body::from_stream(tokio_util::io::ReaderStream::new(file)).into_response())
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let size = file.metadata().await.map_err(anyhow::Error::from)?.len();
+    let range = headers.get("range").and_then(|v| v.to_str().ok());
+    let selected = range.map(|v| byte_range(v, size)).transpose();
+    let (start, end, partial) = match selected {
+        Ok(Some((start, end))) => (start, end, true),
+        Ok(None) if size > 0 => (0, size - 1, false),
+        _ => {
+            return Ok((
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [("content-range", format!("bytes */{size}"))],
+            )
+                .into_response());
+        }
+    };
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(anyhow::Error::from)?;
+    let length = end - start + 1;
+    let mut response =
+        Body::from_stream(tokio_util::io::ReaderStream::new(file.take(length))).into_response();
+    *response.status_mut() = if partial {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    response
+        .headers_mut()
+        .insert("accept-ranges", "bytes".parse().unwrap());
+    response
+        .headers_mut()
+        .insert("content-length", length.to_string().parse().unwrap());
+    if partial {
+        response.headers_mut().insert(
+            "content-range",
+            format!("bytes {start}-{end}/{size}").parse().unwrap(),
+        );
+    }
+    Ok(response)
 }
 async fn heartbeat(
     State(s): State<Arc<AppState>>,
@@ -474,6 +540,17 @@ async fn fail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn single_byte_ranges_support_ffmpeg_seeking() -> Result<()> {
+        assert_eq!(byte_range("bytes=0-99", 1000)?, (0, 99));
+        assert_eq!(byte_range("bytes=800-", 1000)?, (800, 999));
+        assert_eq!(byte_range("bytes=-100", 1000)?, (900, 999));
+        assert_eq!(byte_range("bytes=900-2000", 1000)?, (900, 999));
+        for invalid in ["bytes=1000-", "bytes=9-2", "bytes=0-1,5-6", "bytes=-0"] {
+            assert!(byte_range(invalid, 1000).is_err());
+        }
+        Ok(())
+    }
     fn setup() -> Result<(tempfile::TempDir, Store)> {
         let root = tempfile::tempdir()?;
         let store = Store::open(&root.path().join("db.sqlite"), true)?;
@@ -494,6 +571,15 @@ mod tests {
             .lock()?
             .execute("UPDATE media_cache SET status='pending'", [])?;
         Ok((root, store))
+    }
+    #[test]
+    fn claims_skip_trashed_assets() -> Result<()> {
+        let (_root, store) = pending_setup()?;
+        store
+            .lock()?
+            .execute("UPDATE catalog_assets SET trashed=1", [])?;
+        assert!(claim_pending(&store, "lib", "worker")?.is_none());
+        Ok(())
     }
     #[test]
     fn pending_path_sync_defers_missing_source_without_spending_attempts() -> Result<()> {

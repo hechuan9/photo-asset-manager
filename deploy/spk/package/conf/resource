@@ -1,0 +1,16 @@
+{
+  "systemd-user-unit": {},
+  "data-share": {
+    "shares": [
+      {
+        "name": "keeps-native-probe",
+        "permission": {
+          "rw": [
+            "KeepsNativeProbe"
+          ]
+        },
+        "once": true
+      }
+    ]
+  }
+}

@@ -22,7 +22,6 @@ services:
       KEEPS_LOCAL_CACHE_ENCODING_ENABLED: ${KEEPS_LOCAL_CACHE_ENCODING_ENABLED:-1}
       TZ: ${TZ:-America/New_York}
       KEEPS_LIBRARY_ID: ${KEEPS_LIBRARY_ID:-local-library}
-      KEEPS_SCAN_INTERVAL_SECONDS: ${KEEPS_SCAN_INTERVAL_SECONDS:-300}
     volumes:
       - ${KEEPS_ROOT}:/keeps
       - ${ORIGINAL_ROOT}:/volume2/photo:rw

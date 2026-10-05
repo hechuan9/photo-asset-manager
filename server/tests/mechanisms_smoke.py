@@ -48,7 +48,7 @@ def main():
         subprocess.run(["docker", "run", "-d", "--name", name, "-p", "127.0.0.1::2283",
                         "-e", f"KEEPS_ACCESS_TOKEN={token}", "-e", "KEEPS_ROOT=/keeps",
                         "-e", "ORIGINAL_ROOT=/originals", "-e", "KEEPS_LIBRARY_ID=test",
-                        "-e", "CONTROL_PLANE_AUTO_CREATE_SCHEMA=1", "-e", "KEEPS_SCAN_INTERVAL_SECONDS=3600",
+                        "-e", "CONTROL_PLANE_AUTO_CREATE_SCHEMA=1",
                         "-e", "CONTROL_PLANE_PUBLIC_BASE_URL=http://localhost:2283",
                         "--mount", f"type=bind,src={keeps},dst=/keeps",
                         "--mount", f"type=volume,src={volume},dst=/originals,readonly", image], check=True, stdout=subprocess.DEVNULL)

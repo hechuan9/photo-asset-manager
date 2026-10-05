@@ -1,0 +1,13 @@
+[Unit]
+Description=Keeps isolated native feasibility probe
+
+[Service]
+Type=simple
+Slice=KeepsNativeProbe.slice
+CPUAffinity=0 1
+WorkingDirectory=/var/packages/KeepsNativeProbe/var
+ExecStart=/var/packages/KeepsNativeProbe/target/bin/launch-probe
+Restart=no
+TimeoutStopSec=930
+KillMode=control-group
+UMask=0077

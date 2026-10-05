@@ -29,6 +29,12 @@ pub fn is_video(path: &Path) -> bool {
     ["mov", "mp4", "m4v", "avi", "mkv", "mts", "m2ts"].contains(&extension(path).as_str())
 }
 
+fn has_jpeg_signature(path: &Path) -> Result<bool> {
+    let mut header = [0u8; 3];
+    let count = File::open(path)?.read(&mut header)?;
+    Ok(count == 3 && header == [0xff, 0xd8, 0xff])
+}
+
 fn extension(path: &Path) -> String {
     path.extension()
         .and_then(|v| v.to_str())
@@ -258,7 +264,9 @@ impl MediaProcessor {
             .canonicalize()
             .with_context(|| format!("resolving {}", source.display()))?;
         let scratch = tempfile::tempdir().context("creating media scratch directory")?;
-        let decoded = scratch.path().join(if is_raw(&source) {
+        let jpeg_input = has_jpeg_signature(&source)?;
+        let raw_input = is_raw(&source) && !jpeg_input;
+        let decoded = scratch.path().join(if raw_input {
             "decoded.ppm"
         } else {
             "decoded.tiff"
@@ -270,7 +278,7 @@ impl MediaProcessor {
                 .args(["-frames:v", "1", "-threads", "1", "-filter_threads", "1"])
                 .arg(&decoded))?;
             decoded.as_path()
-        } else if is_raw(&source) {
+        } else if raw_input {
             run(Command::new("dcraw_emu")
                 .args(["-w", "-o", "1", "-Z"])
                 .arg(&decoded)
@@ -296,7 +304,11 @@ impl MediaProcessor {
         };
         // The source stays read-only; only the scratch directory contains intermediate images.
         let output = scratch.path().join("preview.heic");
-        let input_frame = format!("{}[0]", input.display());
+        let input_frame = if jpeg_input {
+            format!("JPEG:{}[0]", input.display())
+        } else {
+            format!("{}[0]", input.display())
+        };
         run_with_timeout(
             Command::new("convert")
                 .args([
@@ -752,6 +764,18 @@ mod tests {
             )?
         );
         assert!(hash(vec![0xff, 0xd8, 0xff, 0xda, 0, 2], &Metadata::default()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn jpeg_content_under_raw_filename_bypasses_raw_decoder() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("source.ARW");
+        std::fs::write(&source, [0xff, 0xd8, 0xff, 0xe0])?;
+        assert!(is_raw(&source));
+        assert!(has_jpeg_signature(&source)?);
+        std::fs::write(&source, [0x49, 0x49, 0x2a, 0x00])?;
+        assert!(!has_jpeg_signature(&source)?);
         Ok(())
     }
 

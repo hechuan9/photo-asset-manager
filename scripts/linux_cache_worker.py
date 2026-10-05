@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Bounded remote cache worker; NAS remains the sole state/file publisher."""
 import concurrent.futures
+import contextlib
+import http.server
 import hashlib
 import json
 import logging
@@ -49,14 +51,15 @@ class Worker:
         if tree_bytes(self.root) + self.concurrency * self.reserve > self.budget:
             raise RuntimeError("scratch contains crash leftovers exceeding disk budget; inspect while worker is stopped")
 
-    def request(self, method, path, body=None, raw=False):
+    def request(self, method, path, body=None, raw=False, extra_headers=None):
         headers = {"Authorization": "Bearer " + self.token}
+        headers.update(extra_headers or {})
         if body is not None:
             headers["Content-Type"] = "image/heic" if raw else "application/json"
             if not raw:
                 body = json.dumps(body).encode()
         request = urllib.request.Request(self.base + "/libraries/" + self.library + "/worker/" + path, data=body, headers=headers, method=method)
-        return self.opener.open(request, timeout=120)
+        return self.opener.open(request, timeout=1800 if path == "claim" or path.endswith("/complete") else 120)
 
     def json_request(self, method, path, body):
         for attempt in range(3):
@@ -90,6 +93,59 @@ class Worker:
                 LOG.exception("Worker slot %s failed", slot)
                 STOP.wait(15)
 
+    @contextlib.contextmanager
+    def video_source(self, prefix):
+        worker = self
+        transfer = {"bytes": 0}
+        class Source(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path != "/source":
+                    self.send_error(404)
+                    return
+                try:
+                    headers = {"Range": self.headers["Range"]} if "Range" in self.headers else {}
+                    with worker.request("GET", prefix + "/source", extra_headers=headers) as response:
+                        self.send_response(response.status)
+                        for name in ("Content-Length", "Content-Range", "Accept-Ranges"):
+                            if response.headers.get(name):
+                                self.send_header(name, response.headers[name])
+                        self.end_headers()
+                        while chunk := response.read(256 * 1024):
+                            self.wfile.write(chunk)
+                            transfer["bytes"] += len(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                except Exception:
+                    LOG.exception("Video source request failed")
+                    self.send_error(502)
+            def log_message(self, *_):
+                pass
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Source)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield "http://127.0.0.1:" + str(server.server_port) + "/source", transfer
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def render(self, command, env, directory, lease_lost):
+        process = subprocess.Popen(command, env=env, start_new_session=True)
+        deadline = time.monotonic() + 1500
+        try:
+            while process.poll() is None:
+                if lease_lost.is_set() or tree_bytes(directory) > self.reserve or time.monotonic() > deadline:
+                    raise RuntimeError("render stopped: lease, disk budget or deadline")
+                time.sleep(1)
+            if process.returncode:
+                raise RuntimeError("renderer exit " + str(process.returncode))
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+
     def process(self, task):
         started = time.monotonic()
         task_id = task["taskID"]
@@ -113,33 +169,32 @@ class Worker:
             with tempfile.TemporaryDirectory(prefix="task-", dir=self.root) as temp:
                 directory = Path(temp)
                 source = directory / ("source" + Path(task["filename"]).suffix.lower())
-                digest = hashlib.sha256()
                 count = 0
-                with self.request("GET", prefix + "/source") as response, source.open("xb") as output:
-                    while chunk := response.read(1024 * 1024):
-                        count += len(chunk)
-                        if count > self.reserve // 2:
-                            raise RuntimeError("source exceeds per-task disk allowance")
-                        digest.update(chunk)
-                        output.write(chunk)
-                if digest.hexdigest() != task["inputHash"]:
-                    raise RuntimeError("download SHA256 mismatch")
                 env = dict(os.environ, TMPDIR=temp)
+                if task.get("mediaType") == "video":
+                    source = directory / "first-frame.tiff"
+                    # NAS validates the full source hash at claim and publication.
+                    # The loopback proxy keeps credentials out of ffmpeg and refuses redirects.
+                    with self.video_source(prefix) as (url, transfer):
+                        self.render(["ffmpeg", "-nostdin", "-v", "error", "-threads", "1", "-i", url,
+                                     "-frames:v", "1", "-threads", "1", "-filter_threads", "1", str(source)],
+                                    env, directory, lease_lost)
+                    count = transfer["bytes"]
+                else:
+                    if task.get("sizeBytes", 0) > self.reserve // 2:
+                        raise RuntimeError("source exceeds per-task disk allowance")
+                    digest = hashlib.sha256()
+                    with self.request("GET", prefix + "/source") as response, source.open("xb") as output:
+                        while chunk := response.read(1024 * 1024):
+                            count += len(chunk)
+                            if count > self.reserve // 2:
+                                raise RuntimeError("source exceeds per-task disk allowance")
+                            digest.update(chunk)
+                            output.write(chunk)
+                    if digest.hexdigest() != task["inputHash"]:
+                        raise RuntimeError("download SHA256 mismatch")
                 command = ["keeps-render", str(source), temp, str(bool(task["generateStandard"])).lower(), str(task["thumbnailEdge"]), str(task["thumbnailQuality"])]
-                process = subprocess.Popen(command, env=env, start_new_session=True)
-                deadline = time.monotonic() + 1500
-                try:
-                    while process.poll() is None:
-                        used = tree_bytes(directory)
-                        if lease_lost.is_set() or used > self.reserve or time.monotonic() > deadline:
-                            raise RuntimeError("render stopped: lease, disk budget or deadline")
-                        time.sleep(1)
-                    if process.returncode:
-                        raise RuntimeError("renderer exit " + str(process.returncode))
-                finally:
-                    if process.poll() is None:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.wait()
+                self.render(command, env, directory, lease_lost)
                 for role in (["standard", "thumbnail"] if task["generateStandard"] else ["thumbnail"]):
                     if lease_lost.is_set():
                         raise RuntimeError("lease lost before upload")

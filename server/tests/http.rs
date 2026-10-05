@@ -1258,3 +1258,551 @@ async fn deferred_3fr_keeps_thumbnail_without_raw_standard_link() {
         StatusCode::NOT_FOUND
     );
 }
+
+#[tokio::test]
+async fn imports_flatten_grouped_files_verify_and_publish_only_on_finish() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    state.jobs.add_folder("photos", ".").unwrap();
+    let root = state.jobs.root().to_path_buf();
+    std::fs::write(root.join("IMG.CR3"), b"existing").unwrap();
+    let app = router(state.clone());
+    let batch = uuid::Uuid::new_v4().to_string().to_uppercase();
+    let paths = [
+        "card1/IMG.CR3",
+        "card1/IMG.CR3.xmp",
+        "card1/IMG.heic",
+        "card2/IMG.CR3",
+        "card2/IMG.xmp",
+    ];
+    let data = b"imported original";
+    let files:Vec<Value>=paths.iter().map(|p|json!({"id":uuid::Uuid::new_v4().to_string().to_uppercase(),"relativePath":p,"size":data.len(),"sha256":format!("{:x}",Sha256::digest(data))})).collect();
+    let manifest = json!({"id":batch,"targetPath":root,"files":files});
+    let (status, prepared) = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/imports",
+        manifest.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let names: Vec<_> = prepared["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["fileName"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "IMG (1).CR3",
+            "IMG (1).CR3.xmp",
+            "IMG (1).heic",
+            "IMG (2).CR3",
+            "IMG (2).xmp"
+        ]
+    );
+    let finish_url = format!("/libraries/photos/imports/{batch}/finish");
+    assert_eq!(
+        call(app.clone(), "POST", &finish_url, Value::Null).await.0,
+        StatusCode::CONFLICT
+    );
+    for (index, file) in files.iter().enumerate() {
+        let url = format!(
+            "/libraries/photos/imports/{batch}/files/{}",
+            file["id"].as_str().unwrap()
+        );
+        if index == 0 {
+            for wrong in [
+                b"short".as_slice(),
+                b"corrupted content".as_slice(),
+                b"longer than declared data".as_slice(),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("PUT")
+                            .uri(&url)
+                            .header("authorization", format!("Bearer {SIGNING_KEY}"))
+                            .body(Body::from(wrong))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+                assert!(!root.join(names[index]).exists());
+            }
+        }
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(&url)
+                        .header("authorization", format!("Bearer {SIGNING_KEY}"))
+                        .body(Body::from(data.as_slice()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        assert!(
+            !root.join(names[index]).exists(),
+            "original published before finish"
+        );
+    }
+    let resumed = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/imports",
+        manifest.clone(),
+    )
+    .await
+    .1;
+    assert!(
+        resumed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["uploaded"] == true)
+    );
+    let completed = call(app.clone(), "POST", &finish_url, Value::Null).await;
+    assert_eq!(completed.0, StatusCode::OK, "{}", completed.1);
+    let repeated = call(app.clone(), "POST", &finish_url, Value::Null).await;
+    assert_eq!(completed.1["job"]["id"], repeated.1["job"]["id"]);
+    for name in names {
+        assert_eq!(std::fs::read(root.join(name)).unwrap(), data);
+    }
+    assert_eq!(std::fs::read(root.join("IMG.CR3")).unwrap(), b"existing");
+    let mut changed = manifest.clone();
+    changed["files"][0]["relativePath"] = json!("changed.CR3");
+    assert_eq!(
+        call(app.clone(), "POST", "/libraries/photos/imports", changed)
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    let reopened = Jobs::open(&dir.path().join("keeps/db/jobs.sqlite"), &root).unwrap();
+    assert!(
+        reopened
+            .job(completed.1["job"]["id"].as_str().unwrap())
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn imports_reject_escape_symlinks_untracked_targets_and_preserve_late_collision() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let root = state.jobs.root().to_path_buf();
+    let app = router(state.clone());
+    let batch = uuid::Uuid::new_v4().to_string();
+    let file = uuid::Uuid::new_v4().to_string();
+    let data = b"new raw";
+    let manifest = json!({"id":batch,"targetPath":root,"files":[{"id":file,"relativePath":"sub/IMG.RAW","size":data.len(),"sha256":format!("{:x}",Sha256::digest(data))}]});
+    assert_eq!(
+        call(
+            app.clone(),
+            "POST",
+            "/libraries/photos/imports",
+            manifest.clone()
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    state.jobs.add_folder("photos", ".").unwrap();
+    for source in [
+        "../IMG.RAW",
+        "/IMG.RAW",
+        "sub/../IMG.RAW",
+        "IMG.JPG",
+        ".RAW",
+    ] {
+        let mut bad = manifest.clone();
+        bad["files"][0]["relativePath"] = json!(source);
+        assert_eq!(
+            call(app.clone(), "POST", "/libraries/photos/imports", bad)
+                .await
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    std::os::unix::fs::symlink(dir.path(), root.join("escape")).unwrap();
+    for destination in [root.join("escape"), dir.path().to_path_buf()] {
+        let mut bad = manifest.clone();
+        bad["targetPath"] = json!(destination);
+        assert_eq!(
+            call(app.clone(), "POST", "/libraries/photos/imports", bad)
+                .await
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    assert_eq!(
+        call(app.clone(), "POST", "/libraries/photos/imports", manifest)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/libraries/photos/imports/{batch}/files/{file}"))
+                .header("authorization", format!("Bearer {SIGNING_KEY}"))
+                .body(Body::from(data.as_slice()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    std::fs::write(root.join("IMG.RAW"), b"external original").unwrap();
+    assert_eq!(
+        call(
+            app.clone(),
+            "POST",
+            &format!("/libraries/photos/imports/{batch}/finish"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        std::fs::read(root.join("IMG.RAW")).unwrap(),
+        b"external original"
+    );
+}
+
+#[tokio::test]
+async fn create_directory_selects_visible_child_and_preserves_existing_files() {
+    let fixture = tempfile::tempdir().unwrap();
+    let state = state(fixture.path());
+    state.jobs.add_folder("photos", ".").unwrap();
+    let parent = state.jobs.root().to_path_buf();
+    let app = router(state);
+    let request = json!({"parentPath":parent,"name":"旅行 2026"});
+    let (status, created) = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/directories",
+        request.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["path"], parent.join("旅行 2026").to_str().unwrap());
+    assert!(parent.join("旅行 2026").is_dir());
+    let (_, navigation) = call(
+        app.clone(),
+        "GET",
+        "/libraries/photos/navigation",
+        Value::Null,
+    )
+    .await;
+    assert!(
+        navigation["directories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|directory| directory["path"] == created["path"])
+    );
+    std::fs::write(parent.join("旅行 2026/photo.raw"), b"keep original").unwrap();
+    assert_eq!(
+        call(
+            app.clone(),
+            "POST",
+            "/libraries/photos/directories",
+            request
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        std::fs::read(parent.join("旅行 2026/photo.raw")).unwrap(),
+        b"keep original"
+    );
+    std::fs::write(parent.join("existing.raw"), b"original").unwrap();
+    assert_eq!(
+        call(
+            app,
+            "POST",
+            "/libraries/photos/directories",
+            json!({"parentPath":parent,"name":"existing.raw"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        std::fs::read(parent.join("existing.raw")).unwrap(),
+        b"original"
+    );
+}
+
+#[tokio::test]
+async fn create_directory_rejects_invalid_names_and_untracked_parents() {
+    let fixture = tempfile::tempdir().unwrap();
+    let state = state(fixture.path());
+    let root = state.jobs.root().to_path_buf();
+    std::fs::create_dir(root.join("tracked")).unwrap();
+    std::fs::create_dir(root.join("other")).unwrap();
+    state.jobs.add_folder("photos", "tracked").unwrap();
+    state.jobs.add_folder("another-library", "other").unwrap();
+    let app = router(state);
+    for name in [
+        "",
+        "  ",
+        ".",
+        "..",
+        ".hidden",
+        "@eaDir",
+        "#recycle",
+        "a/b",
+        "a\\b",
+        "/absolute",
+        "nul\0",
+        "tab\t",
+        "line\n",
+    ] {
+        let (status, error) = call(
+            app.clone(),
+            "POST",
+            "/libraries/photos/directories",
+            json!({"parentPath":root.join("tracked"),"name":name}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{name:?}: {error}"
+        );
+    }
+    for parent in [root.clone(), root.join("other")] {
+        assert_eq!(
+            call(
+                app.clone(),
+                "POST",
+                "/libraries/photos/directories",
+                json!({"parentPath":parent,"name":"new"})
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert!(!parent.join("new").exists());
+    }
+    for parent in [
+        fixture.path().to_path_buf(),
+        root.join("tracked/../other"),
+        root.join("missing"),
+    ] {
+        assert_eq!(
+            call(
+                app.clone(),
+                "POST",
+                "/libraries/photos/directories",
+                json!({"parentPath":parent,"name":"new"})
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert!(!parent.join("new").exists());
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.join("other"), root.join("tracked/link")).unwrap();
+        assert_eq!(
+            call(
+                app,
+                "POST",
+                "/libraries/photos/directories",
+                json!({"parentPath":root.join("tracked/link"),"name":"new"})
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert!(!root.join("other/new").exists());
+    }
+}
+
+#[tokio::test]
+async fn imports_without_client_digest_validate_size_and_resume_staged_upload() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    state.jobs.add_folder("photos", ".").unwrap();
+    let root = state.jobs.root().to_path_buf();
+    let app = router(state.clone());
+    let batch = uuid::Uuid::new_v4().to_string();
+    let file = uuid::Uuid::new_v4().to_string();
+    let data = b"streamed original";
+    let manifest = json!({"id":batch,"targetPath":root,"files":[{
+        "id":file,"relativePath":"card/IMG.CR3","size":data.len()
+    }]});
+    let (status, prepared) = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/imports",
+        manifest.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    assert!(prepared["files"][0].get("sha256").is_none());
+    let url = format!("/libraries/photos/imports/{batch}/files/{file}");
+    for wrong in [
+        b"short".as_slice(),
+        b"larger than declared original".as_slice(),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(&url)
+                    .header("authorization", format!("Bearer {SIGNING_KEY}"))
+                    .body(Body::from(wrong))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    }
+    // A process may stop after linking the upload but before recording completion.
+    let staged = root.join(format!(".keeps-import-{batch}-{file}"));
+    std::fs::write(&staged, b"different content").unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&url)
+                .header("authorization", format!("Bearer {SIGNING_KEY}"))
+                .body(Body::from(data.as_slice()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(std::fs::read(&staged).unwrap(), b"different content");
+    std::fs::write(&staged, data).unwrap();
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(&url)
+                    .header("authorization", format!("Bearer {SIGNING_KEY}"))
+                    .body(Body::from(data.as_slice()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let (status, resumed) = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/imports",
+        manifest.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    assert_eq!(resumed["files"][0]["uploaded"], true);
+    assert!(resumed["files"][0].get("sha256").is_none());
+    assert_eq!(
+        resumed["files"][0]["receivedSha256"],
+        format!("{:x}", Sha256::digest(data))
+    );
+    let completed = call(
+        app.clone(),
+        "POST",
+        &format!("/libraries/photos/imports/{batch}/finish"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(completed.0, StatusCode::OK, "{}", completed.1);
+    assert_eq!(std::fs::read(root.join("IMG.CR3")).unwrap(), data);
+    assert!(!staged.exists());
+}
+
+#[tokio::test]
+async fn imports_deduplicate_skips_existing_group_and_rechecks_before_finish() {
+    use sha2::{Digest, Sha256};
+    for changed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(dir.path());
+        state.jobs.add_folder("photos", ".").unwrap();
+        let root = state.jobs.root().to_path_buf();
+        std::fs::write(root.join("existing.CR3"), b"original").unwrap();
+        let app = router(state.clone());
+        let batch = uuid::Uuid::new_v4().to_string();
+        let file = uuid::Uuid::new_v4().to_string();
+        let mut manifest = json!({"id":batch,"targetPath":root,"deduplicate":true,"files":[{
+            "id":file,"relativePath":"card/IMG.CR3","size":8
+        }]});
+        assert_eq!(
+            call(
+                app.clone(),
+                "POST",
+                "/libraries/photos/imports",
+                manifest.clone()
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        manifest["files"][0]["sha256"] = json!(format!("{:x}", Sha256::digest(b"original")));
+        let (status, prepared) = call(
+            app.clone(),
+            "POST",
+            "/libraries/photos/imports",
+            manifest.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{prepared}");
+        assert_eq!(prepared["files"][0]["fileName"], "existing.CR3");
+        assert_eq!(prepared["files"][0]["skipped"], true);
+        assert_eq!(prepared["files"][0]["uploaded"], true);
+        manifest["deduplicate"] = json!(false);
+        assert_eq!(
+            call(app.clone(), "POST", "/libraries/photos/imports", manifest)
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        if changed {
+            std::fs::write(root.join("existing.CR3"), b"modified").unwrap();
+        }
+        let finished = call(
+            app.clone(),
+            "POST",
+            &format!("/libraries/photos/imports/{batch}/finish"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(
+            finished.0,
+            if changed {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::OK
+            },
+            "{}",
+            finished.1
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    }
+}

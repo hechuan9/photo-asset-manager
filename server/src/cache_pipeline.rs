@@ -85,7 +85,7 @@ impl Store {
         Ok(())
     }
     pub fn reconcile_cache(&self) -> Result<()> {
-        self.lock()?.execute("INSERT INTO media_cache(library_id,asset_id,source_hash,spec) SELECT a.library_id,a.id,coalesce(d.content_hash,a.content_hash),? FROM catalog_assets a LEFT JOIN catalog_defaults d ON a.library_id=d.library_id AND a.id=d.asset_id WHERE true ON CONFLICT(library_id,asset_id) DO UPDATE SET source_hash=excluded.source_hash,spec=excluded.spec,status='pending',attempts=0,available_at=0,last_error=NULL WHERE media_cache.source_hash!=excluded.source_hash OR media_cache.spec!=excluded.spec", [spec()?])?;
+        self.lock()?.execute("INSERT INTO media_cache(library_id,asset_id,source_hash,spec) SELECT a.library_id,a.id,coalesce(d.content_hash,a.content_hash),? FROM catalog_assets a LEFT JOIN catalog_defaults d ON a.library_id=d.library_id AND a.id=d.asset_id WHERE a.trashed=0 ON CONFLICT(library_id,asset_id) DO UPDATE SET source_hash=excluded.source_hash,spec=excluded.spec,status='pending',attempts=0,available_at=0,last_error=NULL WHERE media_cache.source_hash!=excluded.source_hash OR media_cache.spec!=excluded.spec", [spec()?])?;
         Ok(())
     }
     pub fn recover_cache(&self) -> Result<()> {
@@ -99,7 +99,7 @@ impl Store {
         let db = self.lock()?;
         let mut counts = json!({"pending":0,"processing":0,"ready":0,"failed":0});
         let mut q = db.prepare(
-            "SELECT status,count(*) FROM media_cache WHERE library_id=? GROUP BY status",
+            "SELECT status,count(*) FROM media_cache WHERE library_id=? AND EXISTS(SELECT 1 FROM catalog_assets a WHERE a.library_id=media_cache.library_id AND a.id=media_cache.asset_id AND a.trashed=0) GROUP BY status",
         )?;
         for item in q.query_map([library], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
@@ -107,20 +107,20 @@ impl Store {
             let (state, count) = item?;
             counts[state] = json!(count);
         }
-        let mut q=db.prepare("SELECT asset_id,last_error,attempts,available_at FROM media_cache WHERE library_id=? AND last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 20")?;
+        let mut q=db.prepare("SELECT asset_id,last_error,attempts,available_at FROM media_cache WHERE library_id=? AND EXISTS(SELECT 1 FROM catalog_assets a WHERE a.library_id=media_cache.library_id AND a.id=media_cache.asset_id AND a.trashed=0) AND last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 20")?;
         let errors=q.query_map([library], |r| Ok(json!({"assetID":r.get::<_,String>(0)?,"error":r.get::<_,String>(1)?,"attempts":r.get::<_,i64>(2)?,"retryAt":r.get::<_,i64>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let last: Option<i64> = db.query_row(
-            "SELECT max(updated_at) FROM media_cache WHERE library_id=? AND status='ready'",
+            "SELECT max(updated_at) FROM media_cache WHERE library_id=? AND status='ready' AND EXISTS(SELECT 1 FROM catalog_assets a WHERE a.library_id=media_cache.library_id AND a.id=media_cache.asset_id AND a.trashed=0)",
             [library],
             |r| r.get(0),
         )?;
         let inventory: i64 = db.query_row(
-            "SELECT count(*) FROM catalog_assets WHERE library_id=?",
+            "SELECT count(*) FROM catalog_assets WHERE library_id=? AND trashed=0",
             [library],
             |r| r.get(0),
         )?;
         let eligible: i64 = db.query_row(
-            "SELECT count(*) FROM media_cache WHERE library_id=?",
+            "SELECT count(*) FROM media_cache WHERE library_id=? AND EXISTS(SELECT 1 FROM catalog_assets a WHERE a.library_id=media_cache.library_id AND a.id=media_cache.asset_id AND a.trashed=0)",
             [library],
             |r| r.get(0),
         )?;
@@ -144,7 +144,7 @@ impl Store {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         crate::remote_worker::expire(&tx)?;
-        let row=tx.query_row("SELECT library_id,asset_id,source_hash FROM media_cache WHERE status='pending' AND available_at<=unixepoch() ORDER BY updated_at,asset_id LIMIT 1",[],|r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional()?;
+        let row=tx.query_row("SELECT library_id,asset_id,source_hash FROM media_cache WHERE status='pending' AND available_at<=unixepoch() AND EXISTS(SELECT 1 FROM catalog_assets a WHERE a.library_id=media_cache.library_id AND a.id=media_cache.asset_id AND a.trashed=0) ORDER BY updated_at,asset_id LIMIT 1",[],|r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional()?;
         if let Some((lib, id, _)) = &row {
             tx.execute("UPDATE media_cache SET status='processing',attempts=attempts+1,updated_at=unixepoch() WHERE library_id=? AND asset_id=?",params![lib,id])?;
         }
@@ -594,6 +594,38 @@ mod tests {
         assert!(status["runtime"]["freeBytes"].as_u64().unwrap() > 0);
         assert!(
             status["runtime"]["nextBatchAt"].as_i64().unwrap() > chrono::Utc::now().timestamp()
+        );
+        Ok(())
+    }
+    #[test]
+    fn trashed_assets_preserve_cache_history_and_leave_inventory() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("db"), true)?;
+        seed(&store, 2)?;
+        store.reconcile_cache()?;
+        store.lock()?.execute("UPDATE catalog_assets SET trashed=1 WHERE id=(SELECT id FROM catalog_assets ORDER BY id LIMIT 1)", [])?;
+        store.reconcile_cache()?;
+        let status = store.cache_status("lib")?;
+        assert_eq!(status["totalAssets"], 1);
+        assert_eq!(status["eligibleAssets"], 1);
+        assert_eq!(status["counts"]["pending"], 1);
+        assert!(store.claim_cache()?.is_some());
+        assert!(store.claim_cache()?.is_none());
+        assert_eq!(
+            store
+                .lock()?
+                .query_row("SELECT count(*) FROM media_cache", [], |r| r
+                    .get::<_, i64>(0))?,
+            2
+        );
+        store.lock()?.execute("DELETE FROM media_cache WHERE asset_id IN (SELECT id FROM catalog_assets WHERE trashed=1)", [])?;
+        store.reconcile_cache()?;
+        assert_eq!(
+            store
+                .lock()?
+                .query_row("SELECT count(*) FROM media_cache", [], |r| r
+                    .get::<_, i64>(0))?,
+            1
         );
         Ok(())
     }

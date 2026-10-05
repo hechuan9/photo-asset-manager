@@ -4,6 +4,8 @@ import KeepsAPI
 struct ContentView: View {
     @EnvironmentObject private var library: LibraryStore
     @State private var showsTasks = false
+    @State private var showsImport = false
+    @State private var importStore: ImportStore?
     @FocusState private var galleryFocused: Bool
 
     @State private var showsSidebar = true
@@ -40,6 +42,9 @@ struct ContentView: View {
         .sheet(isPresented: $showsTasks, onDismiss: { if showsSources { library.refreshNavigation() }; library.refresh(force: true) }) {
             if let client = library.client { NASTasksView(client: client) }
         }
+        .sheet(isPresented: $showsImport, onDismiss: { library.refreshNavigation(); library.refresh(force: true) }) {
+            if let importStore { ImportView(store: importStore, initialTarget: library.query.directory) }
+        }
         .task { library.refresh() }
         .prefetchKeepsThumbnails(configuration: library.configuration)
         .onChange(of: library.query) { _, _ in library.refresh() }
@@ -51,6 +56,15 @@ struct ContentView: View {
         HStack(spacing: 20) {
             railButton("显示或隐藏目录", icon: "sidebar.left", selected: showsSidebar) { showsSidebar.toggle() }
             Text("Keeps").font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary)
+            Button {
+                guard let client = library.client else { return }
+                if importStore == nil || importStore?.job != nil || importStore?.client.configuration != client.configuration {
+                    importStore = ImportStore(client: client)
+                }
+                showsImport = true
+            } label: { Label("导入", systemImage: "square.and.arrow.down") }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
+                .disabled(library.client == nil)
             Spacer(minLength: 12)
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -101,7 +115,7 @@ struct ContentView: View {
             } else { Spacer() }
             Divider()
             Button { showsTasks = true } label: {
-                Label("管理来源与任务", systemImage: "server.rack")
+                Label("任务追踪", systemImage: "list.bullet.rectangle")
                     .font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading).padding(16)
             }.buttonStyle(.plain).disabled(library.client == nil)
         }.padding(.top, 12).background(WorkspaceStyle.panel)
@@ -140,7 +154,7 @@ struct ContentView: View {
         } else if !library.hasLoadedResults && library.isLoading {
             ProgressView("正在读取目录内容…").frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if library.assets.isEmpty {
-            ContentUnavailableView("没有符合条件的照片", systemImage: "photo.on.rectangle", description: Text("可调整筛选条件，或在“管理来源与任务”中添加服务器目录并扫描。"))
+            ContentUnavailableView("没有符合条件的照片", systemImage: "photo.on.rectangle", description: Text("可调整筛选条件，或在“设置 → 来源”中添加服务器目录并扫描。"))
         } else {
             gallery
         }

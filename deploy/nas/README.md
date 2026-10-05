@@ -1,5 +1,9 @@
 # NAS 部署
 
+2026-10-05 后续已完成[正式图库迁移至原生 SPK](../../docs/validation/2026-10-05-spk-production-migration.md)。Mac 当前连接 `http://192.168.0.50:2283` 的原生服务；旧 Docker 停止并保留，本页 Compose 内容作为构建与回退参考。
+
+2026-10-05 已部署 Mac 文件夹导入服务 `keeps-server:import-20261005`；隔离导入、数据库备份及生产接口验证通过。当前公网 443 返回路由器证书，Mac 旧连接地址也不可达，不能把服务部署完成视为客户端网络入口已恢复。详见[导入部署验证与访问限制](../../docs/validation/2026-10-05-macos-import-deployment.md)。
+
 NAS 上的 Rust 服务是 Keeps 唯一业务后端；macOS/iOS 通过 HTTP API 浏览和整理照片。客户端不运行扫描器，不维护业务 SQLite，也不上传 ledger。
 
 ## 存储与运行
@@ -12,7 +16,7 @@ Compose 使用 `server/Dockerfile`。SQLite 数据、任务队列和可重建预
 - 标准照片：RAW 同目录下的新 HEIF 文件；已有 JPEG/HEIF 直接复用，同一资产登记多个文件版本。3FR 标准转换暂缓。
 - `backups/`：升级前备份。
 
-唯一照片目录 `/volume2/photo` 按原路径挂载；系统数据 `/volume2/docker/keeps/data` 挂载到 `/keeps`。照片目录可写仅用于新增标准照片，禁止覆盖已有文件。`myphoto` 完全解除挂载。服务不会删除、移动或覆盖照片，回收站和停止追踪只改数据库。
+唯一照片目录 `/volume2/photo` 按原路径挂载；系统数据 `/volume2/docker/keeps/data` 挂载到 `/keeps`。照片目录可写用于新增标准照片、显式导入照片及文档规定的身份 metadata 回填，禁止覆盖已有照片内容。`myphoto` 完全解除挂载。服务不会删除、移动或以其他照片覆盖已有照片，回收站和停止追踪只改数据库。
 
 导航、文件索引和任务均使用 NAS 路径，例如 `/volume2/photo`，不再使用 `/originals` 或客户端 `/Volumes` 别名。已有部署须停服，运行 `scripts/migrate_nas_paths.py`（先 dry-run，apply 时自动备份两个数据库），再用新 Compose 重建容器。历史清单恢复只验证存在、大小和既有资产关联，内容哈希由正常扫描继续核对。
 

@@ -39,6 +39,24 @@ class WorkerTests(unittest.TestCase):
                 instance.process({"taskID": "test", "leaseSeconds": 1800, "filename": "photo.raw"})
             self.assertEqual(list(instance.root.iterdir()), [])
 
+    def test_video_proxy_forwards_ranges_without_exposing_auth(self):
+        instance = worker.Worker.__new__(worker.Worker)
+        class Response(io.BytesIO):
+            status = 206
+            headers = {"Content-Length": "3", "Content-Range": "bytes 7-9/10", "Accept-Ranges": "bytes"}
+        calls = []
+        def request(*args, **kwargs):
+            calls.append((args, kwargs))
+            return Response(b"789")
+        instance.request = request
+        with instance.video_source("tasks/video") as (url, transfer):
+            with worker.urllib.request.urlopen(worker.urllib.request.Request(url, headers={"Range": "bytes=7-9"})) as response:
+                self.assertEqual(response.status, 206)
+                self.assertEqual(response.headers["Content-Range"], "bytes 7-9/10")
+                self.assertEqual(response.read(), b"789")
+        self.assertEqual(transfer["bytes"], 3)
+        self.assertEqual(calls, [(("GET", "tasks/video/source"), {"extra_headers": {"Range": "bytes=7-9"}})])
+
     def test_no_redirect_with_credentials(self):
         with self.assertRaisesRegex(RuntimeError, "redirects"):
             worker.NoRedirect().redirect_request(None, None, 302, None, {}, "https://other.example")

@@ -13,7 +13,6 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
 };
 
 #[tokio::main]
@@ -71,26 +70,24 @@ async fn main() -> Result<()> {
         }
     }
     MediaProcessor::new().probe().context("NAS media runtime")?;
-    let interval = env::var("KEEPS_SCAN_INTERVAL_SECONDS")
-        .unwrap_or_else(|_| "300".into())
-        .parse::<u64>()
-        .context("invalid KEEPS_SCAN_INTERVAL_SECONDS")?;
-    if interval == 0 {
-        bail!("KEEPS_SCAN_INTERVAL_SECONDS must be positive");
-    }
     let address = env::var("KEEPS_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:2283".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
     let stop = Arc::new(AtomicBool::new(false));
+    let (watcher_ready, ready) = tokio::sync::oneshot::channel();
     let mut watcher = tokio::task::spawn_blocking({
         let (jobs, store, stop) = (jobs.clone(), store.clone(), stop.clone());
-        move || keeps_server::watcher::run(jobs, store, stop)
+        move || keeps_server::watcher::run(jobs, store, stop, Some(watcher_ready))
     });
+    if ready.await.is_err() {
+        watcher
+            .await
+            .context("NAS watcher task failed during startup")??;
+        bail!("NAS watcher stopped before initialization");
+    }
     let mut worker = tokio::task::spawn_blocking({
         let (store, jobs, previews, stop) =
             (store.clone(), jobs.clone(), previews.clone(), stop.clone());
-        move || {
-            keeps_server::worker::run(store, jobs, previews, stop, Duration::from_secs(interval))
-        }
+        move || keeps_server::worker::run(store, jobs, previews, stop)
     });
     tracing::info!(%address, "Keeps Rust server started");
     let http = axum::serve(

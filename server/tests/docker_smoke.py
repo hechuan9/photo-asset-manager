@@ -117,7 +117,7 @@ def main():
                    "-e", "KEEPS_ACCESS_TOKEN", "-e", "KEEPS_ROOT=/keeps",
                    "-e", "KEEPS_LIBRARY_ID=smoke", "-e", "ORIGINAL_ROOT=/photos", "-e", "CONTROL_PLANE_AUTO_CREATE_SCHEMA=0",
                    "-e", "CONTROL_PLANE_PUBLIC_BASE_URL=http://localhost:2283",
-                   "-e", "TZ=America/New_York", "-e", "KEEPS_SCAN_INTERVAL_SECONDS=3600",
+                   "-e", "TZ=America/New_York",
                    "--mount", mount,
                    "--mount", f"type=bind,src={originals},dst=/photos,readonly", image)
             started = True

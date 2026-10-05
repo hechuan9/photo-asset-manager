@@ -70,6 +70,7 @@ impl IntoResponse for ApiError {
 pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .merge(crate::remote_worker::router())
+        .merge(crate::imports::router())
         .route("/libraries/{library}/assets", get(assets))
         .route(
             "/libraries/{library}/assets/{asset}",
@@ -104,7 +105,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/libraries/{library}/hidden-directories",
             get(hidden_directories).put(set_hidden_directory),
         )
-        .route("/libraries/{library}/directories", get(directories))
+        .route(
+            "/libraries/{library}/directories",
+            get(directories).post(create_directory),
+        )
         .route("/libraries/{library}/navigation", get(navigation))
         .route(
             "/libraries/{library}/folders",
@@ -318,6 +322,57 @@ async fn set_hidden_directory(
 }
 async fn directories(State(state): State<Arc<AppState>>, Path(library): Path<String>) -> ApiResult {
     Ok(Json(blocking(move || state.store.directories(&library)).await?).into_response())
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateDirectoryRequest {
+    parent_path: String,
+    name: String,
+}
+async fn create_directory(
+    State(state): State<Arc<AppState>>,
+    Path(library): Path<String>,
+    Json(body): Json<CreateDirectoryRequest>,
+) -> ApiResult {
+    let result = blocking(move || {
+        let name = &body.name;
+        if name.trim().is_empty()
+            || name.starts_with('.')
+            || name == "@eaDir"
+            || name == "#recycle"
+            || name
+                .chars()
+                .any(|c| c == '/' || c == '\\' || c.is_control())
+        {
+            return Err(resource_error(
+                422,
+                "name must be a single visible folder name",
+            ));
+        }
+        let parent = state
+            .jobs
+            .validate_path(std::path::Path::new(&body.parent_path))
+            .map_err(|error| resource_error(422, format!("{error:#}")))?;
+        if !state.jobs.folders()?.iter().any(|folder| {
+            folder.active && folder.library_id == library && parent.starts_with(&folder.path)
+        }) {
+            return Err(resource_error(
+                404,
+                "directory is not tracked in this library",
+            ));
+        }
+        let path = parent.join(name);
+        std::fs::create_dir(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                resource_error(409, format!("create directory {}: {error}", path.display()))
+            } else {
+                anyhow::Error::from(error).context(format!("create directory {}", path.display()))
+            }
+        })?;
+        Ok(json!({"path":path}))
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(result)).into_response())
 }
 #[derive(Deserialize)]
 struct NavigationQuery {
@@ -640,7 +695,9 @@ async fn default_version(
             let result = state
                 .store
                 .set_default_version(&library, &id, &change.content_hash)?;
-            state.jobs.enqueue_reconcile_scope(&target.0, scope)?;
+            state
+                .jobs
+                .enqueue_file_change(&target.0, std::path::Path::new(target.1), 0)?;
             Ok(result)
         })
         .await?,
