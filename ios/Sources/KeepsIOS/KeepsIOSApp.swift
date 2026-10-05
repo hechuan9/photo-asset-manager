@@ -1,11 +1,18 @@
 import SwiftUI
 import KeepsAPI
+import BackgroundTasks
+import OSLog
 
 @main
 struct KeepsIOSApp: App {
+    @UIApplicationDelegateAdaptor(ThumbnailBackgroundDelegate.self) private var appDelegate
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var library = IOSLibraryStore()
     var body: some Scene {
         WindowGroup { IOSRootView().environmentObject(library) }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background { ThumbnailBackgroundDelegate.schedule() }
+            }
     }
 }
 
@@ -351,5 +358,42 @@ struct IOSSettingsView: View {
             didSave()
             dismiss()
         } catch { self.error = error.localizedDescription + "\n" + String(reflecting: error) }
+    }
+}
+
+
+final class ThumbnailBackgroundDelegate: NSObject, UIApplicationDelegate {
+    private static let identifier = "local.keeps.thumbnail-prefetch"
+    private static let logger = Logger(subsystem: "local.keeps", category: "thumbnail-background")
+
+    func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.identifier, using: .main) { task in
+            let work = Task { @MainActor in
+                Self.schedule()
+                do {
+                    guard let configuration = try KeepsSettings.load() else {
+                        task.setTaskCompleted(success: true)
+                        return
+                    }
+                    let completed = await ThumbnailPrefetch.shared.run(configuration: configuration, singlePass: true)
+                    task.setTaskCompleted(success: completed && !Task.isCancelled)
+                } catch {
+                    Self.logger.error("Background thumbnails failed: \(String(reflecting: error), privacy: .public)")
+                    task.setTaskCompleted(success: false)
+                }
+            }
+            task.expirationHandler = { work.cancel() }
+        }
+        if !registered { Self.logger.error("Background thumbnail task registration failed") }
+        return true
+    }
+
+    static func schedule() {
+        let request = BGProcessingTaskRequest(identifier: identifier)
+        request.requiresNetworkConnectivity = true
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+        do { try BGTaskScheduler.shared.submit(request) }
+        catch { logger.error("Background thumbnail scheduling failed: \(String(reflecting: error), privacy: .public)") }
     }
 }

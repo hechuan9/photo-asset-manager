@@ -81,7 +81,7 @@ API 请求绕过 URLCache，版本判断由上述协议负责。目录导航来�
 
 两端共享 `PreviewCache`，目录为系统 Caches/KeepsMediaV2 下的 thumbnail、standard、preview。小图不设固定总容量上限，可全库保存；标准照片与过渡旧预览分别为 5 GiB LRU，超限回收至 4 GiB。空闲空间低于 1 GiB 时回收当前用途的缓存；小图预取要求超过 2 GiB 空闲空间。升级只清理一次旧专用 KeepsPreviews，标记持久化；系统仍可回收 Caches，因此不承诺永久离线保存。内存成本按解码后的 bytesPerRow × height 计算，三个用途合计 iOS 64 MiB、macOS 256 MiB，按显示尺寸和屏幕倍率下采样。
 
-缓存身份由服务器 URL、资料库、资产 UUID、用途和内容版本组成，不含签名 URL；相同用途身份的并发下载合并，不额外使用 URLCache。链接有效期 15 分钟；仅对 `preview_token_expired` 自动按用途刷新并重试一次，缓存登记实际返回版本。前台 `ThumbnailPrefetch` 以持久分页游标逐张预取小图，覆盖隐藏与回收站资产；为交互下载让路，不修改可见列表或其刷新规则，退出前台可暂停，下次运行继续。
+缓存身份由服务器 URL、资料库、资产 UUID、用途和内容版本组成，不含签名 URL；相同用途身份的并发下载合并，不额外使用 URLCache。链接有效期 15 分钟；仅对 `preview_token_expired` 自动按用途刷新并重试一次，缓存登记实际返回版本。前台 `ThumbnailPrefetch` 以持久分页游标逐张预取小图，覆盖隐藏与回收站资产；为交互下载让路，不修改可见列表或其刷新规则，退出前台可暂停，下次运行继续。iOS 同时注册 `BGProcessingTask`，需要网络连接，在系统安排的后台时段复用同一预取器与分页断点；一轮覆盖普通资产和回收站后结束，系统到期则取消，后续运行继续。后台运行时机由 iOS 决定，不保证锁屏后立即下载或一次完成全库。
 
 NAS schema 6 增加照片、视频、目录实体表；旧 catalog 保留公共资产查询、版本和整理状态，实体表随其同步，空目录在扫描时入库。`media_cache` 保存源版本、生成规格、pending/processing/ready/failed 状态、有限重试和实际对象；扫描只入库，现有单 worker 统一处理历史、新增和失效缓存。NAS 本地每轮最多 20 个，轮后休息 60 秒，并发 1；临时 Linux worker 有独立的并发与资源上限，共享同一任务状态，不能重复领取 processing 项。缩略图最长边 512px，`KEEPS_THUMBNAIL_QUALITY` 默认 50，纳入规格版本；源变化、丢失、标准文件时间戳变化会重新排队。审计有独立时间字段，不伪造最近成功进度。完整尺寸标准照片编码 watchdog 为 900 秒，缩略图/旧预览仍为 180 秒；内存和线程限制相同。
 
@@ -281,7 +281,7 @@ schema 3 升级到 4 需要沿用停服、备份、`keeps-server migrate` 流程
 
 iOS 图库使用 KeepsAPI 的 `KeepsPhotoGrid` 计算大图、中图的等面积行及密集方格；Mac 保留等高行布局，iOS 仅复用其预览宽高比读取方法。图库档位持久化，通过捏合手势与菜单切换；行使用固定尺寸占位，仅可见时加载图片，分页每次 200 张以覆盖密集视图。`IOSPhotoViewer` 管理当前浏览快照和分页选择，信息表单以 sheet 呈现；`IOSZoomablePhoto` 使用 UIKit `UIScrollView` 承载共享预览，处理原生缩放与拖动。照片预览继续走 KeepsAPI 的签名 URL 与缓存。
 
-图库时间轴维持服务端 `capture_desc` 分页，显示时反向遍历行与行内照片，使最新照片位于底部。更早分页加在视觉顶部；`IOSLibraryStore` 在刷新时重读已加载窗口，在浏览旧内容时延后自动刷新。多选使用现有逐资产 PATCH / trash / restore API，精选集通过目录导航和 `directory` 查询浏览照片，无新增服务端接口。iOS 部署目标为 26，主图库浮动控件使用原生 Liquid Glass。
+图库时间轴维持服务端 `capture_desc` 分页，显示时反向遍历行与行内照片，使最新照片位于底部。更早分页加在视觉顶部；滚动触发在创建任务前互斥，加载完成本身不触发下一页，避免顶部可见期间连续叠加分页；`IOSLibraryStore` 在刷新时重读已加载窗口，在浏览旧内容时延后自动刷新。多选使用现有逐资产 PATCH / trash / restore API，精选集通过目录导航和 `directory` 查询浏览照片，无新增服务端接口。iOS 部署目标为 26，主图库浮动控件使用原生 Liquid Glass。
 
 ### iOS 精选集目录导航（2026-09-28）
 

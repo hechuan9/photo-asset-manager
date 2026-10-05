@@ -11,6 +11,7 @@ struct IOSWaterfallGallery: View {
     @State private var information: KeepsAsset?
     @State private var olderVisible = false
     @State private var hasScrolled = false
+    @State private var loadingOlder = false
     @State private var focusedAssetID: UUID?
 
     var body: some View {
@@ -21,8 +22,8 @@ struct IOSWaterfallGallery: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 1) {
                     if library.canLoadMore {
-                        Button("载入更早的照片") { Task { await library.loadMore() } }
-                            .frame(maxWidth: .infinity).padding().disabled(library.isLoading)
+                        Button("载入更早的照片") { loadOlder() }
+                            .frame(maxWidth: .infinity).padding().disabled(library.isLoading || loadingOlder)
                             .onScrollVisibilityChange(threshold: 0.01) { visible in
                                 olderVisible = visible
                                 if visible { loadOlderIfNeeded() }
@@ -56,7 +57,6 @@ struct IOSWaterfallGallery: View {
             .onScrollPhaseChange { _, phase in
                 if phase == .interacting { hasScrolled = true; loadOlderIfNeeded() }
             }
-            .onChange(of: library.isLoading) { _, loading in if !loading { loadOlderIfNeeded() } }
             .onScrollTargetVisibilityChange(idType: UUID.self, threshold: 0.2) { ids in
                 let visible = Set(ids)
                 let visibleAssets = rows.filter { visible.contains(library.assets[$0.indices.lowerBound].id) }
@@ -86,7 +86,16 @@ struct IOSWaterfallGallery: View {
 
     private func loadOlderIfNeeded() {
         guard hasScrolled, olderVisible, library.lastError == nil else { return }
-        Task { await library.loadMore() }
+        loadOlder()
+    }
+
+    private func loadOlder() {
+        guard !loadingOlder, !library.isLoading, library.canLoadMore else { return }
+        loadingOlder = true
+        Task {
+            defer { loadingOlder = false }
+            await library.loadMore()
+        }
     }
 }
 

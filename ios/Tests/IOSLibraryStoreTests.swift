@@ -137,6 +137,23 @@ struct IOSLibraryStoreTests {
         #expect(store.assets.count == 1)
     }
 
+    @Test func repeatedPaginationTriggersDoNotQueueMorePages() async {
+        let fixture = LibraryFixture()
+        fixture.setCursor("next")
+        let store = fixture.store()
+        await store.refresh()
+        fixture.setDelay(0.1)
+        let first = Task { await store.loadMore() }
+        while fixture.assetRequests < 2 { await Task.yield() }
+        for _ in 0..<20 { await store.loadMore() }
+        #expect(fixture.assetRequests == 2)
+        #expect(store.isLoading)
+        await first.value
+        #expect(fixture.assetRequests == 2)
+        #expect(!store.isLoading)
+        #expect(store.assets.count == 2)
+    }
+
     @Test func mutationUpdatesVisibleSnapshotWithoutStartingRefresh() async {
         let fixture = LibraryFixture()
         let store = fixture.store()

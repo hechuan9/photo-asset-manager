@@ -8,15 +8,17 @@ public actor ThumbnailPrefetch {
     public static let shared = ThumbnailPrefetch()
     private var running: Set<String> = []
 
-    public func run(configuration: KeepsConfiguration) async {
+    @discardableResult
+    public func run(configuration: KeepsConfiguration, singlePass: Bool = false) async -> Bool {
         let identity = [configuration.baseURL.absoluteString, configuration.libraryID].map { "\($0.utf8.count):\($0)" }.joined()
         let checkpoint = "thumbnail-prefetch-v1-" + SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
         while running.contains(checkpoint) {
-            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+            do { try await Task.sleep(for: .milliseconds(250)) } catch { return false }
         }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else { return false }
         running.insert(checkpoint)
         defer { running.remove(checkpoint) }
+        var hadFailures = false
         let client = KeepsClient(configuration: configuration)
         while !Task.isCancelled {
             do {
@@ -38,6 +40,7 @@ public actor ThumbnailPrefetch {
                         }
                     } catch {
                         try Task.checkCancellation()
+                        hadFailures = true
                         Logger(subsystem: "local.keeps", category: "thumbnail-prefetch").error("Thumbnail \(asset.id) failed: \(String(reflecting: error), privacy: .public)")
                     }
                     try await Task.sleep(for: .milliseconds(250))
@@ -46,15 +49,20 @@ public actor ThumbnailPrefetch {
                 UserDefaults.standard.set(page.nextCursor, forKey: checkpoint + "-cursor")
                 if page.nextCursor == nil {
                     UserDefaults.standard.set(!query.trashed, forKey: checkpoint + "-trash")
-                    if query.trashed { try await Task.sleep(for: .seconds(300)) }
+                    if query.trashed {
+                        if singlePass { return !hadFailures }
+                        try await Task.sleep(for: .seconds(300))
+                    }
                 }
                 try await Task.sleep(for: .seconds(2))
             } catch {
-                if Task.isCancelled { return }
+                if Task.isCancelled { return false }
                 Logger(subsystem: "local.keeps", category: "thumbnail-prefetch").error("Thumbnail prefetch failed: \(String(reflecting: error), privacy: .public)")
-                do { try await Task.sleep(for: .seconds(60)) } catch { return }
+                if singlePass { return false }
+                do { try await Task.sleep(for: .seconds(60)) } catch { return false }
             }
         }
+        return false
     }
 }
 
