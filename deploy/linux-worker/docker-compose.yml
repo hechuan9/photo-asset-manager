@@ -1,0 +1,38 @@
+services:
+  worker:
+    image: ${KEEPS_WORKER_IMAGE:-keeps-server:linux-worker}
+    build:
+      context: ../..
+      dockerfile: server/Dockerfile
+    entrypoint: ["python3", "/usr/local/bin/linux_cache_worker.py"]
+    profiles: [bulk]
+    restart: "no"
+    cpus: 16
+    mem_limit: 24g
+    pids_limit: 512
+    stop_grace_period: 1800s
+    extra_hosts:
+      - "keeps.hechuannas.synology.me:${KEEPS_NAS_IP:-192.168.0.50}"
+    environment:
+      KEEPS_WORKER_URL: ${KEEPS_WORKER_URL:-https://keeps.hechuannas.synology.me:8443}
+      KEEPS_LIBRARY_ID: ${KEEPS_LIBRARY_ID:?set library ID}
+      KEEPS_TOKEN_FILE: /run/secrets/keeps_token
+      KEEPS_WORKER_CONCURRENCY: ${KEEPS_WORKER_CONCURRENCY:-16}
+      KEEPS_WORKER_MAX_BYTES: 137438953472
+      KEEPS_WORKER_TASK_BYTES: 8589934592
+      KEEPS_WORKER_TMP: /work
+      KEEPS_MEDIA_ADDRESS_SPACE_BYTES: 4294967296
+      OMP_NUM_THREADS: 1
+      MAGICK_THREAD_LIMIT: 1
+    secrets:
+      - keeps_token
+    volumes:
+      - ${KEEPS_WORKER_SCRATCH:-./scratch}:/work
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+secrets:
+  keeps_token:
+    file: ${KEEPS_TOKEN_PATH:?set token file path}

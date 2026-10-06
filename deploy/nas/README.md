@@ -1,77 +1,43 @@
-# NAS 部署
+# NAS Docker 部署
 
-NAS 上的 Rust 服务是 Keeps 唯一业务后端；macOS/iOS 通过 HTTP API 浏览和整理照片。客户端不运行扫描器，不维护业务 SQLite，也不上传 ledger。
+日常 NAS 使用[原生 SPK](../spk/README.md)。本目录保留 Docker 构建和独立部署入口；不要与原生套件同时访问同一状态目录。
 
-## 存储与运行
+## 配置与启动
 
-Compose 使用 `server/Dockerfile`。SQLite 数据、任务队列和可重建预览存于 `KEEPS_ROOT`：
-
-- `db/control_plane.sqlite`：资产查询投影、元数据及历史事件。
-- `db/jobs.sqlite`：追踪目录、后台任务、增量文件状态。
-- `previews/`：1200px 上限的 HEIC 预览。
-- `backups/`：升级前备份。
-
-四个原片目录按 NAS 真实绝对路径同路径只读挂入容器；宿主目录必须已经存在。容器的 `/volume2` 只包含这些原片挂载及其父目录，服务数据另挂 `/myphoto/keeps`。服务不会删除、移动或覆盖照片，回收站和停止追踪只改数据库。
-
-导航、文件索引和任务均使用 NAS 路径，例如 `/volume2/photo`，不再使用 `/originals` 或客户端 `/Volumes` 别名。已有部署须停服，运行 `scripts/migrate_nas_paths.py`（先 dry-run，apply 时自动备份两个数据库），再用新 Compose 重建容器。历史清单恢复只验证存在、大小和既有资产关联，内容哈希由正常扫描继续核对。
-
-`KEEPS_LIBRARY_ID` 指定初始资料库。首次运行自动追踪 `/volume2`；停止追踪后重启不会重新启用。默认每 300 秒安排扫描，单 worker 顺序执行，已有运行任务不会重复排队。进程重启后恢复未完成任务；未变化的文件跳过处理。扫描读取 SHA-256 和 EXIF，优先复用已有资产与预览，缺少预览时生成 HEIC。失败保留错误链，可从 macOS 的 NAS 任务面板重试。
-
-无时区 EXIF 按 `TZ` 解析；迁移时应使用原有 Mac 的解释时区，目前配置 `America/New_York`。RAW 支持范围取决于 LibRaw；无法解码的文件保留原片并将任务标记失败。
-
-## 配置与升级
-
-```bash
+```sh
 cd deploy/nas
 cp .env.example .env
 chmod 600 .env
-# 填写真实宿主路径、客户端可达 URL 和随机 KEEPS_ACCESS_TOKEN
-# 不要把令牌放到聊天、命令参数或 Git 中
+# 填写路径、客户端可达地址和随机 KEEPS_ACCESS_TOKEN
+# 新空库使用 CONTROL_PLANE_AUTO_CREATE_SCHEMA=1 初始化
 docker compose build
-```
-
-新空库可设 `CONTROL_PLANE_AUTO_CREATE_SCHEMA=1` 初始化。已有库升级必须停止旧服务，使用 SQLite backup API 保存一致备份，随后显式迁移：
-
-```bash
-docker compose stop control-plane
-# 先备份 KEEPS_ROOT/db/control_plane.sqlite，并检查备份可读
-docker compose run --rm --no-deps control-plane migrate
-# 已有库保持 CONTROL_PLANE_AUTO_CREATE_SCHEMA=0
 docker compose up -d control-plane
 curl --fail http://localhost:2283/healthz
 ```
 
-迁移以事务回放旧事件，保留原表、资产 ID、评分、标签与回收站状态，建立 NAS 查询投影。新客户端仅调用 assets/counts/directories/folders/jobs 等 API；旧客户端的 ledger 上传、心跳、预览上传接口已关闭。
+原片保持 `/volume2/photo`；`KEEPS_ROOT` 单独保存 `db/`、`previews/` 和维护状态，不存放原片或标准照片。Docker 示例将 `/volume2/docker/keeps/data` 挂载到 `/keeps`。数据库为 `control_plane.sqlite` 和 `jobs.sqlite`，同一状态目录只允许一个服务管理。
 
-业务 API 要求 `Authorization: Bearer <KEEPS_ACCESS_TOKEN>`；健康检查及有时效签名的预览下载除外。HTTP 地址用于可信局域网，外部访问需 HTTPS 或 VPN。令牌存在 NAS Compose 目录 `.env`，权限 root:0600；群晖继承 ACL 可能放宽初始权限，必须显式 chmod 并回读。SSH 密码独立保存在本机 `codex-secret` 加密库。
+`KEEPS_LIBRARY_ID`、token 和 `TZ` 在迁移时保持一致，无时区 EXIF 按 `TZ` 解析。照片目录可写仅用于显式导入、新增标准图及身份 metadata 补写；禁止覆盖、删除或移动已有照片。回收站和停止追踪只修改数据库。
 
-## 当前目标
+业务 API 使用 Bearer token；健康检查和有时效签名的预览下载除外。Compose 将 2283 绑定至回环地址，客户端入口需配置 HTTPS 反向代理或 VPN，保留 Authorization、路径和查询参数。`CONTROL_PLANE_PUBLIC_BASE_URL` 必须与客户端入口一致；令牌和含签名 URL 的日志不提交 Git。
 
-- NAS：`192.168.0.50:2283`，DSM 7.3.2 / x86_64，Docker 24.0.2。
-- 资料库：`local-library`；容器：`keeps-control-plane`；重启策略：`unless-stopped`。
-- Compose 目录：`/volume2/docker/keeps/deploy/nas`。
-- 服务数据：`/volume2/myphoto/keeps`。
-- 原片：`/volume2/photo`、`/volume2/myphoto/未处理Raw`、`/volume2/myphoto/已处理Raw`、`/volume2/myphoto/和川专属`。
-- 上版备份：`/volume2/myphoto/keeps/backups/before-rust-20260926-102248.sqlite`。
+## 升级与恢复
 
-首次目录扫描可能耗时较长，资产 API 可立即读取迁移后的历史库；目录位置随扫描补全。服务健康不等于全库扫描结束，查看 `/libraries/local-library/jobs` 的状态和计数。
+先停止服务及独立维护进程，用 SQLite backup API 备份两个数据库，并保留镜像及 `.env`。已有库使用新镜像显式迁移：
 
-## 2026-09-26 NAS 核心版本验证
+```sh
+docker compose stop control-plane
+# 在此完成双库备份并检查备份可读
+docker compose run --rm --no-deps control-plane migrate
+docker compose up -d control-plane
+```
 
-- 部署镜像 `keeps-server:nas-core-20260926`，Compose 使用其 `keeps-server:local` 标签。
-- 升级备份 `/volume2/myphoto/keeps/backups/before-nas-core-20260926-181636.sqlite`，SQLite 完整性检查通过。
-- 成功回放并保留 744,409 条历史事件；116,872 条快照对应 116,745 个唯一资产，迁移后的资产数一致。
-- 业务鉴权、资产查询、600,194 字节现有预览下载及内容 SHA-256 验证通过；真实响应由共享 Swift DTO 成功解码。
-- 四个原片 mount 的 `RW=false`；容器重启后保留同一未完成任务，并从增量记录跳过已完成文件。
-- Rust 34 项自动测试、Clippy、真实容器迁移/扫描/预览/修改/重启测试通过；共享 Swift 7 项、macOS 6 项测试及 iOS Simulator 构建通过。
-- 首次全库扫描仍在运行，不能把服务部署完成当成全库处理完成。iOS 模拟器卡在系统启动，未完成界面实测；未安装到 iOS 真机。
+迁移后检查健康、鉴权、资产计数、预览下载和任务恢复。回退必须使用匹配的数据库、镜像及配置，先保留最新状态，不能只切回旧镜像或恢复单个数据库。原片和新增标准图均不得删除。
 
-补充现场验证见 [NAS 服务验证报告](../../docs/validation/nas-service-20260926.md)：在 NAS 本机使用生产镜像完成坏文件、幂等性、SIGKILL 恢复与完整历史数据比对；生产服务持续运行。
+历史路径迁移使用 `scripts/migrate_nas_paths.py`；存储迁移使用 `scripts/migrate_nas_storage.py`。先查看 `--help` 并预演，正式应用必须停止服务。旧数据仅含 ledger、没有业务投影时，应先完成历史导入；运行时不再回放 ledger。
 
-后续目录导航版本已部署为 `keeps-server:navigation-20260926`：新增服务端真实目录按层查询与本地接入状态，macOS 已完成两区域界面实测。备份、挂载与验收证据见 [导航验收](../../docs/validation/nas-navigation-20260926.md)。
+## 后台处理
 
-最新统一资料库版本为 `keeps-server:unified-http-20260926`，运行镜像 `e527e706e61c`，容器 healthy。导航 API 已移除未实现的 `location/local` 字段；Mac 统一资料库与来源刷新通过。备份、回退镜像和线上验证见 [统一 HTTP 资料库验证](../../docs/validation/2026-09-26-unified-http-library.md)。
+文件事件与增量状态驱动扫描，不定时重复全库扫描；启动或事件丢失时保留补漏。日常本地编码开启、远端派发关闭。每批最多 20 项、并发 1、轮后休息 60 秒；Linux 仅用于明确安排的[一次性批量处理](../linux-worker/README.md)。
 
-当前隐藏目录版本为 `keeps-server:hidden-directories-20260926`，镜像 `81af7a9a9fd7`，schema 2；容器 healthy。新增目录隐藏配置与资产/计数过滤，迁移保留全部 117,344 个资产。双库备份、逐行数据比对、真实隐藏规则及原片只读验证见 [隐藏目录部署验收](../../docs/validation/2026-09-26-hidden-directories-nas.md)。回退必须同时恢复升级前 schema 1 数据库，不能只切回旧镜像。
-
-当前缓存契约版本为 `keeps-server:cache-contract-20260927`，镜像 `2003e93c989a`，schema 2 不变，容器 healthy。已过期的有效签名预览链接返回 HTTP 403 / `preview_token_expired`，篡改令牌仍返回 HTTP 400，换链响应包含顶层 `width`、`height`、`version`；双库备份、原片只读挂载与任务恢复验证见 [缓存 NAS 部署验证](../../docs/validation/cache-nas-20260927.md)。
+`GET /libraries/{library}/jobs` 查看扫描任务，`GET /libraries/{library}/cache-status` 查看编码与缓存清理。`cache-retry` / `cache-rebuild` 每次最多处理 20 项。GC 只清理已登记且无引用的旧预览，等待 20 分钟；不删除原片、标准图或未知文件。服务健康不表示全库处理完成。

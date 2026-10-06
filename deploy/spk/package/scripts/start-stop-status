@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+unit=pkguser-KeepsNativeProbe.service
+case "${1:-}" in
+    start) exec /usr/syno/bin/synosystemctl start "$unit" ;;
+    stop) exec /usr/syno/bin/synosystemctl stop "$unit" ;;
+    status)
+        state=$(/usr/syno/bin/synosystemctl get-active-status "$unit")
+        if [ "$state" = active ]; then exit 0; fi
+        exit 3
+        ;;
+    prestart|prestop) exit 0 ;;
+    *) printf 'Unsupported lifecycle action: %s\n' "${1:-}" >&2; exit 1 ;;
+esac

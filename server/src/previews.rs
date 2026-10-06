@@ -77,9 +77,7 @@ impl PreviewStorage {
             );
         }
         fs::create_dir_all(&root).context("create keeps root")?;
-        for name in [
-            "db", "ledger", "previews", "cache", "ingest", "exports", "backups", "logs", "tmp",
-        ] {
+        for name in ["db", "previews", "backups", "tmp"] {
             let path = root.join(name);
             reject_symlink(&path)?;
             fs::create_dir_all(&path).with_context(|| format!("create {}", path.display()))?;
@@ -89,6 +87,10 @@ impl PreviewStorage {
             base_url: base_url.trim_end_matches('/').into(),
             signing_key: signing_key.as_bytes().to_vec(),
         })
+    }
+
+    pub fn free_bytes(&self) -> Result<i64> {
+        crate::cache_pipeline::free_bytes(&self.root)
     }
 
     pub fn upload(&self, request: &Value) -> Result<Value> {
@@ -137,7 +139,21 @@ impl PreviewStorage {
         hash: &str,
         source: &Path,
     ) -> Result<Value> {
-        let object = json!({"bucket":BUCKET,"key":format!("libraries/{library}/assets/{asset}/derivatives/preview/{hash}.heic")});
+        self.put_generated_role(library, asset, hash, source, "preview")
+    }
+    pub fn put_generated_role(
+        &self,
+        library: &str,
+        asset: &str,
+        hash: &str,
+        source: &Path,
+        role: &str,
+    ) -> Result<Value> {
+        ensure!(
+            ["preview", "thumbnail"].contains(&role),
+            "invalid generated role"
+        );
+        let object = json!({"bucket":BUCKET,"key":format!("libraries/{library}/assets/{asset}/derivatives/{role}/{hash}.heic")});
         let token = self.signed_url(&object, "upload")?;
         self.write(
             token
@@ -187,7 +203,7 @@ impl PreviewStorage {
         Ok(path)
     }
 
-    fn signed_url(&self, object: &Value, operation: &str) -> Result<String> {
+    pub(crate) fn signed_url(&self, object: &Value, operation: &str) -> Result<String> {
         self.object_path(object)?;
         let payload = json!({"bucket": text(object, "bucket")?, "key": text(object, "key")?, "operation": operation, "expires": now()? + TOKEN_LIFETIME});
         let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload)?);
@@ -200,7 +216,7 @@ impl PreviewStorage {
         ))
     }
 
-    fn verify(&self, token: &str, operation: &str) -> Result<Value> {
+    pub(crate) fn verify(&self, token: &str, operation: &str) -> Result<Value> {
         let current_time = now()?;
         let (payload, expires) = (|| -> Result<(Value, u64)> {
             let (encoded, signature) = token.split_once('.').context("invalid preview token")?;
@@ -230,7 +246,7 @@ impl PreviewStorage {
         })?;
         if expires <= current_time {
             let error = anyhow::anyhow!("preview token expired");
-            let context = if operation == "download" {
+            let context = if operation == "download" || operation == "standard" {
                 PreviewError {
                     status: 403,
                     code: "preview_token_expired".into(),

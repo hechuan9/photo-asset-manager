@@ -3,61 +3,271 @@ import KeepsAPI
 
 struct IOSWaterfallGallery: View {
     @EnvironmentObject private var library: IOSLibraryStore
+    @Binding var selecting: Bool
+    @Binding var selectedIDs: Set<UUID>
+    @Binding var density: KeepsGalleryDensity
+    @Binding var visibleDates: String
+    @State private var selected: KeepsAsset?
+    @State private var information: KeepsAsset?
+    @State private var olderVisible = false
+    @State private var hasScrolled = false
+    @State private var loadingOlder = false
+    @State private var focusedAssetID: UUID?
+    @State private var scrollRowID: UUID?
+    @State private var layout = KeepsPhotoGrid.Snapshot()
+
     var body: some View {
         GeometryReader { geometry in
-            let count = geometry.size.width > 700 ? 4 : 2
-            let columns = columns(count: count)
+            let rows = layout.rows
+            let assetsByID = Dictionary(uniqueKeysWithValues: library.assets.map { ($0.id, $0) })
+            ScrollViewReader { proxy in
             ScrollView {
-                HStack(alignment: .top, spacing: 8) {
-                    ForEach(columns.indices, id: \.self) { index in
-                        LazyVStack(spacing: 8) {
-                            ForEach(columns[index]) { asset in
-                                NavigationLink {
-                                    IOSAssetDetail(asset: asset).environmentObject(library)
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 5) {
-                                        IOSPreviewImage(asset: asset, configuration: library.configuration)
-                                            .aspectRatio(ratio(asset), contentMode: .fit)
-                                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                                        Text(asset.originalFilename).font(.caption).lineLimit(1)
-                                        if asset.rating > 0 { Text(String(repeating: "★", count: asset.rating)).font(.caption).foregroundStyle(.yellow) }
-                                    }
-                                }.buttonStyle(.plain)
+                VStack(alignment: .leading, spacing: 1) {
+                    if library.canLoadMore {
+                        Button("载入更早的照片") { loadOlder() }
+                            .frame(maxWidth: .infinity).padding().disabled(library.isLoading || loadingOlder)
+                            .onScrollVisibilityChange(threshold: 0.01) { visible in
+                                olderVisible = visible
+                                if visible { loadOlderIfNeeded() }
                             }
-                        }.frame(maxWidth: .infinity)
                     }
-                }.padding(8)
-                if library.canLoadMore {
-                    Button("加载更多") { Task { await library.loadMore() } }
-                        .disabled(library.isLoading)
-                        .padding()
-                        .onAppear { Task { await library.loadMore() } }
+                    ForEach(Array(rows.reversed())) { row in
+                        IOSPhotoGridRow(
+                            row: row, assetsByID: assetsByID,
+                            width: geometry.size.width,
+                            selecting: $selecting, selectedIDs: $selectedIDs, compact: density == .compact,
+                            open: open, showInformation: { information = $0 }
+                        ).id(row.id)
+                    }
+                }.scrollTargetLayout()
+            }
+            .contentMargins(.bottom, 0, for: .scrollContent)
+            .scrollPosition(id: $scrollRowID)
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .defaultScrollAnchor(.top, for: .alignment)
+            .bottomPullRefresh(bottomInset: 90) { await library.refreshFromBottom() }
+            .simultaneousGesture(MagnifyGesture().onEnded { value in
+                let next = density.pinched(magnification: value.magnification)
+                if next != density { density = next }
+            })
+            .onAppear { updateLayout(width: geometry.size.width, reset: true) }
+            .onChange(of: geometry.size.width) { _, width in updateLayout(width: width, reset: true) }
+            .onChange(of: library.layoutRevision) { _, _ in
+                updateLayout(width: geometry.size.width, reset: true)
+            }
+            .onChange(of: density) { _, _ in
+                updateLayout(width: geometry.size.width, reset: true)
+                if let focusedAssetID, let row = layout.rows.first(where: { $0.slots.contains { $0.id == focusedAssetID } }) {
+                    proxy.scrollTo(row.id, anchor: .center)
                 }
-            }.refreshable { await library.refresh() }
+            }
+            .onChange(of: library.assets) { _, _ in updateLayout(width: geometry.size.width) }
+            .onScrollPhaseChange { _, phase in
+                if phase == .interacting { hasScrolled = true; loadOlderIfNeeded() }
+            }
+            .onScrollTargetVisibilityChange(idType: UUID.self, threshold: 0.2) { ids in
+                let visible = Set(ids)
+                let visibleAssets = rows.filter { visible.contains($0.id) }
+                    .flatMap { row in row.slots.compactMap { assetsByID[$0.id] } }
+                if !visibleAssets.isEmpty { focusedAssetID = visibleAssets[visibleAssets.count / 2].id }
+                let dates = visibleAssets.map { String(($0.captureTime ?? $0.createdAt).prefix(10)) }.sorted()
+                if let first = dates.first, let last = dates.last {
+                    visibleDates = first == last ? first : "\(first) – \(last)"
+                }
+            }
+            }
+        }
+        .fullScreenCover(item: $selected) { asset in IOSPhotoViewer(initialAsset: asset).environmentObject(library) }
+        .sheet(item: $information) { asset in
+            NavigationStack {
+                IOSAssetDetail(asset: asset)
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { information = nil } } }
+            }.environmentObject(library)
         }
     }
-    private func ratio(_ asset: KeepsAsset) -> CGFloat {
-        guard let preview = asset.preview, preview.height > 0 else { return 0.82 }
-        return max(0.35, CGFloat(preview.width) / CGFloat(preview.height))
+
+    private func updateLayout(width: CGFloat, reset: Bool = false) {
+        let previousRows = layout.rows
+        layout.update(ids: library.assets.map(\.id),
+                      aspectRatios: library.assets.map { JustifiedAssetGridLayout.aspectRatio($0.gridPreview) },
+                      width: width, density: density, reset: reset)
+        guard !reset, let scrollRowID, !layout.rows.contains(where: { $0.id == scrollRowID }),
+              let index = previousRows.firstIndex(where: { $0.id == scrollRowID }) else { return }
+        let surviving = Set(layout.rows.map(\.id))
+        self.scrollRowID = previousRows[index...].first(where: { surviving.contains($0.id) })?.id
+            ?? previousRows[..<index].last(where: { surviving.contains($0.id) })?.id
     }
-    private func columns(count: Int) -> [[KeepsAsset]] {
-        var result = Array(repeating: [KeepsAsset](), count: count)
-        var heights = Array(repeating: CGFloat.zero, count: count)
-        for asset in library.assets {
-            let index = heights.indices.min { heights[$0] < heights[$1] } ?? 0
-            result[index].append(asset)
-            heights[index] += 1 / ratio(asset) + 0.2
+
+    private func open(_ asset: KeepsAsset) {
+        if selecting {
+            if !selectedIDs.insert(asset.id).inserted { selectedIDs.remove(asset.id) }
+        } else { selected = asset }
+    }
+
+    private func loadOlderIfNeeded() {
+        guard hasScrolled, olderVisible, library.lastError == nil else { return }
+        loadOlder()
+    }
+
+    private func loadOlder() {
+        guard !loadingOlder, !library.isLoading, library.canLoadMore else { return }
+        loadingOlder = true
+        Task {
+            defer { loadingOlder = false }
+            await library.loadMore()
         }
-        return result
+    }
+}
+
+private struct IOSPhotoGridRow: View {
+    @EnvironmentObject private var library: IOSLibraryStore
+    let row: KeepsPhotoGrid.Snapshot.StableRow
+    let assetsByID: [UUID: KeepsAsset]
+    let width: CGFloat
+    @Binding var selecting: Bool
+    @Binding var selectedIDs: Set<UUID>
+    let compact: Bool
+    let open: (KeepsAsset) -> Void
+    let showInformation: (KeepsAsset) -> Void
+    @State private var visible = false
+
+    var body: some View {
+        // 行的占位尺寸始终确定，图片仅在可见时解码，避免长图库持有所有预览。
+        Color.clear.frame(width: width, height: row.height)
+            .overlay(alignment: .leading) {
+                if visible {
+                    HStack(spacing: 1) {
+                        ForEach(Array(row.slots.reversed())) { slot in
+                            if let asset = assetsByID[slot.id] {
+                            Button { open(asset) } label: {
+                                IOSPreviewImage(asset: asset, configuration: library.configuration, contentMode: compact ? .fill : .fit)
+                                    .frame(width: slot.size.width, height: slot.size.height)
+                                    .overlay(alignment: .bottomTrailing) {
+                                        if selecting {
+                                            Image(systemName: selectedIDs.contains(asset.id) ? "checkmark.circle.fill" : "circle")
+                                                .font(compact ? .caption : .title3)
+                                                .foregroundStyle(selectedIDs.contains(asset.id) ? .cyan : .white)
+                                                .shadow(radius: 2).padding(3)
+                                        } else if asset.flagState == "picked" {
+                                            Image(systemName: "heart.fill").font(compact ? .caption2 : .body)
+                                                .foregroundStyle(.white).shadow(radius: 2).padding(3)
+                                        }
+                                    }
+                            }.buttonStyle(.plain).accessibilityLabel(asset.originalFilename)
+                                .accessibilityAddTraits(selectedIDs.contains(asset.id) ? .isSelected : [])
+                                .contextMenu {
+                                    Button("查看照片", systemImage: "photo") { open(asset) }
+                                    Button("选择", systemImage: "checkmark.circle") { selecting = true; selectedIDs.insert(asset.id) }
+                                    Button("信息与整理", systemImage: "info.circle") { showInformation(asset) }
+                                }
+                            } else {
+                                Color.clear.frame(width: slot.size.width, height: slot.size.height)
+                                    .accessibilityHidden(true)
+                            }
+                        }
+                    }
+                }
+            }
+            .onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
     }
 }
 
 struct IOSPreviewImage: View {
     let asset: KeepsAsset
     let configuration: KeepsConfiguration?
+    var contentMode: ContentMode = .fit
+    var loadStandard = false
+    var body: some View { KeepsPreviewImage(asset: asset, configuration: configuration, contentMode: contentMode, loadStandard: loadStandard) }
+}
+
+struct IOSPhotoViewer: View {
+    @EnvironmentObject private var library: IOSLibraryStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var selection: UUID
+    @State private var photos: [KeepsAsset] = []
+    @State private var controlsVisible = true
+    @State private var information: KeepsAsset?
+    let initialAsset: KeepsAsset
+
+    init(initialAsset: KeepsAsset) {
+        self.initialAsset = initialAsset
+        _selection = State(initialValue: initialAsset.id)
+    }
+
+    private var current: KeepsAsset { photos.first { $0.id == selection } ?? initialAsset }
 
     var body: some View {
-        KeepsPreviewImage(asset: asset, configuration: configuration)
+        ZStack {
+            Color.black.ignoresSafeArea()
+            TabView(selection: $selection) {
+                ForEach(photos) { asset in
+                    IOSZoomablePhoto(asset: asset, configuration: library.configuration,
+                                     toggleControls: { withAnimation { controlsVisible.toggle() } },
+                                     close: { dismiss() })
+                        .tag(asset.id)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .overlay(alignment: .top) {
+                if controlsVisible {
+                    HStack {
+                        Button { dismiss() } label: { Image(systemName: "chevron.down").padding(12) }
+                            .accessibilityLabel("返回图库")
+                        Spacer()
+                        VStack(spacing: 4) {
+                            Text(String((current.captureTime ?? current.createdAt).prefix(10))).font(.headline)
+                            Text(current.originalFilename).font(.caption).lineLimit(1)
+                        }
+                        Spacer()
+                        Button { information = current } label: { Image(systemName: "info.circle").padding(12) }
+                            .accessibilityLabel("照片信息与整理")
+                    }.padding(.horizontal, 8).padding(.vertical, 6).background(.ultraThinMaterial)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if controlsVisible {
+                    ScrollViewReader { proxy in
+                        ScrollView(.horizontal) {
+                            LazyHStack(spacing: 3) {
+                                ForEach(photos) { asset in
+                                    Button { selection = asset.id } label: {
+                                        IOSPreviewImage(asset: asset, configuration: library.configuration)
+                                            .frame(width: 48 * JustifiedAssetGridLayout.aspectRatio(asset.gridPreview), height: 48)
+                                            .overlay { if selection == asset.id { Rectangle().stroke(.white, lineWidth: 2) } }
+                                    }.buttonStyle(.plain).id(asset.id)
+                                        .accessibilityLabel(asset.originalFilename)
+                                        .accessibilityAddTraits(selection == asset.id ? .isSelected : [])
+                                }
+                            }.padding(8)
+                        }.frame(height: 64).scrollIndicators(.hidden).background(.ultraThinMaterial)
+                            .onAppear { proxy.scrollTo(selection, anchor: .center) }
+                            .onChange(of: selection) { _, id in withAnimation { proxy.scrollTo(id, anchor: .center) } }
+                    }.frame(height: 64)
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+        .statusBarHidden(!controlsVisible)
+        .onAppear { photos = library.assets.isEmpty ? [initialAsset] : library.chronologicalAssets }
+        .onChange(of: library.assets) { _, updated in
+            photos = updated.reversed()
+            if !photos.contains(where: { $0.id == selection }) { dismiss() }
+        }
+        .task(id: selection) {
+            if photos.prefix(3).contains(where: { $0.id == selection }), library.canLoadMore { await library.loadMore() }
+        }
+        .sheet(item: $information) { asset in
+            NavigationStack {
+                IOSAssetDetail(asset: asset, onRemoved: { id in
+                    information = nil
+                    let index = photos.firstIndex { $0.id == id } ?? 0
+                    photos.removeAll { $0.id == id }
+                    if photos.isEmpty { dismiss() }
+                    else { selection = photos[min(index, photos.count - 1)].id }
+                })
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { information = nil } } }
+            }.environmentObject(library)
+        }
     }
 }
 
@@ -65,6 +275,7 @@ struct IOSAssetDetail: View {
     @EnvironmentObject private var library: IOSLibraryStore
     @Environment(\.dismiss) private var dismiss
     @State var asset: KeepsAsset
+    var onRemoved: (UUID) -> Void = { _ in }
     @State private var rating = 0
     @State private var flag = "unflagged"
     @State private var color = ""
@@ -82,6 +293,15 @@ struct IOSAssetDetail: View {
                 if let time = asset.captureTime { LabeledContent("拍摄时间", value: time) }
                 if !asset.cameraModel.isEmpty { LabeledContent("相机", value: asset.cameraModel) }
                 if !asset.lensModel.isEmpty { LabeledContent("镜头", value: asset.lensModel) }
+            }
+            if let configuration = library.configuration {
+                Section {
+                    KeepsAssetVersionsView(assetID: asset.id, revision: asset.updatedAt, configuration: configuration) { updated in
+                        guard library.configuration == configuration else { return }
+                        asset = updated
+                        library.update(updated)
+                    }.id(asset.id.uuidString + configuration.baseURL.absoluteString + configuration.libraryID)
+                }
             }
             Section("整理") {
                 Stepper("评分：\(rating)", value: $rating, in: 0...5)
@@ -106,6 +326,9 @@ struct IOSAssetDetail: View {
             } footer: { Text("此操作只改变 NAS 图库状态，不会删除或移动原片。") }
             if busy { ProgressView() }
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+        }
+        .onChange(of: library.assets) { _, assets in
+            if let updated = assets.first(where: { $0.id == asset.id }) { asset = updated }
         }
         .navigationTitle("照片详情")
         .navigationBarTitleDisplayMode(.inline)
@@ -136,7 +359,7 @@ struct IOSAssetDetail: View {
         do {
             let client = KeepsClient(configuration: configuration)
             asset = try await (asset.trashed ? client.restoreAsset(id: asset.id) : client.trashAsset(id: asset.id))
-            library.update(asset); dismiss()
+            library.update(asset); onRemoved(asset.id); dismiss()
         } catch { self.error = String(reflecting: error) }
     }
 }

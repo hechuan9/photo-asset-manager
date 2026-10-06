@@ -3,7 +3,9 @@ import KeepsAPI
 
 struct ContentView: View {
     @EnvironmentObject private var library: LibraryStore
-    @State private var showsTasks = false
+    @Environment(\.openWindow) private var openWindow
+    @State private var showsImport = false
+    @State private var importStore: ImportStore?
     @FocusState private var galleryFocused: Bool
 
     @State private var showsSidebar = true
@@ -37,19 +39,29 @@ struct ContentView: View {
         .foregroundStyle(WorkspaceStyle.text)
         .preferredColorScheme(.dark)
         .tint(WorkspaceStyle.accent)
-        .sheet(isPresented: $showsTasks, onDismiss: { if showsSources { library.refreshNavigation() }; library.refresh() }) {
-            if let client = library.client { NASTasksView(client: client) }
+        .sheet(isPresented: $showsImport, onDismiss: { library.refreshNavigation(); library.refresh(force: true) }) {
+            if let importStore { ImportView(store: importStore, initialTarget: library.query.directory) }
         }
         .task { library.refresh() }
+        .prefetchKeepsThumbnails(configuration: library.configuration)
         .onChange(of: library.query) { _, _ in library.refresh() }
         .onChange(of: library.query.directory) { _, _ in detailMode = false }
-        .onChange(of: showsSources) { _, visible in if visible { library.refreshNavigation() } }
+        .onChange(of: showsSources) { _, visible in if visible { library.refreshNavigation(force: false) } }
     }
 
     private var topBar: some View {
         HStack(spacing: 20) {
             railButton("显示或隐藏目录", icon: "sidebar.left", selected: showsSidebar) { showsSidebar.toggle() }
             Text("Keeps").font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary)
+            Button {
+                guard let client = library.client else { return }
+                if importStore == nil || importStore?.job != nil || importStore?.client.configuration != client.configuration {
+                    importStore = ImportStore(client: client)
+                }
+                showsImport = true
+            } label: { Label("导入", systemImage: "square.and.arrow.down") }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
+                .disabled(library.client == nil)
             Spacer(minLength: 12)
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -66,7 +78,7 @@ struct ContentView: View {
             .frame(maxWidth: 620)
             Button { showsFilters.toggle() } label: { Image(systemName: "line.3.horizontal.decrease").frame(width: 28, height: 28) }
                 .buttonStyle(.plain).help("显示或隐藏筛选")
-            Button { library.refresh(); if showsSources { library.refreshNavigation() } } label: {
+            Button { library.refresh(force: true); if showsSources { library.refreshNavigation() } } label: {
                 Image(systemName: "arrow.clockwise").frame(width: 28, height: 28)
             }.buttonStyle(.plain).help("刷新资料库").disabled(library.client == nil)
             SettingsLink { Image(systemName: "gearshape").frame(width: 28, height: 28) }
@@ -99,8 +111,8 @@ struct ContentView: View {
                 }
             } else { Spacer() }
             Divider()
-            Button { showsTasks = true } label: {
-                Label("管理来源与任务", systemImage: "server.rack")
+            Button { openWindow(id: "nas-tasks") } label: {
+                Label("任务追踪", systemImage: "list.bullet.rectangle")
                     .font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading).padding(16)
             }.buttonStyle(.plain).disabled(library.client == nil)
         }.padding(.top, 12).background(WorkspaceStyle.panel)
@@ -111,7 +123,7 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 Text(library.locationTitle).font(.system(size: 18, weight: .semibold)).lineLimit(1).help(library.locationTitle)
                 Spacer(minLength: 8)
-                if library.configuration != nil, library.lastError == nil, !library.isLoading {
+                if library.configuration != nil, library.lastError == nil, library.hasLoadedResults {
                     Text("\(library.total) 张照片").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             }.padding(.horizontal, 16).frame(height: 52)
@@ -135,11 +147,11 @@ struct ContentView: View {
             ContentUnavailableView {
                 Label("无法加载资料库", systemImage: "network.slash")
             } description: { WorkspaceErrorView(title: "请检查服务器连接后重试。", details: error) }
-            actions: { Button("重试") { library.refresh() } }
-        } else if library.assets.isEmpty && library.isLoading {
+            actions: { Button("重试") { library.refresh(force: true) } }
+        } else if !library.hasLoadedResults && library.isLoading {
             ProgressView("正在读取目录内容…").frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if library.assets.isEmpty {
-            ContentUnavailableView("没有符合条件的照片", systemImage: "photo.on.rectangle", description: Text("可调整筛选条件，或在“管理来源与任务”中添加服务器目录并扫描。"))
+            ContentUnavailableView("没有符合条件的照片", systemImage: "photo.on.rectangle", description: Text("可调整筛选条件，或在“设置 → 来源”中添加服务器目录并扫描。"))
         } else {
             gallery
         }
@@ -148,11 +160,11 @@ struct ContentView: View {
     private var gallery: some View {
         Group {
             if detailMode, let asset = library.selectedAsset {
-                RemotePreview(asset: asset).padding(24)
+                RemotePreview(asset: asset, loadStandard: true).padding(24)
             } else {
                 GeometryReader { geometry in
                     let rows = JustifiedAssetGridLayout.rows(
-                        aspectRatios: library.assets.map { JustifiedAssetGridLayout.aspectRatio($0.preview) },
+                        aspectRatios: library.assets.map { JustifiedAssetGridLayout.aspectRatio($0.gridPreview) },
                         availableWidth: max(1, geometry.size.width - 2),
                         targetHeight: thumbnailSize * 0.78
                     )
@@ -168,13 +180,14 @@ struct ContentView: View {
                             }
                             if library.nextCursor != nil {
                                 ProgressView()
-                                    .opacity(library.isLoading ? 1 : 0)
+                                    .opacity(library.isLoading && !library.isCheckingRevision ? 1 : 0)
                                     .frame(maxWidth: .infinity)
                                     .padding()
                                     .onAppear { library.setPaginationVisible(true) }
                                     .onDisappear { library.setPaginationVisible(false) }
                             }
                         }.padding(1)
+                            .background(OverlayScrollerConfiguration())
                     }
                 }
             }
@@ -190,7 +203,7 @@ struct ContentView: View {
             library.select(asset.id, extending: NSEvent.modifierFlags.contains(.command))
         } label: {
             RemotePreview(asset: asset)
-                .frame(width: height * JustifiedAssetGridLayout.aspectRatio(asset.preview), height: height)
+                .frame(width: height * JustifiedAssetGridLayout.aspectRatio(asset.gridPreview), height: height)
                 .background(WorkspaceStyle.tile)
                 .overlay(alignment: .bottomLeading) {
                     if asset.rating > 0 || asset.flagState != "unflagged" {
@@ -232,13 +245,13 @@ struct ContentView: View {
                 }.disabled(library.isMutating)
             }
             Group {
-                if library.isLoading && library.assets.isEmpty { Text("正在读取…") }
+                if library.isLoading && !library.hasLoadedResults { Text("正在读取…") }
                 else if library.configuration != nil && library.lastError == nil {
                     Text(library.selectedIDs.isEmpty ? "\(library.assets.count) / \(library.total) 张" : "已选 \(library.selectedIDs.count) 张").foregroundStyle(.secondary)
                 }
             }
             Spacer(minLength: 4)
-            if library.isLoading || library.isMutating { ProgressView().controlSize(.small) }
+            if (library.isLoading && !library.isCheckingRevision) || library.isMutating { ProgressView().controlSize(.small) }
             if !detailMode && !showsInspector {
                 Image(systemName: "square.grid.3x3").foregroundStyle(.secondary)
                 Slider(value: $thumbnailSize, in: 130...300).frame(width: 100).help("缩略图大小")
@@ -322,10 +335,11 @@ struct ContentView: View {
 
 struct RemotePreview: View {
     var asset: KeepsAsset
+    var loadStandard = false
     @EnvironmentObject private var library: LibraryStore
 
     var body: some View {
-        KeepsPreviewImage(asset: asset, configuration: library.configuration)
+        KeepsPreviewImage(asset: asset, configuration: library.configuration, loadStandard: loadStandard)
     }
 }
 
@@ -357,11 +371,19 @@ struct AssetDetailView: View {
                     library.updateSelected(KeepsAssetPatch(tags: tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }))
                 }
                 Divider()
+                if let configuration = library.configuration {
+                    KeepsAssetVersionsView(assetID: asset.id, revision: asset.updatedAt, configuration: configuration) { _ in
+                        guard library.configuration == configuration else { return }
+                        library.refresh(force: true)
+                    }.id(asset.id.uuidString + configuration.baseURL.absoluteString + configuration.libraryID)
+                    Divider()
+                }
                 if asset.trashed { Button("从回收站恢复") { library.restoreSelected() } }
                 else { Button("移入回收站") { library.trashSelected() } }
                 Text("回收站只改变资产状态，磁盘原片始终保留。")
                     .font(.caption).foregroundStyle(.secondary)
             }.padding(18).disabled(library.isMutating)
+                .background(OverlayScrollerConfiguration())
         }
         .font(.system(size: 12))
         .task(id: asset.id) { tags = asset.tags.joined(separator: ", ") }

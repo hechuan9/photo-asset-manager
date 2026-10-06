@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+umask 077
+: "${SYNOPKG_PKGVAR:?Package data directory is required}"
+mkdir -p "$SYNOPKG_PKGVAR/state"
+if [ ! -e "$SYNOPKG_PKGVAR/access-token" ]; then
+    token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+    [ "${#token}" -eq 64 ]
+    printf '%s\n' "$token" > "$SYNOPKG_PKGVAR/access-token"
+fi
+chmod 600 "$SYNOPKG_PKGVAR/access-token"
+if [ ! -e "$SYNOPKG_PKGVAR/original-root" ]; then
+    printf '%s\n' '/var/packages/KeepsNativeProbe/shares/keeps-native-probe' > "$SYNOPKG_PKGVAR/original-root"
+fi
+chmod 600 "$SYNOPKG_PKGVAR/original-root"
+if [ ! -e "$SYNOPKG_PKGVAR/server-url" ]; then
+    printf '%s\n' 'http://127.0.0.1:2285' > "$SYNOPKG_PKGVAR/server-url"
+fi
+chmod 600 "$SYNOPKG_PKGVAR/server-url"

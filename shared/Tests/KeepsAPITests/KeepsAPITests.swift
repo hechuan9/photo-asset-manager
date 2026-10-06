@@ -7,6 +7,110 @@ private let assetJSON = """
 """
 
 struct KeepsAPITests {
+    @Test func createDirectoryUsesLibraryAndSeparateParentAndName() async throws {
+        let fixture = Fixture { request in
+            #expect(request.httpMethod == "POST")
+            #expect(request.url!.path == "/api/libraries/library/directories")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-credential")
+            let body = try JSONSerialization.jsonObject(with: request.bodyData) as! [String: String]
+            #expect(body == ["parentPath": "/volume2/photo", "name": "旅行 & RAW"])
+            return (201, "{\"path\":\"/volume2/photo/旅行 & RAW\"}")
+        }
+        #expect(try await fixture.client.createDirectory(parentPath: "/volume2/photo", name: "旅行 & RAW") == "/volume2/photo/旅行 & RAW")
+    }
+
+    @Test func defaultImportOmitsDigestAndDisablesDeduplication() async throws {
+        let batchID = UUID()
+        let fixture = Fixture { request in
+            let body = try JSONSerialization.jsonObject(with: request.bodyData) as! [String: Any]
+            #expect(body["deduplicate"] as? Bool == false)
+            let files = body["files"] as! [[String: Any]]
+            #expect(files.first?["sha256"] == nil)
+            return (200, "{\"id\":\"\(batchID)\",\"targetPath\":\"incoming\",\"finished\":false,\"files\":[]}")
+        }
+        _ = try await fixture.client.prepareImport(KeepsImportManifest(id: batchID, targetPath: "incoming", files: [KeepsImportFile(id: UUID(), relativePath: "IMG.NEF", size: 3)]))
+    }
+
+    @Test func importContractPreservesRelativePathsAndServerAllocatedNames() async throws {
+        let batchID = UUID()
+        let fileID = UUID()
+        let digest = String(repeating: "a", count: 64)
+        let fixture = Fixture { request in
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-credential")
+            #expect(request.httpMethod == "POST")
+            if request.url!.path.hasSuffix("/finish") {
+                #expect(request.url!.path.contains(batchID.uuidString))
+                return (200, """
+                {"job":{"id":"job","folderID":"folder","libraryID":"library","path":"/volume2/photo/旅行","status":"pending"}}
+                """)
+            }
+            #expect(request.url!.path == "/api/libraries/library/imports")
+            let manifest = try JSONDecoder().decode(KeepsImportManifest.self, from: request.bodyData)
+            #expect(manifest.id == batchID)
+            #expect(manifest.targetPath == "/volume2/photo/旅行")
+            #expect(manifest.files.first?.relativePath == "子目录/IMG.3FR")
+            return (200, """
+            {"id":"\(batchID.uuidString.lowercased())","targetPath":"/volume2/photo/旅行","finished":false,"files":[{"id":"\(fileID)","relativePath":"子目录/IMG.3FR","fileName":"IMG.1.3FR","size":1024,"sha256":"\(digest)","uploaded":true}]}
+            """)
+        }
+        let manifest = KeepsImportManifest(id: batchID, targetPath: "/volume2/photo/旅行", files: [KeepsImportFile(id: fileID, relativePath: "子目录/IMG.3FR", size: 1024, sha256: digest)])
+        let batch = try await fixture.client.prepareImport(manifest)
+        #expect(batch.id == batchID)
+        #expect(batch.files.first?.fileName == "IMG.1.3FR")
+        #expect(batch.files.first?.uploaded == true)
+        #expect(try await fixture.client.finishImport(id: batchID).status == "pending")
+    }
+
+    @Test func scopedRevisionsPreserveUpdatingAndEncodeDirectory() async throws {
+        let path = "/volume2/photo/旅行 & RAW"
+        let fixture = Fixture { request in
+            #expect(request.cachePolicy == .reloadIgnoringLocalCacheData)
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+            #expect(items == [URLQueryItem(name: "path", value: path), URLQueryItem(name: "includeChildren", value: "true")])
+            return (200, """
+            {"revision":9223372036854775806,"isUpdating":true,"path":"/volume2/photo/旅行 & RAW","children":[{"path":"/volume2/photo/旅行 & RAW/sub","revision":9223372036854775807,"isUpdating":false}]}
+            """)
+        }
+        let value = try await fixture.client.revision(path: path, includeChildren: true)
+        #expect(value.isUpdating)
+        #expect(value.path == path)
+        #expect(value.children?.first?.revision == Int64.max)
+        #expect(value.children?.first?.isUpdating == false)
+    }
+
+    @Test func missingCacheStampIsRejectedRatherThanAssumedStable() throws {
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(KeepsAssetPage.self, from: Data("{\"items\":[],\"total\":0}".utf8))
+        }
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(KeepsCatalogRevision.self, from: Data("{\"revision\":1}".utf8))
+        }
+    }
+
+    @Test func revisionAndVersionSelectionUseLibraryScopedContracts() async throws {
+        let id = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let fixture = Fixture { request in
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-credential")
+            if request.url!.path.hasSuffix("/revision") { return (200, "{\"revision\":9223372036854775806,\"isUpdating\":false}") }
+            #expect(request.url!.path.contains("/libraries/library/assets/"))
+            if request.httpMethod == "PUT" {
+                #expect(request.url!.path.hasSuffix("/default-version"))
+                let body = try JSONSerialization.jsonObject(with: request.bodyData) as! [String: String]
+                #expect(body == ["contentHash": "hash"])
+            } else { #expect(request.url!.path.hasSuffix("/versions")) }
+            return (200, """
+            {"items":[{"contentHash":"hash","width":6000,"height":4000,"priority":2,"isDefault":true,"userSelected":true,"available":true,"paths":[{"path":"/photo/旅行.jpg","available":true}],"evidence":{}}]}
+            """)
+        }
+        #expect(try await fixture.client.revision().revision == 9223372036854775806)
+        let versions = try await fixture.client.versions(assetID: id)
+        #expect(versions.first?.filename == "旅行.jpg")
+        #expect(versions.first?.available == true)
+        let selected = try await fixture.client.setDefaultVersion(assetID: id, contentHash: "hash")
+        #expect(selected.first?.isDefault == true)
+        #expect(selected.first?.userSelected == true)
+    }
+
     @Test func hiddenDirectoryContractEncodesPathsAndFilterOverride() async throws {
         let fixture = Fixture { request in
             let path = request.url!.path
@@ -21,7 +125,7 @@ struct KeepsAPITests {
             let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
             #expect(items?.first { $0.name == "showHidden" }?.value == "true")
             if path.hasSuffix("/counts") { return (200, "{\"all\":1,\"picked\":0,\"trashed\":0}") }
-            return (200, "{\"items\":[],\"total\":0}")
+            return (200, "{\"items\":[],\"revision\":1,\"isUpdating\":false,\"total\":0}")
         }
         #expect(try await fixture.client.hiddenDirectories().paths == ["/volume2/photo/私人"])
         #expect(try await fixture.client.setDirectoryHidden(path: "/volume2/photo/私人", hidden: true).paths == ["/volume2/photo/私人"])
@@ -65,7 +169,7 @@ struct KeepsAPITests {
                 #expect(query.first { $0.name == "minRating" }?.value == "3")
                 #expect(query.first { $0.name == "recursive" }?.value == "false")
                 #expect(query.first { $0.name == "cursor" }?.value == "next+page")
-                return (200, "{\"items\":[\(assetJSON)],\"total\":2,\"nextCursor\":\"after-1\"}")
+                return (200, "{\"items\":[\(assetJSON)],\"revision\":1,\"isUpdating\":false,\"total\":2,\"nextCursor\":\"after-1\"}")
             }
             #expect(path.contains("/api/libraries/library/assets/"))
             if request.httpMethod == "PATCH" {

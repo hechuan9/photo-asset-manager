@@ -3,67 +3,29 @@ import KeepsAPI
 
 struct NASTasksView: View {
     let client: KeepsClient
-    @Environment(\.dismiss) private var dismiss
-    @State private var rootPath = ""
-    @State private var folders: [KeepsFolder] = []
     @State private var jobs: [KeepsJob] = []
-    @State private var newPath = "."
     @State private var isBusy = false
     @State private var errorMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("来源与任务").font(.title2)
-                Spacer()
-                if isBusy { ProgressView().controlSize(.small) }
-                Button("刷新") { perform { try await refresh() } }.disabled(isBusy)
-                Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
-            }
-            Text("服务器原片根目录：\(rootPath.isEmpty ? "等待连接" : rootPath)")
-                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-            Text("此处管理服务器目录，无需在本机挂载 NAS。输入相对于服务器原片根目录的路径；“.” 表示整个根目录。停止追踪只修改索引配置，保留所有原片。")
-                .font(.caption).foregroundStyle(.secondary)
-            HStack {
-                TextField("例如：2026/旅行，或 .", text: $newPath).textFieldStyle(.roundedBorder)
-                    .accessibilityIdentifier("nas-folder-path")
-                Button("添加追踪") {
-                    perform {
-                        _ = try await client.addFolder(path: newPath.trimmingCharacters(in: .whitespacesAndNewlines))
-                        try await refresh()
-                    }
-                }
-                .disabled(isBusy || newPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
             if let errorMessage {
                 Text(errorMessage).foregroundStyle(.red).textSelection(.enabled)
                     .font(.caption).accessibilityIdentifier("nas-task-error")
             }
+            Text("任务状态每 5 秒自动更新。后台优先处理发生变化的文件，关闭窗口不影响任务执行。")
+                .font(.caption).foregroundStyle(.secondary)
+            if let running = jobs.first(where: { $0.status == "running" }) {
+                Text("正在扫描：\(running.path)").font(.callout).textSelection(.enabled)
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("服务器来源").font(.headline)
-                    if folders.isEmpty { Text("尚未添加服务端目录").foregroundStyle(.secondary) }
-                    ForEach(folders) { folder in
-                        HStack {
-                            Text(folder.path).textSelection(.enabled)
-                            Spacer()
-                            Text(folder.active ? "追踪中" : "已停止").foregroundStyle(.secondary)
-                            if folder.active {
-                                Button("扫描") { perform {
-                                    _ = try await client.scanFolder(id: folder.id)
-                                    try await refresh()
-                                } }
-                                Button("停止追踪") { perform {
-                                    try await client.removeFolder(id: folder.id)
-                                    try await refresh()
-                                } }
-                            }
-                        }.disabled(isBusy)
-                    }
-                    Divider()
                     Text("扫描任务").font(.headline)
-                    if jobs.isEmpty { Text("暂无任务").foregroundStyle(.secondary) }
-                    ForEach(jobs) { job in
+                    if jobs.isEmpty {
+                        if isBusy { ProgressView("正在读取任务…") }
+                        else { Text("暂无任务").foregroundStyle(.secondary) }
+                    }
+                    ForEach(jobs.sorted { statusOrder($0.status) < statusOrder($1.status) }) { job in
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
                                 Text(job.path)
@@ -99,9 +61,11 @@ struct NASTasksView: View {
                         }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
+                    .background(OverlayScrollerConfiguration())
             }
         }
         .padding(20).frame(width: 680, height: 520)
+        .background(TaskWindowConfiguration())
         .task {
             await run { try await refresh() }
             while !Task.isCancelled {
@@ -111,9 +75,18 @@ struct NASTasksView: View {
         }
     }
 
+    private func statusOrder(_ status: String) -> Int {
+        switch status {
+        case "running": 0
+        case "pending", "queued": 1
+        case "failed": 2
+        default: 3
+        }
+    }
+
     private func statusLabel(_ status: String) -> String {
         switch status {
-        case "pending", "queued": "等待中"
+        case "pending", "queued": "排队中"
         case "running": "扫描中"
         case "completed": "已完成"
         case "failed": "失败"
@@ -123,10 +96,7 @@ struct NASTasksView: View {
     }
 
     private func refresh() async throws {
-        let response = try await client.folders()
         let tasks = try await client.jobs()
-        rootPath = response.rootPath
-        folders = response.folders
         jobs = tasks.jobs
     }
 
@@ -144,6 +114,106 @@ struct NASTasksView: View {
         } catch is CancellationError {
         } catch {
             errorMessage = String(reflecting: error) + "\n" + error.localizedDescription
+        }
+    }
+}
+
+struct NASSourceSettingsView: View {
+    let client: KeepsClient
+    @State private var rootPath = ""
+    @State private var folders: [KeepsFolder] = []
+    @State private var newPath = "."
+    @State private var isBusy = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("来源").font(.title2)
+                Spacer()
+                if isBusy { ProgressView().controlSize(.small) }
+                Button("刷新") { perform { try await refresh() } }.disabled(isBusy)
+            }
+            Text("服务器原片根目录：\(rootPath.isEmpty ? "等待连接" : rootPath)")
+                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            Text("此处管理服务器目录，无需在本机挂载 NAS。输入相对于服务器原片根目录的路径；“.” 表示整个根目录。停止追踪只修改索引配置，保留所有原片。")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                TextField("例如：2026/旅行，或 .", text: $newPath).textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("nas-folder-path")
+                Button("添加追踪") {
+                    perform {
+                        _ = try await client.addFolder(path: newPath.trimmingCharacters(in: .whitespacesAndNewlines))
+                        try await refresh()
+                    }
+                }
+                .disabled(isBusy || newPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if let errorMessage {
+                Text(errorMessage).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("服务器来源").font(.headline)
+                    if folders.isEmpty { Text("尚未添加服务端目录").foregroundStyle(.secondary) }
+                    ForEach(folders) { folder in
+                        HStack {
+                            Text(folder.path).textSelection(.enabled)
+                            Spacer()
+                            Text(folder.active ? "追踪中" : "已停止").foregroundStyle(.secondary)
+                            if folder.active {
+                                Button("扫描") { perform {
+                                    _ = try await client.scanFolder(id: folder.id)
+                                    try await refresh()
+                                } }
+                                Button("停止追踪") { perform {
+                                    try await client.removeFolder(id: folder.id)
+                                    try await refresh()
+                                } }
+                            }
+                        }.disabled(isBusy)
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                    .background(OverlayScrollerConfiguration())
+            }
+        }
+        .padding(24).frame(width: 680, height: 420)
+        .task { await run { try await refresh() } }
+    }
+
+    private func refresh() async throws {
+        let response = try await client.folders()
+        rootPath = response.rootPath
+        folders = response.folders
+    }
+
+    private func perform(_ action: @escaping @MainActor () async throws -> Void) {
+        Task { await run(action) }
+    }
+
+    @MainActor private func run(_ action: @MainActor () async throws -> Void) async {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            try await action()
+            errorMessage = nil
+        } catch is CancellationError {
+        } catch {
+            errorMessage = String(reflecting: error) + "\n" + error.localizedDescription
+        }
+    }
+}
+
+private struct TaskWindowConfiguration: NSViewRepresentable {
+    func makeNSView(context: Context) -> ConfigurationView { ConfigurationView() }
+    func updateNSView(_ view: ConfigurationView, context: Context) {}
+
+    final class ConfigurationView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            window?.standardWindowButton(.zoomButton)?.isHidden = true
         }
     }
 }

@@ -10,7 +10,7 @@ use keeps_server::{
     store::Store,
 };
 use serde_json::{Value, json};
-use std::{collections::HashSet, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 use tower::ServiceExt;
 
 const SIGNING_KEY: &str = "test-preview-key-01234567890123456789";
@@ -20,13 +20,14 @@ fn state(root: &Path) -> Arc<AppState> {
     let keeps = root.join("keeps");
     let previews =
         PreviewStorage::new(&keeps, Some(&originals), "http://localhost", SIGNING_KEY).unwrap();
-    let store = Store::open(&keeps.join("db/control_plane.sqlite"), true, HashSet::new()).unwrap();
+    let store = Store::open(&keeps.join("db/control_plane.sqlite"), true).unwrap();
     let jobs = Arc::new(Jobs::open(&keeps.join("db/jobs.sqlite"), &originals).unwrap());
     Arc::new(AppState {
         store: Arc::new(store),
         previews: Arc::new(previews),
         jobs,
         access_token: SIGNING_KEY.into(),
+        library_id: "photos".into(),
         original_root_names: Default::default(),
     })
 }
@@ -99,7 +100,19 @@ async fn nas_catalog_commands_queries_authentication_and_restart() {
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(page["total"], 2);
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
-    assert_eq!(page["nextCursor"], "1");
+    let cursor = page["nextCursor"].as_str().unwrap();
+    assert!(cursor.starts_with("cd1."));
+    let (status, next) = call(
+        app.clone(),
+        "GET",
+        &format!("/libraries/photos/assets?limit=1&cursor={cursor}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{next}");
+    assert_eq!(next["items"].as_array().unwrap().len(), 1);
+    assert_ne!(next["items"][0]["id"], page["items"][0]["id"]);
+    assert!(next["nextCursor"].is_null());
     let path = format!("/libraries/photos/assets/{}", id.to_uppercase());
     let patch =
         json!({"rating":5,"flagState":"picked","colorLabel":"green","tags":["旅行","family"]});
@@ -249,8 +262,8 @@ async fn folders_jobs_are_library_scoped_and_removal_keeps_originals() {
     assert_eq!(
         call(app.clone(), "GET", "/libraries/other/jobs", Value::Null)
             .await
-            .1["jobs"],
-        json!([])
+            .0,
+        StatusCode::NOT_FOUND
     );
     assert_eq!(
         call(
@@ -417,14 +430,15 @@ async fn navigation_enforces_active_library_roots_and_rejects_escape_and_symlink
     .await;
     assert_eq!(page["directories"].as_array().unwrap().len(), 1);
     assert_eq!(page["directories"][0]["name"], "a");
-    let (_, page) = call(
+    let (status, page) = call(
         app.clone(),
         "GET",
         "/libraries/unknown/navigation",
         Value::Null,
     )
     .await;
-    assert_eq!(page["directories"], json!([]));
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(page["detail"]["code"], "library_not_found");
     let mut denied = vec![
         (root.to_path_buf(), StatusCode::NOT_FOUND),
         (root.join("b"), StatusCode::NOT_FOUND),
@@ -569,7 +583,19 @@ async fn hidden_directories_filter_before_paging_and_persist() {
     )
     .await;
     assert_eq!(page["total"], 2);
-    assert_eq!(page["nextCursor"], "1");
+    let cursor = page["nextCursor"].as_str().unwrap();
+    assert!(cursor.starts_with("cd1."));
+    let (status, next) = call(
+        app.clone(),
+        "GET",
+        &format!("/libraries/photos/assets?limit=1&cursor={cursor}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{next}");
+    assert_eq!(next["items"].as_array().unwrap().len(), 1);
+    assert_ne!(next["items"][0]["id"], page["items"][0]["id"]);
+    assert!(next["nextCursor"].is_null());
     let (_, counts) = call(app.clone(), "GET", "/libraries/photos/counts", Value::Null).await;
     assert_eq!(counts, json!({"all":2,"picked":0,"trashed":0}));
     let (_, counts) = call(
@@ -636,12 +662,7 @@ async fn hidden_directories_filter_before_paging_and_persist() {
     assert_eq!(response, json!({"paths":[nested]}));
     drop(app);
     drop(state);
-    let store = Store::open(
-        &dir.path().join("keeps/db/control_plane.sqlite"),
-        false,
-        HashSet::new(),
-    )
-    .unwrap();
+    let store = Store::open(&dir.path().join("keeps/db/control_plane.sqlite"), false).unwrap();
     assert_eq!(
         store.hidden_directories("photos").unwrap(),
         json!({"paths":[nested]})
@@ -650,4 +671,1162 @@ async fn hidden_directories_filter_before_paging_and_persist() {
         store.hidden_directories("another").unwrap(),
         json!({"paths":[]})
     );
+}
+
+#[tokio::test]
+async fn version_api_requires_asset_membership_and_exposes_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = dir.path().canonicalize().unwrap();
+    let state = state(&canonical);
+    let id = seed(&state, &canonical, "one.jpg");
+    let other = seed(&state, &canonical, "two.jpg");
+    let folder = state.jobs.add_folder("photos", ".").unwrap();
+    let app = router(state.clone());
+    let route = format!("/libraries/photos/assets/{id}");
+    let before = call(
+        app.clone(),
+        "GET",
+        "/libraries/photos/revision",
+        Value::Null,
+    )
+    .await
+    .1["revision"]
+        .as_i64()
+        .unwrap();
+    let (status, versions) = call(
+        app.clone(),
+        "GET",
+        &format!("{route}/versions"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(versions["items"][0]["contentHash"], "one.jpg");
+    assert_eq!(versions["items"][0]["isDefault"], true);
+    assert_eq!(
+        call(
+            app.clone(),
+            "PUT",
+            &format!("{route}/default-version"),
+            json!({"contentHash":"two.jpg"})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let (status, versions) = call(
+        app.clone(),
+        "PUT",
+        &format!("{route}/default-version"),
+        json!({"contentHash":"one.jpg"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(versions["items"][0]["userSelected"], true);
+    assert!(
+        call(
+            app.clone(),
+            "GET",
+            "/libraries/photos/revision",
+            Value::Null
+        )
+        .await
+        .1["revision"]
+            .as_i64()
+            .unwrap()
+            > before
+    );
+    state.jobs.remove_folder(&folder.id).unwrap();
+    let revision_before = state.store.library_revision("photos").unwrap();
+    assert_eq!(
+        call(
+            app.clone(),
+            "PUT",
+            &format!("{route}/default-version"),
+            json!({"contentHash":"one.jpg"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        state.store.library_revision("photos").unwrap(),
+        revision_before
+    );
+    let candidates = call(
+        app,
+        "GET",
+        &format!("{route}/version-candidates"),
+        Value::Null,
+    )
+    .await
+    .1;
+    assert_eq!(candidates["items"][0]["assetID"], other);
+    assert_eq!(
+        std::fs::read(dir.path().join("originals/one.jpg")).unwrap(),
+        b"original bytes"
+    );
+}
+
+#[tokio::test]
+async fn rejects_unknown_library_but_accepts_configured_empty_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let app = router(state.clone());
+    for endpoint in [
+        "counts",
+        "assets",
+        "revision",
+        "directories",
+        "navigation",
+        "folders",
+        "jobs",
+        "hidden-directories",
+    ] {
+        let (status, body) = call(
+            app.clone(),
+            "GET",
+            &format!("/libraries/hechuan/{endpoint}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{endpoint}: {body}");
+        assert_eq!(body["detail"]["code"], "library_not_found");
+        let (status, body) = call(
+            app.clone(),
+            "GET",
+            &format!("/libraries/photos/{endpoint}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{endpoint}: {body}");
+    }
+    let (status, body) = call(
+        app.clone(),
+        "POST",
+        "/libraries/hechuan/folders",
+        json!({"path":"."}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(state.jobs.folders().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unknown_library_preview_metadata_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(state(dir.path()));
+    let (status, body) = call(
+        app,
+        "GET",
+        "/derivatives/00000000-0000-0000-0000-000000000001?role=preview&libraryID=hechuan",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["detail"]["code"], "library_not_found");
+}
+
+#[tokio::test]
+async fn catalog_revision_api_tracks_changed_branches_and_preserves_default_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let root = dir.path().join("originals");
+    std::fs::create_dir_all(root.join("2026/summer")).unwrap();
+    std::fs::create_dir_all(root.join("2025")).unwrap();
+    let id = seed(&state, dir.path(), "2026/summer/one.jpg");
+    seed(&state, dir.path(), "2025/two.jpg");
+    let app = router(state.clone());
+    let revision_route = |path: &Path, children: bool| {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("path", path.to_str().unwrap())
+            .append_pair("includeChildren", if children { "true" } else { "false" })
+            .finish();
+        format!("/libraries/photos/revision?{query}")
+    };
+    let (status, before) = call(
+        app.clone(),
+        "GET",
+        "/libraries/photos/revision",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(before["isUpdating"], false);
+    assert!(before["revision"].as_i64().unwrap() > 0);
+    let sibling_route = revision_route(&root.join("2025"), false);
+    let sibling_before = call(app.clone(), "GET", &sibling_route, Value::Null)
+        .await
+        .1;
+    let (status, updated) = call(
+        app.clone(),
+        "PATCH",
+        &format!("/libraries/photos/assets/{id}"),
+        json!({"rating":5}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    let after = call(
+        app.clone(),
+        "GET",
+        "/libraries/photos/revision",
+        Value::Null,
+    )
+    .await
+    .1;
+    assert!(after["revision"].as_i64().unwrap() > before["revision"].as_i64().unwrap());
+    for path in [&root, &root.join("2026"), &root.join("2026/summer")] {
+        let (status, branch) = call(
+            app.clone(),
+            "GET",
+            &revision_route(path, false),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{branch}");
+        assert_eq!(
+            branch,
+            json!({"path":path,"revision":after["revision"],"isUpdating":false})
+        );
+    }
+    assert_eq!(
+        call(app.clone(), "GET", &sibling_route, Value::Null)
+            .await
+            .1,
+        sibling_before
+    );
+    let (status, tree) = call(
+        app.clone(),
+        "GET",
+        &revision_route(&root, true),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tree}");
+    assert_eq!(
+        tree["children"],
+        json!([
+            {"path":root.join("2025"),"revision":sibling_before["revision"],"isUpdating":false},
+            {"path":root.join("2026"),"revision":after["revision"],"isUpdating":false},
+        ])
+    );
+    let (status, root_tree) = call(
+        app.clone(),
+        "GET",
+        "/libraries/photos/revision?includeChildren=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{root_tree}");
+    assert_eq!(root_tree["revision"], after["revision"]);
+    assert!(root_tree["children"].is_array());
+    let directory_query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("directory", root.join("2026").to_str().unwrap())
+        .finish();
+    let (status, assets) = call(
+        app.clone(),
+        "GET",
+        &format!("/libraries/photos/assets?{directory_query}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{assets}");
+    assert_eq!(assets["revision"], after["revision"]);
+    assert_eq!(assets["isUpdating"], false);
+    assert_eq!(assets["items"][0]["rating"], 5);
+    let (status, empty) = call(
+        app.clone(),
+        "GET",
+        &revision_route(&root.join("not-on-disk"), false),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert_eq!(empty["revision"], 0);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/libraries/photos/revision?includeChildren=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn catalog_revision_api_exposes_batch_activity_by_scope_until_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let root = dir.path().join("originals");
+    for name in ["first", "second"] {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+        seed(&state, dir.path(), &format!("{name}/photo.jpg"));
+    }
+    let app = router(state.clone());
+    let route = |key: &str, path: &Path| {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair(key, path.to_str().unwrap())
+            .append_pair("includeChildren", "true")
+            .finish();
+        format!(
+            "/libraries/photos/{}?{query}",
+            if key == "path" { "revision" } else { "assets" }
+        )
+    };
+    let first = root.join("first");
+    let second = root.join("second");
+    let before = call(app.clone(), "GET", &route("path", &root), Value::Null)
+        .await
+        .1;
+    state
+        .store
+        .note_revision_activity("photos", "batch", first.to_str().unwrap())
+        .unwrap();
+    let active = call(app.clone(), "GET", &route("path", &root), Value::Null)
+        .await
+        .1;
+    assert_eq!(active["isUpdating"], true);
+    assert!(active["revision"].as_i64() > before["revision"].as_i64());
+    assert_eq!(active["children"][0]["path"], json!(first));
+    assert_eq!(active["children"][0]["isUpdating"], true);
+    assert_eq!(active["children"][1]["path"], json!(second));
+    assert_eq!(active["children"][1]["isUpdating"], false);
+    for (path, updating) in [(&first, true), (&second, false)] {
+        let (status, page) = call(app.clone(), "GET", &route("directory", path), Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["isUpdating"], updating);
+    }
+    let library_active = call(
+        app.clone(),
+        "GET",
+        "/libraries/photos/revision",
+        Value::Null,
+    )
+    .await
+    .1;
+    assert_eq!(library_active["isUpdating"], true);
+    state
+        .store
+        .note_revision_activity("photos", "batch", second.to_str().unwrap())
+        .unwrap();
+    let expanded = call(app.clone(), "GET", &route("path", &root), Value::Null)
+        .await
+        .1;
+    assert_eq!(expanded["revision"], active["revision"]);
+    assert_eq!(expanded["children"][0], active["children"][0]);
+    assert_eq!(expanded["children"][1]["isUpdating"], true);
+    assert!(
+        expanded["children"][1]["revision"].as_i64() > active["children"][1]["revision"].as_i64()
+    );
+    assert_eq!(
+        call(
+            app.clone(),
+            "GET",
+            "/libraries/photos/revision",
+            Value::Null
+        )
+        .await
+        .1,
+        library_active
+    );
+    state.store.finish_revision_batch("batch", false).unwrap();
+    let stable = call(app.clone(), "GET", &route("path", &root), Value::Null)
+        .await
+        .1;
+    assert_eq!(stable["isUpdating"], false);
+    assert!(stable["revision"].as_i64() > expanded["revision"].as_i64());
+    for (index, path) in [&first, &second].iter().enumerate() {
+        assert_eq!(stable["children"][index]["isUpdating"], false);
+        assert!(
+            stable["children"][index]["revision"].as_i64()
+                > expanded["children"][index]["revision"].as_i64()
+        );
+        assert_eq!(
+            call(app.clone(), "GET", &route("directory", path), Value::Null)
+                .await
+                .1["isUpdating"],
+            false
+        );
+    }
+    let library_stable = call(app, "GET", "/libraries/photos/revision", Value::Null)
+        .await
+        .1;
+    assert_eq!(library_stable["isUpdating"], false);
+    assert!(library_stable["revision"].as_i64() > library_active["revision"].as_i64());
+}
+
+#[tokio::test]
+async fn catalog_revision_api_rejects_invalid_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(state(dir.path()));
+    for path in ["relative", "/photos/../other", "", "/photos\0bad"] {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("path", path)
+            .finish();
+        let (status, body) = call(
+            app.clone(),
+            "GET",
+            &format!("/libraries/photos/revision?{query}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path:?}: {body}");
+    }
+    let (status, body) = call(
+        app,
+        "GET",
+        "/libraries/unknown/revision?includeChildren=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+#[tokio::test]
+async fn cache_status_and_role_signed_streaming_preserve_original_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let id = seed(&state, dir.path(), "standard.jpg");
+    state.store.reconcile_cache().unwrap();
+    let source = dir.path().join("originals/standard.jpg");
+    let generated = dir.path().join("thumb.heic");
+    std::fs::write(&generated, b"small thumbnail").unwrap();
+    let object = state
+        .previews
+        .put_generated("photos", &id, "thumbnail-hash", &generated)
+        .unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("keeps/db/control_plane.sqlite")).unwrap();
+    let thumb =
+        json!({"objectRef":object,"width":512,"height":384,"version":"spec:thumbnail-hash"});
+    let standard = json!({"path":source,"width":4000,"height":3000,"version":"standard.jpg","sizeBytes":14,"mtimeNs":keeps_server::cache_pipeline::file_mtime(&source).unwrap()});
+    db.execute(
+        "UPDATE media_cache SET status='ready',thumbnail=?,standard=?",
+        rusqlite::params![thumb.to_string(), standard.to_string()],
+    )
+    .unwrap();
+    let app = router(state.clone());
+    let (status, asset) = call(
+        app.clone(),
+        "GET",
+        &format!("/libraries/photos/assets/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(asset["thumbnail"]["width"], 512);
+    assert_eq!(asset["standard"]["width"], 4000);
+    let (status, descriptor) = call(
+        app.clone(),
+        "GET",
+        &format!("/derivatives/{id}?role=standard&libraryID=photos"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let url = url::Url::parse(descriptor["downloadURL"].as_str().unwrap()).unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(url.path())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/jpeg");
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        b"original bytes"
+    );
+    let (status, progress) = call(
+        app.clone(),
+        "GET",
+        "/libraries/photos/cache-status",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(progress["counts"]["ready"], 1);
+    assert_eq!(
+        call(
+            app.clone(),
+            "GET",
+            "/libraries/other/cache-status",
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let mut bad = url.path().to_owned();
+    bad.push('x');
+    assert_ne!(
+        app.oneshot(Request::builder().uri(bad).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(std::fs::read(source).unwrap(), b"original bytes");
+}
+
+#[tokio::test]
+async fn video_cover_never_exposes_video_as_standard_photo() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let id = seed(&state, dir.path(), "movie.mov");
+    state.store.reconcile_cache().unwrap();
+    let path = dir.path().join("originals/movie.mov");
+    let cover = dir.path().join("cover.heic");
+    std::fs::write(&cover, b"cover").unwrap();
+    let object = state
+        .previews
+        .put_generated_role("photos", &id, "cover", &cover, "thumbnail")
+        .unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("keeps/db/control_plane.sqlite")).unwrap();
+    db.execute(
+        "UPDATE media_cache SET status='ready',thumbnail=?,standard=?",
+        rusqlite::params![
+            json!({"objectRef":object,"width":512,"height":288,"version":"cover"}).to_string(),
+            json!({"path":path,"width":1920,"height":1080,"version":"movie.mov"}).to_string()
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM videos", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let app = router(state);
+    let (status, asset) = call(
+        app.clone(),
+        "GET",
+        &format!("/libraries/photos/assets/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(asset["standard"].is_null());
+    assert!(!asset["thumbnail"].is_null());
+    assert_eq!(
+        call(
+            app,
+            "GET",
+            &format!("/derivatives/{id}?role=standard"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn deferred_3fr_keeps_thumbnail_without_raw_standard_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let id = seed(&state, dir.path(), "capture.3fr");
+    state.store.reconcile_cache().unwrap();
+    let path = dir.path().join("originals/capture.3fr");
+    let cover = dir.path().join("cover.heic");
+    std::fs::write(&cover, b"cover").unwrap();
+    let object = state
+        .previews
+        .put_generated_role("photos", &id, "cover", &cover, "thumbnail")
+        .unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("keeps/db/control_plane.sqlite")).unwrap();
+    db.execute(
+        "UPDATE media_cache SET status='ready',thumbnail=?,standard=?",
+        rusqlite::params![
+            json!({"objectRef":object,"width":512,"height":288,"version":"cover"}).to_string(),
+            json!({"path":path,"width":1920,"height":1080,"version":"capture.3fr","deferred":true})
+                .to_string()
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM photos", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let app = router(state);
+    let (status, asset) = call(
+        app.clone(),
+        "GET",
+        &format!("/libraries/photos/assets/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(asset["standard"].is_null());
+    assert!(!asset["thumbnail"].is_null());
+    assert_eq!(
+        call(
+            app,
+            "GET",
+            &format!("/derivatives/{id}?role=standard"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn imports_flatten_grouped_files_verify_and_publish_only_on_finish() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    state.jobs.add_folder("photos", ".").unwrap();
+    let root = state.jobs.root().to_path_buf();
+    std::fs::write(root.join("IMG.CR3"), b"existing").unwrap();
+    let app = router(state.clone());
+    let batch = uuid::Uuid::new_v4().to_string().to_uppercase();
+    let paths = [
+        "card1/IMG.CR3",
+        "card1/IMG.CR3.xmp",
+        "card1/IMG.heic",
+        "card2/IMG.CR3",
+        "card2/IMG.xmp",
+    ];
+    let data = b"imported original";
+    let files:Vec<Value>=paths.iter().map(|p|json!({"id":uuid::Uuid::new_v4().to_string().to_uppercase(),"relativePath":p,"size":data.len(),"sha256":format!("{:x}",Sha256::digest(data))})).collect();
+    let manifest = json!({"id":batch,"targetPath":root,"files":files});
+    let (status, prepared) = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/imports",
+        manifest.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let names: Vec<_> = prepared["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["fileName"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "IMG (1).CR3",
+            "IMG (1).CR3.xmp",
+            "IMG (1).heic",
+            "IMG (2).CR3",
+            "IMG (2).xmp"
+        ]
+    );
+    let finish_url = format!("/libraries/photos/imports/{batch}/finish");
+    assert_eq!(
+        call(app.clone(), "POST", &finish_url, Value::Null).await.0,
+        StatusCode::CONFLICT
+    );
+    for (index, file) in files.iter().enumerate() {
+        let url = format!(
+            "/libraries/photos/imports/{batch}/files/{}",
+            file["id"].as_str().unwrap()
+        );
+        if index == 0 {
+            for wrong in [
+                b"short".as_slice(),
+                b"corrupted content".as_slice(),
+                b"longer than declared data".as_slice(),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("PUT")
+                            .uri(&url)
+                            .header("authorization", format!("Bearer {SIGNING_KEY}"))
+                            .body(Body::from(wrong))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+                assert!(!root.join(names[index]).exists());
+            }
+        }
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(&url)
+                        .header("authorization", format!("Bearer {SIGNING_KEY}"))
+                        .body(Body::from(data.as_slice()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        assert!(
+            !root.join(names[index]).exists(),
+            "original published before finish"
+        );
+    }
+    let resumed = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/imports",
+        manifest.clone(),
+    )
+    .await
+    .1;
+    assert!(
+        resumed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["uploaded"] == true)
+    );
+    let completed = call(app.clone(), "POST", &finish_url, Value::Null).await;
+    assert_eq!(completed.0, StatusCode::OK, "{}", completed.1);
+    let repeated = call(app.clone(), "POST", &finish_url, Value::Null).await;
+    assert_eq!(completed.1["job"]["id"], repeated.1["job"]["id"]);
+    for name in names {
+        assert_eq!(std::fs::read(root.join(name)).unwrap(), data);
+    }
+    assert_eq!(std::fs::read(root.join("IMG.CR3")).unwrap(), b"existing");
+    let mut changed = manifest.clone();
+    changed["files"][0]["relativePath"] = json!("changed.CR3");
+    assert_eq!(
+        call(app.clone(), "POST", "/libraries/photos/imports", changed)
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    let reopened = Jobs::open(&dir.path().join("keeps/db/jobs.sqlite"), &root).unwrap();
+    assert!(
+        reopened
+            .job(completed.1["job"]["id"].as_str().unwrap())
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn imports_reject_escape_symlinks_untracked_targets_and_preserve_late_collision() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let root = state.jobs.root().to_path_buf();
+    let app = router(state.clone());
+    let batch = uuid::Uuid::new_v4().to_string();
+    let file = uuid::Uuid::new_v4().to_string();
+    let data = b"new raw";
+    let manifest = json!({"id":batch,"targetPath":root,"files":[{"id":file,"relativePath":"sub/IMG.RAW","size":data.len(),"sha256":format!("{:x}",Sha256::digest(data))}]});
+    assert_eq!(
+        call(
+            app.clone(),
+            "POST",
+            "/libraries/photos/imports",
+            manifest.clone()
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    state.jobs.add_folder("photos", ".").unwrap();
+    for source in [
+        "../IMG.RAW",
+        "/IMG.RAW",
+        "sub/../IMG.RAW",
+        "IMG.JPG",
+        ".RAW",
+    ] {
+        let mut bad = manifest.clone();
+        bad["files"][0]["relativePath"] = json!(source);
+        assert_eq!(
+            call(app.clone(), "POST", "/libraries/photos/imports", bad)
+                .await
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    std::os::unix::fs::symlink(dir.path(), root.join("escape")).unwrap();
+    for destination in [root.join("escape"), dir.path().to_path_buf()] {
+        let mut bad = manifest.clone();
+        bad["targetPath"] = json!(destination);
+        assert_eq!(
+            call(app.clone(), "POST", "/libraries/photos/imports", bad)
+                .await
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    assert_eq!(
+        call(app.clone(), "POST", "/libraries/photos/imports", manifest)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/libraries/photos/imports/{batch}/files/{file}"))
+                .header("authorization", format!("Bearer {SIGNING_KEY}"))
+                .body(Body::from(data.as_slice()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    std::fs::write(root.join("IMG.RAW"), b"external original").unwrap();
+    assert_eq!(
+        call(
+            app.clone(),
+            "POST",
+            &format!("/libraries/photos/imports/{batch}/finish"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        std::fs::read(root.join("IMG.RAW")).unwrap(),
+        b"external original"
+    );
+}
+
+#[tokio::test]
+async fn create_directory_selects_visible_child_and_preserves_existing_files() {
+    let fixture = tempfile::tempdir().unwrap();
+    let state = state(fixture.path());
+    state.jobs.add_folder("photos", ".").unwrap();
+    let parent = state.jobs.root().to_path_buf();
+    let app = router(state);
+    let request = json!({"parentPath":parent,"name":"旅行 2026"});
+    let (status, created) = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/directories",
+        request.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["path"], parent.join("旅行 2026").to_str().unwrap());
+    assert!(parent.join("旅行 2026").is_dir());
+    let (_, navigation) = call(
+        app.clone(),
+        "GET",
+        "/libraries/photos/navigation",
+        Value::Null,
+    )
+    .await;
+    assert!(
+        navigation["directories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|directory| directory["path"] == created["path"])
+    );
+    std::fs::write(parent.join("旅行 2026/photo.raw"), b"keep original").unwrap();
+    assert_eq!(
+        call(
+            app.clone(),
+            "POST",
+            "/libraries/photos/directories",
+            request
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        std::fs::read(parent.join("旅行 2026/photo.raw")).unwrap(),
+        b"keep original"
+    );
+    std::fs::write(parent.join("existing.raw"), b"original").unwrap();
+    assert_eq!(
+        call(
+            app,
+            "POST",
+            "/libraries/photos/directories",
+            json!({"parentPath":parent,"name":"existing.raw"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        std::fs::read(parent.join("existing.raw")).unwrap(),
+        b"original"
+    );
+}
+
+#[tokio::test]
+async fn create_directory_rejects_invalid_names_and_untracked_parents() {
+    let fixture = tempfile::tempdir().unwrap();
+    let state = state(fixture.path());
+    let root = state.jobs.root().to_path_buf();
+    std::fs::create_dir(root.join("tracked")).unwrap();
+    std::fs::create_dir(root.join("other")).unwrap();
+    state.jobs.add_folder("photos", "tracked").unwrap();
+    state.jobs.add_folder("another-library", "other").unwrap();
+    let app = router(state);
+    for name in [
+        "",
+        "  ",
+        ".",
+        "..",
+        ".hidden",
+        "@eaDir",
+        "#recycle",
+        "a/b",
+        "a\\b",
+        "/absolute",
+        "nul\0",
+        "tab\t",
+        "line\n",
+    ] {
+        let (status, error) = call(
+            app.clone(),
+            "POST",
+            "/libraries/photos/directories",
+            json!({"parentPath":root.join("tracked"),"name":name}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{name:?}: {error}"
+        );
+    }
+    for parent in [root.clone(), root.join("other")] {
+        assert_eq!(
+            call(
+                app.clone(),
+                "POST",
+                "/libraries/photos/directories",
+                json!({"parentPath":parent,"name":"new"})
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert!(!parent.join("new").exists());
+    }
+    for parent in [
+        fixture.path().to_path_buf(),
+        root.join("tracked/../other"),
+        root.join("missing"),
+    ] {
+        assert_eq!(
+            call(
+                app.clone(),
+                "POST",
+                "/libraries/photos/directories",
+                json!({"parentPath":parent,"name":"new"})
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert!(!parent.join("new").exists());
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.join("other"), root.join("tracked/link")).unwrap();
+        assert_eq!(
+            call(
+                app,
+                "POST",
+                "/libraries/photos/directories",
+                json!({"parentPath":root.join("tracked/link"),"name":"new"})
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert!(!root.join("other/new").exists());
+    }
+}
+
+#[tokio::test]
+async fn imports_without_client_digest_validate_size_and_resume_staged_upload() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    state.jobs.add_folder("photos", ".").unwrap();
+    let root = state.jobs.root().to_path_buf();
+    let app = router(state.clone());
+    let batch = uuid::Uuid::new_v4().to_string();
+    let file = uuid::Uuid::new_v4().to_string();
+    let data = b"streamed original";
+    let manifest = json!({"id":batch,"targetPath":root,"files":[{
+        "id":file,"relativePath":"card/IMG.CR3","size":data.len()
+    }]});
+    let (status, prepared) = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/imports",
+        manifest.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    assert!(prepared["files"][0].get("sha256").is_none());
+    let url = format!("/libraries/photos/imports/{batch}/files/{file}");
+    for wrong in [
+        b"short".as_slice(),
+        b"larger than declared original".as_slice(),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(&url)
+                    .header("authorization", format!("Bearer {SIGNING_KEY}"))
+                    .body(Body::from(wrong))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    }
+    // A process may stop after linking the upload but before recording completion.
+    let staged = root.join(format!(".keeps-import-{batch}-{file}"));
+    std::fs::write(&staged, b"different content").unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&url)
+                .header("authorization", format!("Bearer {SIGNING_KEY}"))
+                .body(Body::from(data.as_slice()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(std::fs::read(&staged).unwrap(), b"different content");
+    std::fs::write(&staged, data).unwrap();
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(&url)
+                    .header("authorization", format!("Bearer {SIGNING_KEY}"))
+                    .body(Body::from(data.as_slice()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let (status, resumed) = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/imports",
+        manifest.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    assert_eq!(resumed["files"][0]["uploaded"], true);
+    assert!(resumed["files"][0].get("sha256").is_none());
+    assert_eq!(
+        resumed["files"][0]["receivedSha256"],
+        format!("{:x}", Sha256::digest(data))
+    );
+    let completed = call(
+        app.clone(),
+        "POST",
+        &format!("/libraries/photos/imports/{batch}/finish"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(completed.0, StatusCode::OK, "{}", completed.1);
+    assert_eq!(std::fs::read(root.join("IMG.CR3")).unwrap(), data);
+    assert!(!staged.exists());
+}
+
+#[tokio::test]
+async fn imports_deduplicate_skips_existing_group_and_rechecks_before_finish() {
+    use sha2::{Digest, Sha256};
+    for changed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(dir.path());
+        state.jobs.add_folder("photos", ".").unwrap();
+        let root = state.jobs.root().to_path_buf();
+        std::fs::write(root.join("existing.CR3"), b"original").unwrap();
+        let app = router(state.clone());
+        let batch = uuid::Uuid::new_v4().to_string();
+        let file = uuid::Uuid::new_v4().to_string();
+        let mut manifest = json!({"id":batch,"targetPath":root,"deduplicate":true,"files":[{
+            "id":file,"relativePath":"card/IMG.CR3","size":8
+        }]});
+        assert_eq!(
+            call(
+                app.clone(),
+                "POST",
+                "/libraries/photos/imports",
+                manifest.clone()
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        manifest["files"][0]["sha256"] = json!(format!("{:x}", Sha256::digest(b"original")));
+        let (status, prepared) = call(
+            app.clone(),
+            "POST",
+            "/libraries/photos/imports",
+            manifest.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{prepared}");
+        assert_eq!(prepared["files"][0]["fileName"], "existing.CR3");
+        assert_eq!(prepared["files"][0]["skipped"], true);
+        assert_eq!(prepared["files"][0]["uploaded"], true);
+        manifest["deduplicate"] = json!(false);
+        assert_eq!(
+            call(app.clone(), "POST", "/libraries/photos/imports", manifest)
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        if changed {
+            std::fs::write(root.join("existing.CR3"), b"modified").unwrap();
+        }
+        let finished = call(
+            app.clone(),
+            "POST",
+            &format!("/libraries/photos/imports/{batch}/finish"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(
+            finished.0,
+            if changed {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::OK
+            },
+            "{}",
+            finished.1
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    }
 }

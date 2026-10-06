@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+umask 077
+package=/var/packages/KeepsNativeProbe
+target=$(dirname "$(dirname "$(readlink -f "$0")")")
+export KEEPS_ROOT="$package/var/state"
+IFS= read -r ORIGINAL_ROOT < "$package/var/original-root"
+case "$ORIGINAL_ROOT" in /*) ;; *) echo 'Original folder must be an absolute path' >&2; exit 1 ;; esac
+if [ ! -d "$ORIGINAL_ROOT" ] || [ ! -r "$ORIGINAL_ROOT" ] || [ ! -w "$ORIGINAL_ROOT" ] || [ ! -x "$ORIGINAL_ROOT" ]; then
+    echo 'Original folder requires read, write and traverse permission for KeepsNativeProbe' >&2
+    exit 1
+fi
+export ORIGINAL_ROOT
+export KEEPS_LISTEN_ADDR=0.0.0.0:2285
+IFS= read -r CONTROL_PLANE_PUBLIC_BASE_URL < "$package/var/server-url"
+export CONTROL_PLANE_PUBLIC_BASE_URL
+export CONTROL_PLANE_AUTO_CREATE_SCHEMA=1
+export KEEPS_LIBRARY_ID=spk-probe
+export KEEPS_ACCESS_TOKEN="$(cat "$package/var/access-token")"
+if [ -f "$package/var/server-overrides" ]; then
+    while IFS='=' read -r key value || [ -n "$key" ]; do
+        case "$key" in
+            '') continue ;;
+            KEEPS_ROOT|KEEPS_LIBRARY_ID|KEEPS_LISTEN_ADDR|KEEPS_LOCAL_CACHE_ENCODING_ENABLED|KEEPS_REMOTE_WORKER_ENABLED|KEEPS_CACHE_GC_ENABLED|KEEPS_THUMBNAIL_QUALITY|CONTROL_PLANE_AUTO_CREATE_SCHEMA|TZ)
+                export "$key=$value" ;;
+            *) echo "Unsupported server setting: $key" >&2; exit 1 ;;
+        esac
+    done < "$package/var/server-overrides"
+fi
+export PATH="$target/bin:/usr/bin:/bin"
+exec "$target/bin/keeps-server"

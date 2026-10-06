@@ -3,11 +3,13 @@ import KeepsAPI
 
 @main
 struct PhotoAssetManagerApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var library = LibraryStore()
     var body: some Scene {
         WindowGroup {
             ContentView().environmentObject(library).frame(minWidth: 1080, minHeight: 720)
         }
+        .onChange(of: scenePhase, initial: true) { _, phase in library.setActive(phase == .active) }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1440, height: 900)
         .commands {
@@ -29,8 +31,31 @@ struct PhotoAssetManagerApp: App {
                 Button("清除标记") { library.updateSelected(KeepsAssetPatch(flagState: "unflagged")) }.keyboardShortcut("u", modifiers: [])
             }
         }
+        Window("任务追踪", id: "nas-tasks") {
+            Group {
+                if let client = library.client {
+                    NASTasksView(client: client).id(ObjectIdentifier(client))
+                } else {
+                    Text("请先在设置中连接服务器。").padding(24)
+                }
+            }
+        }
+        .windowResizability(.contentSize)
         Settings {
-            ServerSettingsView().environmentObject(library)
+            TabView {
+                ServerSettingsView()
+                    .tabItem { Label("服务器", systemImage: "server.rack") }
+                Group {
+                    if let client = library.client {
+                        NASSourceSettingsView(client: client).id(ObjectIdentifier(client))
+                    } else {
+                        Text("请先在服务器设置中验证并保存连接。")
+                            .padding(24)
+                    }
+                }
+                .tabItem { Label("来源", systemImage: "folder") }
+            }
+            .environmentObject(library)
         }
     }
 }
