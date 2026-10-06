@@ -195,7 +195,9 @@ struct ContentView: View {
                 }
             }
         }
-        .focusable().focused($galleryFocused)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($galleryFocused)
         .onKeyPress(.leftArrow) { library.selectAdjacent(-1); return .handled }
         .onKeyPress(.rightArrow) { library.selectAdjacent(1); return .handled }
     }
@@ -382,9 +384,6 @@ struct AssetDetailView: View {
                     Divider()
                 }
                 if asset.trashed { Button("从回收站恢复") { library.restoreSelected() } }
-                else { Button("移入回收站") { library.trashSelected() } }
-                Text("回收站只改变资产状态，磁盘原片始终保留。")
-                    .font(.caption).foregroundStyle(.secondary)
             }.padding(18).disabled(library.isMutating)
                 .background(OverlayScrollerConfiguration())
         }
