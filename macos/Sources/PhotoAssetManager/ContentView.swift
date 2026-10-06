@@ -22,10 +22,13 @@ struct ContentView: View {
             HStack(spacing: 0) {
                 HSplitView {
                     if showsSidebar {
-                        sidebar.frame(minWidth: 200, idealWidth: 268, maxWidth: 480)
+                        sidebar
+                            .frame(minWidth: 200, idealWidth: 268, maxWidth: 480)
+                            .background(SidebarLayoutAutosave())
                     }
                     workspace.frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
                 }
+                .id(showsSidebar)
                 if showsInspector {
                     Divider()
                     inspector.frame(width: 292)
@@ -443,5 +446,33 @@ struct ServerSettingsView: View {
 
     private func check(save: Bool) {
         Task { await library.checkConnection(baseURL: baseURL, libraryID: libraryID, accessCredential: credential, save: save) }
+    }
+}
+
+private struct SidebarLayoutAutosave: NSViewRepresentable {
+    func makeNSView(context: Context) -> PersistenceView { PersistenceView() }
+    func updateNSView(_ nsView: PersistenceView, context: Context) {}
+
+    final class PersistenceView: NSView {
+        private weak var splitView: NSSplitView?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil else {
+                // 隐藏侧边栏后只剩一个分栏，不应覆盖用户保存的双栏布局。
+                splitView?.autosaveName = nil
+                splitView = nil
+                return
+            }
+            var ancestor = superview
+            while let view = ancestor {
+                if let splitView = view as? NSSplitView {
+                    self.splitView = splitView
+                    splitView.autosaveName = "Keeps.Library.Sidebar"
+                    return
+                }
+                ancestor = view.superview
+            }
+        }
     }
 }
