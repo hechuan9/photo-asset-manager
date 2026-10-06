@@ -3,7 +3,7 @@ import KeepsAPI
 
 struct ContentView: View {
     @EnvironmentObject private var library: LibraryStore
-    @State private var showsTasks = false
+    @Environment(\.openWindow) private var openWindow
     @State private var showsImport = false
     @State private var importStore: ImportStore?
     @FocusState private var galleryFocused: Bool
@@ -39,9 +39,6 @@ struct ContentView: View {
         .foregroundStyle(WorkspaceStyle.text)
         .preferredColorScheme(.dark)
         .tint(WorkspaceStyle.accent)
-        .sheet(isPresented: $showsTasks, onDismiss: { if showsSources { library.refreshNavigation() }; library.refresh(force: true) }) {
-            if let client = library.client { NASTasksView(client: client) }
-        }
         .sheet(isPresented: $showsImport, onDismiss: { library.refreshNavigation(); library.refresh(force: true) }) {
             if let importStore { ImportView(store: importStore, initialTarget: library.query.directory) }
         }
@@ -114,7 +111,7 @@ struct ContentView: View {
                 }
             } else { Spacer() }
             Divider()
-            Button { showsTasks = true } label: {
+            Button { openWindow(id: "nas-tasks") } label: {
                 Label("任务追踪", systemImage: "list.bullet.rectangle")
                     .font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading).padding(16)
             }.buttonStyle(.plain).disabled(library.client == nil)
@@ -190,6 +187,7 @@ struct ContentView: View {
                                     .onDisappear { library.setPaginationVisible(false) }
                             }
                         }.padding(1)
+                            .background(OverlayScrollerConfiguration())
                     }
                 }
             }
@@ -385,6 +383,7 @@ struct AssetDetailView: View {
                 Text("回收站只改变资产状态，磁盘原片始终保留。")
                     .font(.caption).foregroundStyle(.secondary)
             }.padding(18).disabled(library.isMutating)
+                .background(OverlayScrollerConfiguration())
         }
         .font(.system(size: 12))
         .task(id: asset.id) { tags = asset.tags.joined(separator: ", ") }

@@ -3,25 +3,17 @@ import KeepsAPI
 
 struct NASTasksView: View {
     let client: KeepsClient
-    @Environment(\.dismiss) private var dismiss
     @State private var jobs: [KeepsJob] = []
     @State private var isBusy = false
     @State private var errorMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("任务追踪").font(.title2)
-                Spacer()
-                if isBusy { ProgressView().controlSize(.small) }
-                Button("刷新") { perform { try await refresh() } }.disabled(isBusy)
-                Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
-            }
             if let errorMessage {
                 Text(errorMessage).foregroundStyle(.red).textSelection(.enabled)
                     .font(.caption).accessibilityIdentifier("nas-task-error")
             }
-            Text("NAS 每次执行一个扫描任务；排队任务等待后台调度，目录变化会自动加入扫描。关闭此窗口不影响执行。")
+            Text("任务状态每 5 秒自动更新。后台优先处理发生变化的文件，关闭窗口不影响任务执行。")
                 .font(.caption).foregroundStyle(.secondary)
             if let running = jobs.first(where: { $0.status == "running" }) {
                 Text("正在扫描：\(running.path)").font(.callout).textSelection(.enabled)
@@ -29,7 +21,10 @@ struct NASTasksView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("扫描任务").font(.headline)
-                    if jobs.isEmpty { Text("暂无任务").foregroundStyle(.secondary) }
+                    if jobs.isEmpty {
+                        if isBusy { ProgressView("正在读取任务…") }
+                        else { Text("暂无任务").foregroundStyle(.secondary) }
+                    }
                     ForEach(jobs.sorted { statusOrder($0.status) < statusOrder($1.status) }) { job in
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
@@ -66,9 +61,11 @@ struct NASTasksView: View {
                         }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
+                    .background(OverlayScrollerConfiguration())
             }
         }
         .padding(20).frame(width: 680, height: 520)
+        .background(TaskWindowConfiguration())
         .task {
             await run { try await refresh() }
             while !Task.isCancelled {
@@ -177,6 +174,7 @@ struct NASSourceSettingsView: View {
                         }.disabled(isBusy)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
+                    .background(OverlayScrollerConfiguration())
             }
         }
         .padding(24).frame(width: 680, height: 420)
@@ -203,6 +201,19 @@ struct NASSourceSettingsView: View {
         } catch is CancellationError {
         } catch {
             errorMessage = String(reflecting: error) + "\n" + error.localizedDescription
+        }
+    }
+}
+
+private struct TaskWindowConfiguration: NSViewRepresentable {
+    func makeNSView(context: Context) -> ConfigurationView { ConfigurationView() }
+    func updateNSView(_ view: ConfigurationView, context: Context) {}
+
+    final class ConfigurationView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            window?.standardWindowButton(.zoomButton)?.isHidden = true
         }
     }
 }

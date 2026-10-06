@@ -34,3 +34,21 @@ struct WorkspaceErrorView: View {
         }
     }
 }
+
+struct OverlayScrollerConfiguration: NSViewRepresentable {
+    func makeNSView(context: Context) -> ConfigurationView { ConfigurationView() }
+    func updateNSView(_ view: ConfigurationView, context: Context) { view.configure() }
+
+    final class ConfigurationView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            configure()
+        }
+
+        func configure() {
+            guard let scroll = enclosingScrollView else { return }
+            scroll.scrollerStyle = .overlay
+            scroll.autohidesScrollers = true
+        }
+    }
+}

@@ -266,8 +266,11 @@ impl MediaProcessor {
         let scratch = tempfile::tempdir().context("creating media scratch directory")?;
         let jpeg_input = has_jpeg_signature(&source)?;
         let raw_input = is_raw(&source) && !jpeg_input;
+        let heif_input = ["heic", "heif", "hif"].contains(&extension(&source).as_str());
         let decoded = scratch.path().join(if raw_input {
             "decoded.ppm"
+        } else if heif_input {
+            "decoded.png"
         } else {
             "decoded.tiff"
         });
@@ -290,11 +293,18 @@ impl MediaProcessor {
                 source.display()
             );
             decoded.as_path()
-        } else if ["heic", "heif", "hif"].contains(&extension(&source).as_str()) {
+        } else if heif_input {
             // 100 MP 10-bit Hasselblad images exceed libheif's default 512 MiB block limit.
             // The subprocess instead has an OS address-space limit and a wall-clock deadline.
+            // libheif's TIFF writer corrupts high-bit-depth interleaved samples. PNG
+            // preserves them; compression is unnecessary for this temporary image.
             run(Command::new("heif-convert")
-                .args(["--disable-limits", "--quiet"])
+                .args([
+                    "--disable-limits",
+                    "--quiet",
+                    "--png-compression-level",
+                    "0",
+                ])
                 .arg(&source)
                 .arg(&decoded))
             .with_context(|| format!("decoding HEIC {}", source.display()))?;
@@ -776,6 +786,52 @@ mod tests {
         assert!(has_jpeg_signature(&source)?);
         std::fs::write(&source, [0x49, 0x49, 0x2a, 0x00])?;
         assert!(!has_jpeg_signature(&source)?);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires the Linux media runtime (ImageMagick HEIC and heif-convert)"]
+    fn high_bit_depth_heif_preserves_colors() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("ten-bit.heic");
+        run(Command::new("convert")
+            .args([
+                "-size",
+                "64x48",
+                "xc:rgb(85%,20%,10%)",
+                "-depth",
+                "10",
+                "-define",
+                "heic:max-threads=1",
+                "-quality",
+                "100",
+            ])
+            .arg(&source))?;
+        let depth = run(Command::new("identify")
+            .args(["-format", "%z"])
+            .arg(&source))?;
+        assert_eq!(String::from_utf8(depth)?.trim(), "10");
+        let before = sha256_file(&source)?;
+        let preview = directory.path().join("preview.heic");
+        MediaProcessor::new().generate_image(&source, &preview, 64)?;
+        let channels = run(Command::new("convert").arg(&preview).args([
+            "-format",
+            "%[fx:mean.r] %[fx:mean.g] %[fx:mean.b]",
+            "info:",
+        ]))?;
+        let channels = String::from_utf8(channels)?;
+        let values = channels
+            .split_whitespace()
+            .map(str::parse::<f64>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(values.len(), 3);
+        for (actual, expected) in values.iter().zip([0.85, 0.2, 0.1]) {
+            assert!(
+                (actual - expected).abs() < 0.06,
+                "color mismatch: {channels}"
+            );
+        }
+        assert_eq!(before, sha256_file(&source)?);
         Ok(())
     }
 

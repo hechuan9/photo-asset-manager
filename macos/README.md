@@ -25,7 +25,7 @@ bash scripts/package_app.sh
 
 ## TestFlight 分发
 
-正式测试分发使用 `Keeps.xcodeproj` 的共享 `Keeps` scheme，自动签名团队为 `3TZ6RCL8NE`，Bundle ID 保持 `local.keeps`。工程直接编译现有源文件并引用 `../shared` 的 KeepsAPI，不维护第二份客户端实现。版本号和构建号统一在 `Version.xcconfig` 修改，每次上传递增构建号。
+正式测试分发使用 `Keeps.xcodeproj` 的共享 `Keeps` scheme，自动签名团队为 `3TZ6RCL8NE`，Bundle ID 保持 `local.keeps`。工程直接编译现有源文件并引用 `../shared` 的 KeepsAPI，不维护第二份客户端实现。macOS 的版本号和构建号在 `Version.xcconfig` 修改，每次上传递增构建号；与 iOS 独立维护，不要求两端版本同步。发布记录使用“macOS 版本（构建号）”或“iOS 版本（构建号）”明确平台。
 
 在仓库根目录执行：
 
