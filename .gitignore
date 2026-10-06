@@ -39,3 +39,8 @@ secrets/
 
 # Rust server
 server/target/
+
+# Transient reports and superseded planning artifacts
+/docs/validation/
+/docs/plans/
+/docs/superpowers/

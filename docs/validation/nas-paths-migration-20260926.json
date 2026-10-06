@@ -1,1 +1,0 @@
-{"mode": "apply", "counts": {"migrated_catalog_paths": 11984, "migrated_jobsdb.files": 11984, "migrated_jobsdb.folders": 1, "already_present": 10126, "restored": 131882}, "backup": "/volume2/myphoto/keeps/backups/nas-path-migration/20260926T214024.271991Z", "content_hash_reverified": false}

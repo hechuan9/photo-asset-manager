@@ -57,7 +57,7 @@ cargo build --manifest-path server/Cargo.toml
 
 ## 客户端分发
 
-macOS 与 iOS 以 TestFlight 内部测试为主要分发渠道，使用 ClimaMind LLC 的 Apple Developer Program（Team ID `3TZ6RCL8NE`）。本地构建保留用于开发验证；不再使用企业 IPA 导出。NAS 服务仍按 Docker Compose 流程独立部署。
+macOS 与 iOS 以 TestFlight 内部测试为主要分发渠道，使用 ClimaMind LLC 的 Apple Developer Program（Team ID `3TZ6RCL8NE`）。本地构建保留用于开发验证；不再使用企业 IPA 导出。NAS 服务独立部署，使用[原生套件](deploy/spk/README.md)。
 
 ```sh
 # 先运行上面的共享契约、macOS 测试，再分别归档。
@@ -75,7 +75,7 @@ macOS 与 iOS 以 TestFlight 内部测试为主要分发渠道，使用 ClimaMin
 
 App Store Connect 已创建应用记录：[Keeps 照片库（iOS）](https://appstoreconnect.apple.com/apps/6816541067/testflight)，Bundle ID `com.hechuan.Keeps`；[Keeps 照片库 for Mac](https://appstoreconnect.apple.com/apps/6816541220/testflight)，Bundle ID `local.keeps`。两端的“Keeps 内部测试”组均启用自动分发，目前仅加入账号本人。两端保留现有 bundle ID，使用独立的应用记录。macOS 发布工程启用 App Sandbox 和出站网络权限；沙盒签名版本的连接设置与 Keychain 访问需要实机验收，必要时在应用设置中重新连接 NAS。
 
-TestFlight 构建有效期为 90 天，需要持续发布新构建。该渠道用于测试，未提交 App Store 正式上架审核。实现与首次发布证据见 [TestFlight 迁移记录](docs/validation/testflight-20260926.md)。
+TestFlight 构建有效期为 90 天，需要持续发布新构建。该渠道用于测试，未提交 App Store 正式上架审核。
 
 ## 历史数据迁移
 
@@ -86,3 +86,5 @@ TestFlight 构建有效期为 90 天，需要持续发布新构建。该渠道�
 `.github/workflows/ci.yml` 在 main push、所有 PR 和手动触发时运行：Rust 格式、Clippy 和测试；共享 Swift 与 macOS 测试、开发打包、iOS Simulator 构建；Python 控制平面与迁移测试；发布脚本测试和 Gitleaks 密钥扫描。工作流只授予仓库读取权限，不上传 TestFlight，也不需要 Apple 或 NAS 凭据。
 
 本机 API 查询：`codex-secret run app-store-connect -- bash scripts/testflight.sh macos status`（iOS 将 `macos` 换为 `ios`）。同一入口支持 `archive` 和 `upload`，私钥由加密凭据库注入。
+
+文档默认不新增，只在维护或使用确有必要时更新现有说明。执行记录、验证报告、截图和接口响应不入库；临时产物放 `.build/`，无需长期保留。
