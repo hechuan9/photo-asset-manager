@@ -91,7 +91,7 @@ schema 9 增加照片根身份映射。优先读取内嵌 XMP `xmpMM:OriginalDoc
 
 历史文件身份回填由 NAS 现有后台执行，每轮最多 20 个，沿用至少 60 秒休息；路径同步优先，正在远端处理的资产跳过。仅 metadata 写入造成的字节哈希变化在现有数据库事务中更新文件、版本、默认图、已完成远端任务及缓存描述，保留缩略图。`cache-status.identityBackfill` 提供 pending/ready/failed/missing 和错误；missing 代表历史路径已不存在，不删除任何照片。合法 ID 已存在时不重写。
 
-临时 worker 在数据库事务中从现有状态索引直接领取一个到期 pending 项（LIMIT 1），不做全库优先排序，也不另设内存任务队列。缺标准的 RAW 仍在同一个任务中先生成完整标准图再生成小图，尚未拆为两个独立阶段。默认 4 并发、8 CPU、12GiB RAM、32GiB 临时预算。NAS 配置 KEEPS_LOCAL_CACHE_ENCODING_ENABLED=0 时仅停本地编码，继续扫描、盘点、审计、GC、派发及落盘；Linux离线时任务保留，恢复该开关为1可让NAS重新承担编码。部署见 [Linux worker](../deploy/linux-worker/README.md)。
+临时 worker 在数据库事务中从现有状态索引直接领取一个到期 pending 项（LIMIT 1），不做全库优先排序，也不另设内存任务队列。缺标准的 RAW 仍在同一个任务中先生成完整标准图再生成小图，尚未拆为两个独立阶段。默认 4 并发、8 CPU、12GiB RAM、32GiB 临时预算。日常默认 NAS 本地编码开启（KEEPS_LOCAL_CACHE_ENCODING_ENABLED=1），远端派发关闭（KEEPS_REMOTE_WORKER_ENABLED 未设或为 0）。Linux 只在用户明确安排的一次性大规模处理时启用；服务器开关设为 1 后才能领取任务，Compose 需要显式 bulk profile，且不自动重启。批量处理结束恢复远端开关为 0 并停止 worker。部署见 [Linux worker](../deploy/linux-worker/README.md)。
 
 `KEEPS_CACHE_GC_ENABLED=1` 时，新图验证后在同一事务切换旧 preview 引用并将旧对象放入持久 `media_cache_gc`。等待 20 分钟，每轮最多回收 20 个无当前引用对象，删除前再次核对 derivative_objects 与 media_cache。仅允许专用缓存根内的新 preview/thumbnail 路径及已确认的历史 `64位hex-1200.heic` 格式；原片和标准照片不进入回收队列。尚有引用或生成失败时保留旧文件。状态由 `GET /libraries/{libraryID}/cache-status` 提供；retry/rebuild 是每次最多 20 项的显式操作；retry 可重新排入有错误的 pending/failed 项，清除错误与重试计数并重置排序时间，不影响 processing/ready。生产启用和实测结果见 [NAS 流水线记录](validation/2026-09-29-thumbnail-pipeline-nas.md)。
 

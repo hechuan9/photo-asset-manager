@@ -1,6 +1,6 @@
 # Synology 原生套件可行性原型
 
-当前 NAS 已在 0013 套件上运行正式资料库 `local-library`，Mac 地址为 `http://192.168.0.50:2283`，原片仍位于 `/volume2/photo`，状态位于 `/volume2/@appdata/KeepsNativeProbe/production-state`。旧 Docker 已停止并保留。见[正式迁移记录](../../docs/validation/2026-10-05-spk-production-migration.md)。0010 更新及验证见[任务展示部署记录](../../docs/validation/2026-10-05-task-settings-deployment.md)。0013 稳定分页发布见[发布记录](../../docs/validation/2026-10-05-keyset-nas-release.md)。0012 增量调度与故障隔离见[增量后台验证](../../docs/validation/2026-10-05-incremental-work.md)。下文的 2285、spk-probe 和测试共享目录是原型默认配置。
+当前 NAS 已在 0014 套件上运行正式资料库 `local-library`，Mac 地址为 `http://192.168.0.50:2283`，原片仍位于 `/volume2/photo`，状态位于 `/volume2/@appdata/KeepsNativeProbe/production-state`。旧 Docker 已停止并保留。见[正式迁移记录](../../docs/validation/2026-10-05-spk-production-migration.md)。0010 更新及验证见[任务展示部署记录](../../docs/validation/2026-10-05-task-settings-deployment.md)。0014 恢复 NAS 默认处理、关闭远端派发，见[NAS 默认处理记录](../../docs/validation/2026-10-05-nas-default-processing.md)。0013 稳定分页发布见[发布记录](../../docs/validation/2026-10-05-keyset-nas-release.md)。0012 增量调度与故障隔离见[增量后台验证](../../docs/validation/2026-10-05-incremental-work.md)。下文的 2285、spk-probe 和测试共享目录是原型默认配置。
 
 `KeepsNativeProbe` 是独立测试套件，已在 DS1520+（geminilake、DSM 7.3.2-86009 Update 4）验证。它原生运行 Keeps 和媒体工具，不需要运行容器。当前只允许该架构安装，不代表其他 DSM/CPU 已兼容。
 
@@ -55,3 +55,5 @@ python3 -m unittest discover -s deploy/spk -p test_pack.py -v
 沿用同一套件，通过 `var/server-overrides` 的逐行 `KEY=value` 指定状态根目录、资料库 ID、监听地址和现有后台处理开关。只接受启动脚本列出的设置，不执行 shell 文本。`original-root`、`server-url` 和 `access-token` 仍分别保存原片目录、客户端服务地址和凭据。配置文件应由套件账号持有，权限 0600。
 
 切换时必须保留正式 library ID、token、缩略图质量和本地编码开关；停止旧服务后复制状态，原片目录保持原位。不要同时启动两个写同一状态目录的服务。旧 Docker 容器和旧状态目录保留用于回退。
+
+日常 `KEEPS_LOCAL_CACHE_ENCODING_ENABLED=1`、`KEEPS_REMOTE_WORKER_ENABLED=0`。只有明确进行一次性 Linux 批量处理时才开启远端开关，结束后关闭并停止 worker。未设置远端开关时也默认禁用。

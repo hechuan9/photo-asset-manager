@@ -133,6 +133,6 @@ codex-secret run chuan-nas -- python3 scripts/nas_cache_status.py
 
 ## 临时 Linux 计算节点
 
-需要远端生成时，先部署 schema 8 的 NAS 镜像，再启动 [Linux worker](../linux-worker/README.md)。NAS 使用双核/2GiB、本地每轮20项及60秒休息；Linux有独立的16并发限制，通过同一数据库租约领取任务。内部接口继续经既有DSM HTTPS反向代理访问，不新增NAS端口或照片挂载。数据库升级前应停服并备份两份SQLite；全库生成进度与部署验收分开记录。
+日常处理默认在 NAS：`KEEPS_LOCAL_CACHE_ENCODING_ENABLED=1`，`KEEPS_REMOTE_WORKER_ENABLED=0`。NAS 本地每轮最多 20 项、并发 1、轮后休息 60 秒。
 
-`KEEPS_LOCAL_CACHE_ENCODING_ENABLED=0` 为协调模式：NAS不领取本地编码任务，但继续扫描、盘点、审计、GC和远端结果发布。设为1恢复本地编码；不涉及数据库迁移。Linux的线程数由它自身控制，NAS通过现有media_cache索引和事务直接领取一条任务，不建立第二层队列。
+Linux 仅用于明确安排的一次性大规模处理。先把 NAS 的 `KEEPS_REMOTE_WORKER_ENABLED` 设为 `1` 并重启服务，再显式启动 [Linux worker](../linux-worker/README.md) 的 `bulk` profile；结束后恢复为 `0` 并停止 worker。未开启远端开关时，领取接口返回空任务，不改变队列。已领取任务仍可完成；需要立即转回 NAS 时应先停止 worker，再回收对应租约。

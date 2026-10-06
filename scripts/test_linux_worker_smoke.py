@@ -94,7 +94,7 @@ def run_test(args):
             samples[kind] = dict(source=str(source), fixture=str(target), container='/originals/' + kind + '/' + source.name, hash=sha(source), originalHash=sha(source))
         report['samples'] = samples
         save()
-        docker('run', '-d', '--user', container_user, '--name', name, '--cpuset-cpus', args.cpu, '--memory', '2g', '--memory-swap', '2g', '-p', '127.0.0.1:' + str(args.port) + ':2283', '-v', str(keeps) + ':/keeps', '-v', str(originals) + ':/originals', '-e', 'KEEPS_ROOT=/keeps', '-e', 'ORIGINAL_ROOT=/originals', '-e', 'KEEPS_LIBRARY_ID=smoke', '-e', 'KEEPS_LOCAL_CACHE_ENCODING_ENABLED=0', '-e', 'KEEPS_ACCESS_TOKEN=' + token, '-e', 'CONTROL_PLANE_PUBLIC_BASE_URL=' + api, '-e', 'CONTROL_PLANE_AUTO_CREATE_SCHEMA=1', args.image)
+        docker('run', '-d', '--user', container_user, '--name', name, '--cpuset-cpus', args.cpu, '--memory', '2g', '--memory-swap', '2g', '-p', '127.0.0.1:' + str(args.port) + ':2283', '-v', str(keeps) + ':/keeps', '-v', str(originals) + ':/originals', '-e', 'KEEPS_ROOT=/keeps', '-e', 'ORIGINAL_ROOT=/originals', '-e', 'KEEPS_LIBRARY_ID=smoke', '-e', 'KEEPS_LOCAL_CACHE_ENCODING_ENABLED=0', '-e', 'KEEPS_REMOTE_WORKER_ENABLED=1', '-e', 'KEEPS_ACCESS_TOKEN=' + token, '-e', 'CONTROL_PLANE_PUBLIC_BASE_URL=' + api, '-e', 'CONTROL_PLANE_AUTO_CREATE_SCHEMA=1', args.image)
         created = True
         wait(healthy)
         try:

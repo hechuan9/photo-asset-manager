@@ -5,7 +5,8 @@ services:
       context: ../..
       dockerfile: server/Dockerfile
     entrypoint: ["python3", "/usr/local/bin/linux_cache_worker.py"]
-    restart: unless-stopped
+    profiles: [bulk]
+    restart: "no"
     cpus: 16
     mem_limit: 24g
     pids_limit: 512

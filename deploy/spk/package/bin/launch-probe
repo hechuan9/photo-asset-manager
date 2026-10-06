@@ -21,7 +21,7 @@ if [ -f "$package/var/server-overrides" ]; then
     while IFS='=' read -r key value || [ -n "$key" ]; do
         case "$key" in
             '') continue ;;
-            KEEPS_ROOT|KEEPS_LIBRARY_ID|KEEPS_LISTEN_ADDR|KEEPS_LOCAL_CACHE_ENCODING_ENABLED|KEEPS_CACHE_GC_ENABLED|KEEPS_THUMBNAIL_QUALITY|CONTROL_PLANE_AUTO_CREATE_SCHEMA|TZ)
+            KEEPS_ROOT|KEEPS_LIBRARY_ID|KEEPS_LISTEN_ADDR|KEEPS_LOCAL_CACHE_ENCODING_ENABLED|KEEPS_REMOTE_WORKER_ENABLED|KEEPS_CACHE_GC_ENABLED|KEEPS_THUMBNAIL_QUALITY|CONTROL_PLANE_AUTO_CREATE_SCHEMA|TZ)
                 export "$key=$value" ;;
             *) echo "Unsupported server setting: $key" >&2; exit 1 ;;
         esac

@@ -23,7 +23,7 @@ KEEPS_TEST_IMAGE=keeps-server:nas-core python3 server/tests/mechanisms_smoke.py
 
 业务 API 使用 Bearer token，预览下载 URL 有效期 15 分钟。共享令牌适用于受信任家庭资料库，不提供独立用户权限体系。
 
-SQLite 使用 WAL。后台扫描只读原片，文件哈希或精确 JPEG 图像指纹可以自动归组；EXIF 匹配仅作为待视觉确认的候选。普通核对通过原片 size/mtime 与 XMP 状态签名跳过未变文件。文件事件精确入队，XMP 和导入仅核对当前目录层，目录结构变化才处理子树；不再定时全库扫描。启动/事件丢失保留一次补漏，独立 worker 持久化扫描断点，精确任务优先，运行中再次变化不会被吞掉。默认版本切换会重建预览；版本及监听机制详见 [架构文档](../docs/ARCHITECTURE.md)。媒体解码在 Linux 容器执行，依赖 ExifTool、LibRaw、ImageMagick 与 libheif；每个外部进程有时限和内存限制。错误保留完整上下文，单文件失败不阻止处理其他文件。
+SQLite 使用 WAL。后台扫描只读原片，文件哈希或精确 JPEG 图像指纹可以自动归组；EXIF 匹配仅作为待视觉确认的候选。普通核对通过原片 size/mtime 与 XMP 状态签名跳过未变文件。文件事件精确入队，XMP 和导入仅核对当前目录层，目录结构变化才处理子树；不再定时全库扫描。启动/事件丢失保留一次补漏，独立 worker 持久化扫描断点，精确任务优先，运行中再次变化不会被吞掉。默认版本切换会重建预览；版本及监听机制详见 [架构文档](../docs/ARCHITECTURE.md)。日常媒体解码在 NAS 原生套件执行；Linux 远端 worker 仅用于显式启用的一次性批量处理（`KEEPS_REMOTE_WORKER_ENABLED=1`，默认关闭）。解码依赖 ExifTool、LibRaw、ImageMagick 与 libheif；每个外部进程有时限和内存限制。错误保留完整上下文，单文件失败不阻止处理其他文件。
 
 SIGTERM 停止领取任务并等待当前处理阶段结束。未完成的运行任务在下次启动恢复；停止追踪仅修改数据库。数据库和文件 I/O 在阻塞线程执行，查询接口不会承担媒体解码。
 

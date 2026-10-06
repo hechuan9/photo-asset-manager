@@ -163,7 +163,11 @@ async fn claim(
     Path(lib): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    run(move || claim_sync(&s, &lib, body)).await
+    run(move || {
+        let enabled = std::env::var("KEEPS_REMOTE_WORKER_ENABLED").ok();
+        claim_sync(&s, &lib, body, enabled.as_deref())
+    })
+    .await
 }
 fn claim_pending(
     store: &Store,
@@ -187,7 +191,17 @@ fn claim_pending(
     tx.commit()?;
     Ok(Some((id, asset, hash)))
 }
-fn claim_sync(s: &AppState, lib: &str, body: Value) -> Result<Value> {
+fn remote_worker_enabled(value: Option<&str>) -> Result<bool> {
+    match value {
+        None | Some("0" | "false") => Ok(false),
+        Some("1" | "true") => Ok(true),
+        _ => anyhow::bail!("KEEPS_REMOTE_WORKER_ENABLED must be 0 or 1"),
+    }
+}
+fn claim_sync(s: &AppState, lib: &str, body: Value, enabled: Option<&str>) -> Result<Value> {
+    if !remote_worker_enabled(enabled)? {
+        return Ok(json!({"task":null,"enabled":false}));
+    }
     {
         let _guard = COMMIT
             .lock()
@@ -541,6 +555,17 @@ async fn fail(
 mod tests {
     use super::*;
     #[test]
+    fn remote_workers_require_explicit_enablement() -> Result<()> {
+        for value in [None, Some("0"), Some("false")] {
+            assert!(!remote_worker_enabled(value)?);
+        }
+        for value in [Some("1"), Some("true")] {
+            assert!(remote_worker_enabled(value)?);
+        }
+        assert!(remote_worker_enabled(Some("yes")).is_err());
+        Ok(())
+    }
+    #[test]
     fn single_byte_ranges_support_ffmpeg_seeking() -> Result<()> {
         assert_eq!(byte_range("bytes=0-99", 1000)?, (0, 99));
         assert_eq!(byte_range("bytes=800-", 1000)?, (800, 999));
@@ -608,7 +633,35 @@ mod tests {
             library_id: "lib".into(),
             original_root_names: Default::default(),
         };
-        assert!(claim_sync(&state, "lib", json!({"workerID":"worker"}))?["task"].is_null());
+        for disabled in [None, Some("0"), Some("false")] {
+            assert_eq!(
+                claim_sync(&state, "lib", json!({"workerID":"worker"}), disabled)?,
+                json!({"task":null,"enabled":false})
+            );
+        }
+        assert_eq!(
+            state.store.lock()?.query_row(
+                "SELECT status,attempts,available_at FROM media_cache WHERE asset_id='asset'",
+                [],
+                |r| Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?
+                ))
+            )?,
+            ("pending".into(), 0, 0)
+        );
+        assert_eq!(
+            state
+                .store
+                .lock()?
+                .query_row("SELECT count(*) FROM remote_cache_tasks", [], |r| r
+                    .get::<_, i64>(0))?,
+            0
+        );
+        assert!(
+            claim_sync(&state, "lib", json!({"workerID":"worker"}), Some("1"))?["task"].is_null()
+        );
         let row = state.store.lock()?.query_row("SELECT status,attempts,last_error,available_at>unixepoch() FROM media_cache WHERE asset_id='asset'",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,bool>(3)?)))?;
         assert_eq!(row, ("pending".into(), 0, None, true));
         assert_eq!(

@@ -40,3 +40,11 @@ NAS 构建修正后的 keeps-render 成功。新增 `high_bit_depth_heif_preserv
 Linux worker SSH 返回 No route to host，尚不能更新其运行镜像；此处仅确认修复代码、NAS 独立 renderer 与上述单张缓存已处理。其余候选照片尚未逐张验证或重建。
 
 正式 API 回读指定资产并下载缩略图 HTTP 200，返回字节 SHA256 与新缩略图一致，确认不是只改本地诊断图。
+
+## 西雅图金松整批修复
+
+用户进一步确认整个目录受影响，已将范围扩大到 `/volume2/photo/照片/2026/西雅图金松` 的全部 1,501 个 HEIC/HEIF 文件。清单来自该目录的一次直接枚举，不遍历其他照片目录；catalog 当时仍在继续建立索引，修复程序按目录查询已索引项，等待后续入库项。
+
+NAS 已启动独立维护进程，2 个并发、CPU 0–1，可通过 journal 续跑。逐项校验源 hash，使用修正后的 keeps-render，只建立该项维护租约并走既有发布 API；成功后核对新缩略图 hash、原片 hash，旧缓存和原记录单独备份。旧的同资产 worker 租约在发布前失效，避免迟到的坏结果覆盖修复。没有全局提高 cache spec，也不重建其他目录。
+
+开始后的首个检查点：2/1,501 修复成功，0 失败；这不是批次完成声明。NAS 日志与状态在 `releases/incremental-20261005/3fr-diagnosis/seattle-batch/{manifest.json,journal.jsonl,status.json,run.log}`，脚本保留在同 release 的 `repair-batch.py`。Linux 网络目标仍不可达，但 NAS 仍能看到 linux worker 租约，因此不能声称旧 worker 已停止或已更新。已请用户恢复现有网络连接。
