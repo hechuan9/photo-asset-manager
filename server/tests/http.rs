@@ -100,7 +100,19 @@ async fn nas_catalog_commands_queries_authentication_and_restart() {
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(page["total"], 2);
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
-    assert_eq!(page["nextCursor"], "1");
+    let cursor = page["nextCursor"].as_str().unwrap();
+    assert!(cursor.starts_with("cd1."));
+    let (status, next) = call(
+        app.clone(),
+        "GET",
+        &format!("/libraries/photos/assets?limit=1&cursor={cursor}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{next}");
+    assert_eq!(next["items"].as_array().unwrap().len(), 1);
+    assert_ne!(next["items"][0]["id"], page["items"][0]["id"]);
+    assert!(next["nextCursor"].is_null());
     let path = format!("/libraries/photos/assets/{}", id.to_uppercase());
     let patch =
         json!({"rating":5,"flagState":"picked","colorLabel":"green","tags":["旅行","family"]});
@@ -571,7 +583,19 @@ async fn hidden_directories_filter_before_paging_and_persist() {
     )
     .await;
     assert_eq!(page["total"], 2);
-    assert_eq!(page["nextCursor"], "1");
+    let cursor = page["nextCursor"].as_str().unwrap();
+    assert!(cursor.starts_with("cd1."));
+    let (status, next) = call(
+        app.clone(),
+        "GET",
+        &format!("/libraries/photos/assets?limit=1&cursor={cursor}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{next}");
+    assert_eq!(next["items"].as_array().unwrap().len(), 1);
+    assert_ne!(next["items"][0]["id"], page["items"][0]["id"]);
+    assert!(next["nextCursor"].is_null());
     let (_, counts) = call(app.clone(), "GET", "/libraries/photos/counts", Value::Null).await;
     assert_eq!(counts, json!({"all":2,"picked":0,"trashed":0}));
     let (_, counts) = call(

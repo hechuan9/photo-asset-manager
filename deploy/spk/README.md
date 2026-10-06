@@ -1,6 +1,6 @@
 # Synology 原生套件可行性原型
 
-当前 NAS 已在 0012 套件上运行正式资料库 `local-library`，Mac 地址为 `http://192.168.0.50:2283`，原片仍位于 `/volume2/photo`，状态位于 `/volume2/@appdata/KeepsNativeProbe/production-state`。旧 Docker 已停止并保留。见[正式迁移记录](../../docs/validation/2026-10-05-spk-production-migration.md)。0010 更新及验证见[任务展示部署记录](../../docs/validation/2026-10-05-task-settings-deployment.md)。0012 增量调度与故障隔离见[增量后台验证](../../docs/validation/2026-10-05-incremental-work.md)。下文的 2285、spk-probe 和测试共享目录是原型默认配置。
+当前 NAS 已在 0013 套件上运行正式资料库 `local-library`，Mac 地址为 `http://192.168.0.50:2283`，原片仍位于 `/volume2/photo`，状态位于 `/volume2/@appdata/KeepsNativeProbe/production-state`。旧 Docker 已停止并保留。见[正式迁移记录](../../docs/validation/2026-10-05-spk-production-migration.md)。0010 更新及验证见[任务展示部署记录](../../docs/validation/2026-10-05-task-settings-deployment.md)。0013 稳定分页发布见[发布记录](../../docs/validation/2026-10-05-keyset-nas-release.md)。0012 增量调度与故障隔离见[增量后台验证](../../docs/validation/2026-10-05-incremental-work.md)。下文的 2285、spk-probe 和测试共享目录是原型默认配置。
 
 `KeepsNativeProbe` 是独立测试套件，已在 DS1520+（geminilake、DSM 7.3.2-86009 Update 4）验证。它原生运行 Keeps 和媒体工具，不需要运行容器。当前只允许该架构安装，不代表其他 DSM/CPU 已兼容。
 

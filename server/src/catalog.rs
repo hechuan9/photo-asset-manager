@@ -1,5 +1,6 @@
 use crate::store::{Store, StoreError};
 use anyhow::{Context, Result, ensure};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::Deserialize;
@@ -280,23 +281,33 @@ impl Store {
         self.hidden_directories(lib)
     }
     pub fn query_assets(&self, lib: &str, q: &AssetQuery) -> Result<Value> {
-        let offset = q
-            .cursor
-            .as_deref()
-            .unwrap_or("0")
-            .parse::<i64>()
-            .map_err(|_| invalid("invalid cursor"))?;
-        if offset < 0 {
-            return Err(invalid("invalid cursor"));
-        }
+        let sort = q.sort.as_deref().unwrap_or("capture_desc");
         let limit = q.limit.unwrap_or(100).clamp(1, 200);
-        let order = match q.sort.as_deref().unwrap_or("capture_desc") {
+        let order = match sort {
             "capture_desc" => "a.sort_time DESC,a.id",
             "capture_asc" => "a.sort_time ASC,a.id",
             "filename" => "a.filename COLLATE NOCASE,a.id",
             "rating_desc" => "a.rating DESC,a.sort_time DESC,a.id",
             _ => return Err(invalid("invalid sort")),
         };
+        let mut boundary: Option<(String, String)> = None;
+        let mut offset = 0_i64;
+        if let Some(cursor) = &q.cursor {
+            if sort == "capture_desc" && cursor.starts_with("cd1.") {
+                let encoded = &cursor[4..];
+                let bytes = URL_SAFE_NO_PAD
+                    .decode(encoded)
+                    .map_err(|_| invalid("invalid cursor"))?;
+                boundary =
+                    Some(serde_json::from_slice(&bytes).map_err(|_| invalid("invalid cursor"))?);
+            } else {
+                // Installed clients may resume a persisted offset; the next page upgrades it.
+                offset = cursor.parse().map_err(|_| invalid("invalid cursor"))?;
+                if offset < 0 {
+                    return Err(invalid("invalid cursor"));
+                }
+            }
+        }
         let mut filter = "a.library_id=? AND a.trashed=?".to_string();
         let mut values: Vec<rusqlite::types::Value> = vec![
             lib.to_string().into(),
@@ -354,21 +365,46 @@ impl Store {
             rusqlite::params_from_iter(&values),
             |r| r.get(0),
         )?;
-        let mut statement=db.prepare(&format!("SELECT a.snapshot FROM catalog_assets a WHERE {filter} ORDER BY {order} LIMIT ? OFFSET ?"))?;
-        values.push((limit as i64).into());
-        values.push(offset.into());
-        let rows = statement.query_map(rusqlite::params_from_iter(&values), |r| {
-            r.get::<_, String>(0)
-        })?;
-        let mut items = Vec::new();
-        for row in rows {
-            items.push(decorate(&db, lib, serde_json::from_str(&row?)?)?);
+        if let Some((time, id)) = boundary {
+            filter.push_str(" AND (a.sort_time<? OR (a.sort_time=? AND a.id>?))");
+            values.extend([time.clone().into(), time.into(), id.into()]);
         }
-        let next = offset + items.len() as i64;
+        let mut statement=db.prepare(&format!("SELECT a.snapshot,a.sort_time,a.id FROM catalog_assets a WHERE {filter} ORDER BY {order} LIMIT ? OFFSET ?"))?;
+        values.push(((limit + 1) as i64).into());
+        values.push(offset.into());
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(&values), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let has_more = rows.len() > limit;
+        let mut items = Vec::new();
+        let mut last_key = None;
+        for (snapshot, time, id) in rows.into_iter().take(limit) {
+            items.push(decorate(&db, lib, serde_json::from_str(&snapshot)?)?);
+            last_key = Some((time, id));
+        }
+        let next_cursor = if has_more {
+            Some(if sort == "capture_desc" {
+                format!(
+                    "cd1.{}",
+                    URL_SAFE_NO_PAD.encode(serde_json::to_vec(&last_key)?)
+                )
+            } else {
+                (offset + items.len() as i64).to_string()
+            })
+        } else {
+            None
+        };
         Ok(
-            json!({"items":items,"total":total,"nextCursor":if next<total{Some(next.to_string())}else{None},"revision":revision,"isUpdating":is_updating}),
+            json!({"items":items,"total":total,"nextCursor":next_cursor,"revision":revision,"isUpdating":is_updating}),
         )
     }
+
     pub fn asset(&self, lib: &str, id: &str) -> Result<Value> {
         let db = self.lock()?;
         decorate(&db, lib, existing(&db, lib, id)?.ok_or_else(not_found)?)
@@ -979,6 +1015,70 @@ mod tests {
     use super::*;
     fn snapshot() -> Value {
         json!({"assetID":Uuid::new_v4(),"captureTime":"2024-01-01T00:00:00Z","cameraMake":"Canon","cameraModel":"R3","lensModel":"50mm","originalFilename":"photo.jpg","contentFingerprint":"photo-hash","metadataFingerprint":"2024|Canon|R3|photo","rating":1,"flagState":"unflagged","tags":[],"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z"})
+    }
+    #[test]
+    fn capture_cursor_survives_inserts_removed_boundary_and_time_ties() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let store = Store::open(&directory.path().join("catalog.sqlite"), true)?;
+        let insert = |id: &str, time: &str| -> Result<()> {
+            let mut asset = snapshot();
+            asset["id"] = json!(id);
+            asset["captureTime"] = json!(time);
+            store.lock()?.execute(
+                "INSERT INTO catalog_assets VALUES ('lib',?,?, 'hash','fingerprint',?,'photo.jpg',1,'unflagged',NULL,0)",
+                params![id, asset.to_string(), time],
+            )?;
+            Ok(())
+        };
+        for (id, time) in [
+            ("a", "2024-03"),
+            ("b", "2024-02"),
+            ("c", "2024-02"),
+            ("d", "2024-01"),
+        ] {
+            insert(id, time)?;
+        }
+        let mut query = AssetQuery {
+            limit: Some(2),
+            ..Default::default()
+        };
+        let first = store.query_assets("lib", &query)?;
+        assert_eq!(first["items"][0]["id"], "a");
+        assert_eq!(first["items"][1]["id"], "b");
+        query.cursor = first["nextCursor"].as_str().map(str::to_owned);
+        insert("new", "2024-04")?;
+        let after_insert = store.query_assets("lib", &query)?;
+        assert_eq!(after_insert["items"][0]["id"], "c");
+        assert_eq!(after_insert["items"][1]["id"], "d");
+        // Removing both the boundary and an earlier result must not skip older photos.
+        store
+            .lock()?
+            .execute("DELETE FROM catalog_assets WHERE id IN ('a','b')", [])?;
+        let second = store.query_assets("lib", &query)?;
+        assert_eq!(second["total"], 3);
+        assert_eq!(second["items"].as_array().unwrap().len(), 2);
+        assert_eq!(second["items"][0]["id"], "c");
+        assert_eq!(second["items"][1]["id"], "d");
+        assert!(second["nextCursor"].is_null());
+        for cursor in ["-1", "bad", "cd1.invalid", "cd1.bnVsbA"] {
+            query.cursor = Some(cursor.into());
+            assert!(store.query_assets("lib", &query).is_err());
+        }
+        query.cursor = Some("1".into());
+        query.limit = Some(1);
+        let migrated = store.query_assets("lib", &query)?;
+        assert_eq!(migrated["items"][0]["id"], "c");
+        assert!(migrated["nextCursor"].as_str().unwrap().starts_with("cd1."));
+        query.cursor = migrated["nextCursor"].as_str().map(str::to_owned);
+        assert_eq!(store.query_assets("lib", &query)?["items"][0]["id"], "d");
+        query.limit = Some(2);
+        query.cursor = None;
+        query.sort = Some("capture_asc".into());
+        let ascending = store.query_assets("lib", &query)?;
+        assert_eq!(ascending["nextCursor"], "2");
+        query.cursor = Some("2".into());
+        assert_eq!(store.query_assets("lib", &query)?["items"][0]["id"], "new");
+        Ok(())
     }
     #[test]
     fn missing_reconciliation_respects_file_and_shallow_directory_scope() -> Result<()> {

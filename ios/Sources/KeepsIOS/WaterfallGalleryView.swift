@@ -13,11 +13,13 @@ struct IOSWaterfallGallery: View {
     @State private var hasScrolled = false
     @State private var loadingOlder = false
     @State private var focusedAssetID: UUID?
+    @State private var scrollRowID: UUID?
+    @State private var layout = KeepsPhotoGrid.Snapshot()
 
     var body: some View {
         GeometryReader { geometry in
-            let ratios = library.assets.map { JustifiedAssetGridLayout.aspectRatio($0.gridPreview) }
-            let rows = KeepsPhotoGrid.rows(aspectRatios: ratios, width: geometry.size.width, density: density)
+            let rows = layout.rows
+            let assetsByID = Dictionary(uniqueKeysWithValues: library.assets.map { ($0.id, $0) })
             ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 1) {
@@ -29,38 +31,44 @@ struct IOSWaterfallGallery: View {
                                 if visible { loadOlderIfNeeded() }
                             }
                     }
-                    // 从最新一端组行再反向展示，向顶部插入旧页时已有行的身份和顺序保持稳定。
-                    ForEach(Array(rows.reversed()), id: \.indices.lowerBound) { row in
+                    ForEach(Array(rows.reversed())) { row in
                         IOSPhotoGridRow(
-                            assets: row.indices.reversed().map { library.assets[$0] },
-                            sizes: Array(row.sizes.reversed()), width: geometry.size.width,
+                            row: row, assetsByID: assetsByID,
+                            width: geometry.size.width,
                             selecting: $selecting, selectedIDs: $selectedIDs, compact: density == .compact,
                             open: open, showInformation: { information = $0 }
-                        ).id(library.assets[row.indices.lowerBound].id)
+                        ).id(row.id)
                     }
                 }.scrollTargetLayout()
             }
             .contentMargins(.bottom, 0, for: .scrollContent)
-            .defaultScrollAnchor(.bottom)
+            .scrollPosition(id: $scrollRowID)
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
             .defaultScrollAnchor(.top, for: .alignment)
             .bottomPullRefresh(bottomInset: 90) { await library.refreshFromBottom() }
             .simultaneousGesture(MagnifyGesture().onEnded { value in
                 let next = density.pinched(magnification: value.magnification)
                 if next != density { density = next }
             })
+            .onAppear { updateLayout(width: geometry.size.width, reset: true) }
+            .onChange(of: geometry.size.width) { _, width in updateLayout(width: width, reset: true) }
+            .onChange(of: library.layoutRevision) { _, _ in
+                updateLayout(width: geometry.size.width, reset: true)
+            }
             .onChange(of: density) { _, _ in
-                if let focusedAssetID, let index = library.assets.firstIndex(where: { $0.id == focusedAssetID }),
-                   let row = rows.first(where: { $0.indices.contains(index) }) {
-                    proxy.scrollTo(library.assets[row.indices.lowerBound].id, anchor: .center)
+                updateLayout(width: geometry.size.width, reset: true)
+                if let focusedAssetID, let row = layout.rows.first(where: { $0.slots.contains { $0.id == focusedAssetID } }) {
+                    proxy.scrollTo(row.id, anchor: .center)
                 }
             }
+            .onChange(of: library.assets) { _, _ in updateLayout(width: geometry.size.width) }
             .onScrollPhaseChange { _, phase in
                 if phase == .interacting { hasScrolled = true; loadOlderIfNeeded() }
             }
             .onScrollTargetVisibilityChange(idType: UUID.self, threshold: 0.2) { ids in
                 let visible = Set(ids)
-                let visibleAssets = rows.filter { visible.contains(library.assets[$0.indices.lowerBound].id) }
-                    .flatMap { row in row.indices.map { library.assets[$0] } }
+                let visibleAssets = rows.filter { visible.contains($0.id) }
+                    .flatMap { row in row.slots.compactMap { assetsByID[$0.id] } }
                 if !visibleAssets.isEmpty { focusedAssetID = visibleAssets[visibleAssets.count / 2].id }
                 let dates = visibleAssets.map { String(($0.captureTime ?? $0.createdAt).prefix(10)) }.sorted()
                 if let first = dates.first, let last = dates.last {
@@ -76,6 +84,18 @@ struct IOSWaterfallGallery: View {
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { information = nil } } }
             }.environmentObject(library)
         }
+    }
+
+    private func updateLayout(width: CGFloat, reset: Bool = false) {
+        let previousRows = layout.rows
+        layout.update(ids: library.assets.map(\.id),
+                      aspectRatios: library.assets.map { JustifiedAssetGridLayout.aspectRatio($0.gridPreview) },
+                      width: width, density: density, reset: reset)
+        guard !reset, let scrollRowID, !layout.rows.contains(where: { $0.id == scrollRowID }),
+              let index = previousRows.firstIndex(where: { $0.id == scrollRowID }) else { return }
+        let surviving = Set(layout.rows.map(\.id))
+        self.scrollRowID = previousRows[index...].first(where: { surviving.contains($0.id) })?.id
+            ?? previousRows[..<index].last(where: { surviving.contains($0.id) })?.id
     }
 
     private func open(_ asset: KeepsAsset) {
@@ -101,8 +121,8 @@ struct IOSWaterfallGallery: View {
 
 private struct IOSPhotoGridRow: View {
     @EnvironmentObject private var library: IOSLibraryStore
-    let assets: [KeepsAsset]
-    let sizes: [CGSize]
+    let row: KeepsPhotoGrid.Snapshot.StableRow
+    let assetsByID: [UUID: KeepsAsset]
     let width: CGFloat
     @Binding var selecting: Bool
     @Binding var selectedIDs: Set<UUID>
@@ -113,14 +133,15 @@ private struct IOSPhotoGridRow: View {
 
     var body: some View {
         // 行的占位尺寸始终确定，图片仅在可见时解码，避免长图库持有所有预览。
-        Color.clear.frame(width: width, height: sizes.map(\.height).max() ?? 0)
+        Color.clear.frame(width: width, height: row.height)
             .overlay(alignment: .leading) {
                 if visible {
                     HStack(spacing: 1) {
-                        ForEach(Array(assets.enumerated()), id: \.element.id) { index, asset in
+                        ForEach(Array(row.slots.reversed())) { slot in
+                            if let asset = assetsByID[slot.id] {
                             Button { open(asset) } label: {
                                 IOSPreviewImage(asset: asset, configuration: library.configuration, contentMode: compact ? .fill : .fit)
-                                    .frame(width: sizes[index].width, height: sizes[index].height)
+                                    .frame(width: slot.size.width, height: slot.size.height)
                                     .overlay(alignment: .bottomTrailing) {
                                         if selecting {
                                             Image(systemName: selectedIDs.contains(asset.id) ? "checkmark.circle.fill" : "circle")
@@ -139,6 +160,10 @@ private struct IOSPhotoGridRow: View {
                                     Button("选择", systemImage: "checkmark.circle") { selecting = true; selectedIDs.insert(asset.id) }
                                     Button("信息与整理", systemImage: "info.circle") { showInformation(asset) }
                                 }
+                            } else {
+                                Color.clear.frame(width: slot.size.width, height: slot.size.height)
+                                    .accessibilityHidden(true)
+                            }
                         }
                     }
                 }

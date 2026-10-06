@@ -6,6 +6,7 @@ import KeepsAPI
 final class IOSLibraryStore: ObservableObject {
     @Published private(set) var assets: [KeepsAsset] = []
     @Published private(set) var total = 0
+    @Published private(set) var layoutRevision = 0
     @Published private(set) var isLoading = false
     @Published private(set) var configuration: KeepsConfiguration?
     @Published var lastError: String?
@@ -22,7 +23,6 @@ final class IOSLibraryStore: ObservableObject {
     private let cache = KeepsAssetCache()
     private let session: URLSession
     private var requestTask: Task<Void, Never>?
-    private var paginationNeedsRefresh = false
 
     init(configuration: KeepsConfiguration? = nil, session: URLSession = KeepsClient.apiSession,
          loadSettings: Bool = true) {
@@ -34,6 +34,7 @@ final class IOSLibraryStore: ObservableObject {
     func configure(_ configuration: KeepsConfiguration?) {
         guard self.configuration != configuration else { return }
         generation += 1
+        layoutRevision += 1
         requestTask?.cancel()
         requestTask = nil
         cache.removeAll()
@@ -42,7 +43,6 @@ final class IOSLibraryStore: ObservableObject {
         assets = []
         total = 0
         nextCursor = nil
-        paginationNeedsRefresh = false
         isLoading = false
         lastError = nil
         self.configuration = configuration
@@ -69,7 +69,9 @@ final class IOSLibraryStore: ObservableObject {
     }
 
     func refreshFromBottom() async {
+        let currentGeneration = generation
         await load(validateRevision: true)
+        if generation == currentGeneration { layoutRevision += 1 }
     }
 
     private func load(validateRevision: Bool) async {
@@ -79,12 +81,12 @@ final class IOSLibraryStore: ObservableObject {
             generation += 1
             requestTask?.cancel()
             requestTask = nil
+            layoutRevision += 1
             displayedQuery = query
             displayedPage = cache.page(for: query)
             assets = displayedPage?.items ?? []
             total = displayedPage?.total ?? 0
             nextCursor = displayedPage?.nextCursor
-            paginationNeedsRefresh = false
             lastError = nil
             isLoading = false
         } else if let requestTask {
@@ -122,7 +124,7 @@ final class IOSLibraryStore: ObservableObject {
     }
 
     func loadMore() async {
-        guard !paginationNeedsRefresh, requestTask == nil, let nextCursor, let configuration, displayedQuery == query else { return }
+        guard requestTask == nil, let nextCursor, let configuration, displayedQuery == query else { return }
         let requestGeneration = generation
         let query = query
         let client = KeepsClient(configuration: configuration, session: session)
@@ -146,35 +148,42 @@ final class IOSLibraryStore: ObservableObject {
         var request = query
         request.cursor = cursor
         var loaded = cursor == nil ? [] : assets
-        let countToReload = cursor == nil ? assets.count : 0
+        var countToReload = cursor == nil ? assets.count : 0
         var previous = cursor == nil ? nil : displayedPage
         var isUpdating = previous?.isUpdating ?? false
+        var rebuilding = cursor == nil
         var page: KeepsAssetPage
-        repeat {
+        while true {
             page = try await client.assets(query: request)
             try Task.checkCancellation()
             guard generation == requestGeneration else { return }
-            // A moving catalog cannot safely combine offset pages from different snapshots.
-            if let previous, previous.revision != page.revision {
-                if cursor != nil {
-                    paginationNeedsRefresh = true
-                    lastError = "内容已变化，请从底部上拉刷新"
-                    return
+            if let prior = previous, prior.revision != page.revision || prior.isUpdating || page.isUpdating {
+                if !rebuilding {
+                    // Re-read the loaded window before using a cursor from the new catalog.
+                    countToReload = assets.count + query.limit + max(0, page.total - total)
+                    rebuilding = true
+                    loaded = []
+                    request.cursor = nil
+                    previous = nil
+                    isUpdating = false
+                    continue
                 }
-                var first = query
-                first.cursor = nil
-                let fresh = try await client.assets(query: first)
-                try Task.checkCancellation()
-                guard generation == requestGeneration else { return }
-                publish(fresh, query: query)
-                return
+                // A changing catalog remains browsable but must not become a stable cache.
+                isUpdating = true
             }
-            var existing = Set(loaded.map(\.id))
-            loaded.append(contentsOf: page.items.filter { existing.insert($0.id).inserted })
+            var positions = Dictionary(uniqueKeysWithValues: loaded.enumerated().map { ($0.element.id, $0.offset) })
+            for asset in page.items {
+                if let index = positions[asset.id] { loaded[index] = asset }
+                else {
+                    positions[asset.id] = loaded.count
+                    loaded.append(asset)
+                }
+            }
             isUpdating = isUpdating || page.isUpdating
             previous = page
             request.cursor = page.nextCursor
-        } while cursor == nil && loaded.count < countToReload && page.nextCursor != nil
+            if !rebuilding || loaded.count >= countToReload || request.cursor == nil { break }
+        }
         publish(KeepsAssetPage(items: loaded, total: page.total, nextCursor: page.nextCursor,
                                revision: page.revision, isUpdating: isUpdating), query: query)
     }
@@ -184,7 +193,6 @@ final class IOSLibraryStore: ObservableObject {
         assets = page.items
         total = page.total
         nextCursor = page.nextCursor
-        paginationNeedsRefresh = false
         cache.store(page, for: query)
     }
 
@@ -208,6 +216,6 @@ final class IOSLibraryStore: ObservableObject {
         }
     }
 
-    var canLoadMore: Bool { nextCursor != nil && !paginationNeedsRefresh }
+    var canLoadMore: Bool { nextCursor != nil }
     var hasLoadedResults: Bool { displayedPage != nil }
 }

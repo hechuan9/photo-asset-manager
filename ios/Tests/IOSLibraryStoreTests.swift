@@ -66,24 +66,57 @@ struct IOSLibraryStoreTests {
         #expect(fixture.assetRequests == 1)
     }
 
-    @Test func paginationVersionChangeWaitsForExplicitBottomRefresh() async {
+    @Test func paginationVersionChangeAutomaticallyLoadsNewAndOlderPhotos() async {
         let fixture = LibraryFixture()
-        fixture.setCursor("next")
+        fixture.enqueuePage(ids: [1, 2], revision: 1, next: "old")
+        fixture.enqueuePage(ids: [2, 3], revision: 2, next: "stale")
+        fixture.enqueuePage(ids: [4, 1], revision: 2, next: "new")
+        fixture.enqueuePage(ids: [2, 3], revision: 2)
+        let store = fixture.store()
+        await store.refresh()
+        await store.loadMore()
+        #expect(fixture.assetRequests == 4)
+        #expect(store.assets.map(\.originalFilename) == ["4", "1", "2", "3"])
+        #expect(store.assets.allSatisfy { $0.rating == 2 })
+        #expect(store.lastError == nil)
+        #expect(!store.isLoading)
+        #expect(fixture.revisionPaths.isEmpty)
+    }
+
+    @Test func changingCatalogDuringReloadDoesNotDiscardLoadedWindowOrLoop() async {
+        let fixture = LibraryFixture()
+        fixture.enqueuePage(ids: [1, 2], revision: 1, next: "old")
+        fixture.enqueuePage(ids: [2, 3], revision: 2)
+        fixture.enqueuePage(ids: [4, 1], revision: 2, next: "new")
+        fixture.enqueuePage(ids: [1, 2, 3], revision: 3)
+        let store = fixture.store()
+        await store.refresh()
+        await store.loadMore()
+        #expect(fixture.assetRequests == 4)
+        #expect(store.assets.map(\.originalFilename) == ["4", "1", "2", "3"])
+        #expect(store.lastError == nil)
+        #expect(store.assets.first(where: { $0.originalFilename == "1" })?.rating == 3)
+        fixture.set(revision: 3, updating: false)
+        await store.refreshFromBottom()
+        #expect(fixture.assetRequests == 5)
+    }
+
+    @Test func failedAutomaticReloadPreservesPhotosAndCanRetryInPlace() async {
+        let fixture = LibraryFixture()
+        fixture.enqueuePage(ids: [1, 2], revision: 1, next: "old")
+        fixture.enqueuePage(ids: [2, 3], revision: 2)
+        fixture.enqueueFailure()
         let store = fixture.store()
         await store.refresh()
         let original = store.assets
-        fixture.set(revision: 2, updating: false)
         await store.loadMore()
-        #expect(fixture.assetRequests == 2)
         #expect(store.assets == original)
-        #expect(store.lastError == "内容已变化，请从底部上拉刷新")
-        #expect(!store.canLoadMore)
-        await store.loadMore()
-        await store.refresh()
-        #expect(fixture.assetRequests == 2)
-        await store.refreshFromBottom()
-        #expect(fixture.assetRequests == 3)
+        #expect(store.lastError != nil)
         #expect(store.canLoadMore)
+        fixture.enqueuePage(ids: [2, 3], revision: 2)
+        fixture.enqueuePage(ids: [4, 1, 2, 3], revision: 2)
+        await store.loadMore()
+        #expect(store.assets.map(\.originalFilename) == ["4", "1", "2", "3"])
         #expect(store.lastError == nil)
     }
 
@@ -98,10 +131,10 @@ struct IOSLibraryStoreTests {
         fixture.setCursor(nil)
         fixture.set(revision: 1, updating: false)
         await store.refresh()
-        #expect(fixture.assetRequests == 2)
+        #expect(fixture.assetRequests == 4)
         #expect(store.assets.count == 2)
         await store.refreshFromBottom()
-        #expect(fixture.assetRequests == 3)
+        #expect(fixture.assetRequests == 5)
         #expect(store.assets.count == 1)
     }
 
@@ -154,6 +187,25 @@ struct IOSLibraryStoreTests {
         #expect(store.assets.count == 2)
     }
 
+    @Test func automaticUpdatesKeepLayoutUntilExplicitRefreshOrScopeChange() async {
+        let fixture = LibraryFixture()
+        fixture.setCursor("next")
+        let store = fixture.store()
+        await store.refresh()
+        let initial = store.layoutRevision
+        await store.loadMore()
+        #expect(store.layoutRevision == initial)
+        var changed = store.assets[0]
+        changed.trashed = true
+        store.update(changed)
+        #expect(store.layoutRevision == initial)
+        await store.refreshFromBottom()
+        #expect(store.layoutRevision == initial + 1)
+        store.directory = "/other"
+        await store.refresh()
+        #expect(store.layoutRevision == initial + 2)
+    }
+
     @Test func mutationUpdatesVisibleSnapshotWithoutStartingRefresh() async {
         let fixture = LibraryFixture()
         let store = fixture.store()
@@ -186,6 +238,7 @@ private final class LibraryFixture: @unchecked Sendable {
     private var failure = false
     private var cursor: String?
     private var delay: TimeInterval = 0
+    private var scriptedPages: [(Int, String)] = []
     private var assetCount = 0
     private var paths: [String] = []
     var assetRequests: Int { lock.withLock { assetCount } }
@@ -207,6 +260,19 @@ private final class LibraryFixture: @unchecked Sendable {
     func setFailure(_ failure: Bool) { lock.withLock { self.failure = failure } }
     func setCursor(_ cursor: String?) { lock.withLock { self.cursor = cursor } }
     func setDelay(_ delay: TimeInterval) { lock.withLock { self.delay = delay } }
+    func enqueuePage(ids: [Int], revision: Int, next: String? = nil) {
+        let items = ids.map { id in
+            """
+            {"id":"00000000-0000-0000-0000-\(String(format: "%012d", id))","cameraMake":"","cameraModel":"","lensModel":"","originalFilename":"\(id)","contentFingerprint":"hash","metadataFingerprint":"meta","rating":\(revision),"flagState":"unflagged","tags":[],"createdAt":"now","updatedAt":"now","trashed":false}
+            """
+        }.joined(separator: ",")
+        let cursor = next.map { "\"\($0)\"" } ?? "null"
+        let body = """
+        {"items":[\(items)],"total":4,"nextCursor":\(cursor),"revision":\(revision),"isUpdating":false}
+        """
+        lock.withLock { scriptedPages.append((200, body)) }
+    }
+    func enqueueFailure() { lock.withLock { scriptedPages.append((500, "failed")) } }
     private func response(_ request: URLRequest) -> (Int, String, TimeInterval) {
         lock.withLock {
             let parts = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
@@ -216,6 +282,10 @@ private final class LibraryFixture: @unchecked Sendable {
                 return (failure ? 500 : 200, "{\"revision\":\(revision),\"isUpdating\":\(updating)}", delay)
             }
             assetCount += 1
+            if !scriptedPages.isEmpty {
+                let (status, body) = scriptedPages.removeFirst()
+                return (status, body, delay)
+            }
             let second = parameter("cursor") != nil
             let name = second ? "second" : (parameter("directory") ?? "root")
             let id = second ? "00000000-0000-0000-0000-000000000002" : "00000000-0000-0000-0000-000000000001"

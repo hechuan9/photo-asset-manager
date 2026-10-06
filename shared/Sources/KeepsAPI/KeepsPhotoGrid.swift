@@ -62,3 +62,52 @@ public enum KeepsPhotoGrid {
         }
     }
 }
+
+extension KeepsPhotoGrid {
+    /// A browsing session owns its slots; content updates never repack surviving rows.
+    public struct Snapshot {
+        public struct Slot: Identifiable, Equatable {
+            public let id: UUID
+            public let size: CGSize
+        }
+        public struct StableRow: Identifiable, Equatable {
+            public let id: UUID
+            public let slots: [Slot]
+            public var height: CGFloat { slots.map(\.size.height).max() ?? 0 }
+        }
+        public private(set) var rows: [StableRow] = []
+        private var knownIDs: Set<UUID> = []
+        public init() {}
+
+        public mutating func update(ids: [UUID], aspectRatios: [CGFloat], width: CGFloat,
+                                    density: KeepsGalleryDensity, reset: Bool = false) {
+            guard width > 0, ids.count == aspectRatios.count else { return }
+            if reset || knownIDs.isEmpty {
+                rows = makeRows(Array(ids.indices))
+                knownIDs = Set(ids)
+                return
+            }
+            let present = Set(ids)
+            let anchors = ids.indices.filter { knownIDs.contains(ids[$0]) }
+            rows.removeAll { row in row.slots.allSatisfy { !present.contains($0.id) } }
+            guard let first = anchors.first, let last = anchors.last else {
+                rows = makeRows(Array(ids.indices))
+                knownIDs = present
+                return
+            }
+            let newest = ids.indices.filter { $0 < first && !knownIDs.contains(ids[$0]) }
+            let oldest = ids.indices.filter { $0 > last && !knownIDs.contains(ids[$0]) }
+            rows.insert(contentsOf: makeRows(newest), at: 0)
+            rows.append(contentsOf: makeRows(oldest))
+            // Historical inserts within the visible window wait for an explicit reflow.
+            knownIDs.formUnion(present)
+
+            func makeRows(_ indices: [Int]) -> [StableRow] {
+                KeepsPhotoGrid.rows(aspectRatios: indices.map { aspectRatios[$0] }, width: width, density: density).map { row in
+                    let slots = zip(row.indices, row.sizes).map { index, size in Slot(id: ids[indices[index]], size: size) }
+                    return StableRow(id: slots[0].id, slots: slots)
+                }
+            }
+        }
+    }
+}
