@@ -197,6 +197,8 @@ fn existing_batch(
     Ok(None)
 }
 fn prepare(jobs: &Jobs, library: &str, mut input: Prepare) -> Result<Batch> {
+    let _guard = jobs.directory_mutation.read().unwrap();
+    crate::directory_move::ensure_reconciled(jobs)?;
     ensure!(
         uuid::Uuid::parse_str(&input.id).is_ok(),
         invalid("invalid batch UUID")
@@ -632,6 +634,7 @@ async fn finish(
 ) -> Result<Json<Value>, ApiError> {
     let result = tokio::task::spawn_blocking(move || -> Result<Value> {
         let _directory_guard = state.jobs.directory_mutation.read().unwrap();
+        crate::directory_move::ensure_reconciled(&state.jobs)?;
         let batch = load(&state.jobs.db.lock().unwrap(), &library, &id)?;
         if let Some(job_id) = batch.job_id {
             return Ok(json!({"job":state.jobs.job(&job_id)?}));

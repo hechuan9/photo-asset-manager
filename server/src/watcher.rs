@@ -40,8 +40,8 @@ pub fn run(
         if Instant::now() >= refresh {
             maintain_revisions(&store, &jobs)?;
             let active: Vec<_> = jobs.folders()?.into_iter().filter(|f| f.active).collect();
-            let changed = active.iter().map(|f| &f.id).collect::<Vec<_>>()
-                != folders.iter().map(|f| &f.id).collect::<Vec<_>>();
+            let changed = active.iter().map(|f| (&f.id, &f.path)).collect::<Vec<_>>()
+                != folders.iter().map(|f| (&f.id, &f.path)).collect::<Vec<_>>();
             folders = active;
             if changed || structure_changed {
                 if structure_changed {
@@ -157,10 +157,13 @@ fn meaningful_event(kind: &EventKind) -> bool {
 fn queue_event_path(
     store: &Store,
     jobs: &Jobs,
-    folders: &[Folder],
+    _folders: &[Folder],
     path: &Path,
     directory: bool,
 ) -> Result<()> {
+    let _guard = jobs.directory_mutation.read().unwrap();
+    crate::directory_move::ensure_reconciled(jobs)?;
+    let folders = jobs.folders()?;
     if excluded_path(jobs.root(), path) {
         return Ok(());
     }
@@ -172,7 +175,7 @@ fn queue_event_path(
     }
     for folder in folders
         .iter()
-        .filter(|folder| path.starts_with(&folder.path))
+        .filter(|folder| folder.active && path.starts_with(&folder.path))
     {
         let queued = if directory {
             jobs.enqueue_removed_directory(&folder.id, path, 2)
@@ -438,9 +441,16 @@ mod tests {
             .into_iter()
             .filter(|j| j.status == "pending")
             .collect();
-        assert_eq!(live.len(), 1);
-        assert_eq!(live[0].scope_kind, "directory");
-        assert_eq!(live[0].path, root.join("child").to_str().unwrap());
+        assert_eq!(live.len(), 2);
+        assert!(
+            live.iter()
+                .any(|job| job.id == file.id && job.scope_kind == "file")
+        );
+        let directory = live
+            .iter()
+            .find(|job| job.scope_kind == "directory")
+            .unwrap();
+        assert_eq!(directory.path, root.join("child").to_str().unwrap());
         assert!(!meaningful_event(&EventKind::Access(
             notify::event::AccessKind::Read
         )));

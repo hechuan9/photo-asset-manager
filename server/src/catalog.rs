@@ -20,7 +20,7 @@ fn missing_paths_query(scope: &str) -> Result<String> {
     ))
 }
 
-const VERSION: i64 = 10;
+const VERSION: i64 = 11;
 const DIRECTORY_ASSET_SET: &str =
     " AND a.id IN (SELECT f.asset_id FROM catalog_paths f WHERE f.library_id=? AND ";
 // Ordering by path must not make SQLite scan the whole library for every asset.
@@ -74,6 +74,7 @@ pub fn ensure_schema(db: &mut Connection, allow_migrate: bool) -> Result<()> {
         db.prepare(
             "SELECT library_id,path,owner,last_changed_at FROM catalog_revision_updates LIMIT 0",
         )?;
+        db.prepare("SELECT browse_thumbnail,browse_spec,browse_source_version,browse_attempts,browse_available_at,browse_last_error FROM media_cache LIMIT 0")?;
         return Ok(());
     }
     ensure!(
@@ -137,6 +138,7 @@ pub fn ensure_schema(db: &mut Connection, allow_migrate: bool) -> Result<()> {
     if version < 10 {
         crate::photo_relations::migrate(&tx)?;
     }
+    crate::browse_cache::migrate(&tx)?;
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
     Ok(())

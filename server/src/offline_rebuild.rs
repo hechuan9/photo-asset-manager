@@ -264,13 +264,13 @@ impl Manager {
         let mut target = Connection::open(work.path().join("catalog.sqlite"))?;
         target.execute_batch(CLIENT_SCHEMA)?;
         let thumbnails = self.catalog(&frozen, &mut target, status)?;
-        let mut manifest = json!({"formatVersion":1,"libraryID":lib,"revision":revision,"assetCount":total,"thumbnailCount":total,"missingThumbnailCount":total});
+        let mut manifest = json!({"formatVersion":1,"libraryID":lib,"revision":revision,"assetCount":total,"thumbnailCount":total,"missingThumbnailCount":total,"browseThumbnailCount":total,"missingBrowseThumbnailCount":total});
         drop(target);
         drop(frozen);
         let archive_total = fs::metadata(work.path().join("catalog.sqlite"))?.len()
             + thumbnails
                 .iter()
-                .filter_map(|(_, path)| fs::metadata(path).ok().map(|meta| meta.len()))
+                .filter_map(|(_, _, path)| fs::metadata(path).ok().map(|meta| meta.len()))
                 .sum::<u64>();
         self.progress(status, "archive", 0, archive_total as i64)?;
         let archive = fs::File::create(work.path().join("library.tar"))?;
@@ -296,14 +296,21 @@ impl Manager {
             &mut report,
         )?;
         let mut thumbnail_count = 0;
-        for (id, path) in &thumbnails {
-            if append_optional_thumbnail(&mut tar, id, path, &mut report)? {
-                thumbnail_count += 1;
+        let mut browse_count = 0;
+        for (directory, id, path) in &thumbnails {
+            if append_optional_image(&mut tar, directory, id, path, &mut report)? {
+                if *directory == "thumbnails" {
+                    thumbnail_count += 1;
+                } else {
+                    browse_count += 1;
+                }
             }
         }
         let mut archive = tar.into_inner()?;
         manifest["thumbnailCount"] = json!(thumbnail_count);
         manifest["missingThumbnailCount"] = json!(total - thumbnail_count);
+        manifest["browseThumbnailCount"] = json!(browse_count);
+        manifest["missingBrowseThumbnailCount"] = json!(total - browse_count);
         let mut bytes = serde_json::to_vec(&manifest)?;
         ensure!(
             bytes.len() <= manifest_size,
@@ -342,7 +349,7 @@ impl Manager {
         source: &Connection,
         target: &mut Connection,
         status: &mut Status,
-    ) -> Result<Vec<(String, PathBuf)>> {
+    ) -> Result<Vec<(&'static str, String, PathBuf)>> {
         let lib = &self.app.library_id;
         let tx = target.transaction()?;
         let mut paths = BTreeMap::<String, Vec<String>>::new();
@@ -356,17 +363,25 @@ impl Manager {
             paths.entry(id).or_default().push(path);
         }
         let mut thumbnails = Vec::new();
-        let mut statement=source.prepare("SELECT a.id,a.snapshot,c.thumbnail,c.standard FROM catalog_assets a LEFT JOIN catalog_defaults d ON d.library_id=a.library_id AND d.asset_id=a.id LEFT JOIN media_cache c ON c.library_id=a.library_id AND c.asset_id=a.id AND c.status='ready' AND c.source_hash=coalesce(d.content_hash,a.content_hash) AND c.spec=?2 WHERE a.library_id=?1 AND EXISTS(SELECT 1 FROM catalog_paths p WHERE p.library_id=a.library_id AND p.asset_id=a.id) ORDER BY a.id")?;
-        let rows = statement.query_map(params![lib, crate::cache_pipeline::spec()?], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, Option<String>>(3)?,
-            ))
-        })?;
+        let mut statement=source.prepare("SELECT a.id,a.snapshot,c.thumbnail,c.standard,CASE WHEN c.browse_source_version=json_extract(c.thumbnail,'$.version') AND c.browse_spec=?3 AND json_extract(c.browse_thumbnail,'$.sourceThumbnailVersion')=c.browse_source_version AND json_extract(c.browse_thumbnail,'$.spec')=c.browse_spec THEN c.browse_thumbnail END FROM catalog_assets a LEFT JOIN catalog_defaults d ON d.library_id=a.library_id AND d.asset_id=a.id LEFT JOIN media_cache c ON c.library_id=a.library_id AND c.asset_id=a.id AND c.status='ready' AND c.source_hash=coalesce(d.content_hash,a.content_hash) AND c.spec=?2 WHERE a.library_id=?1 AND EXISTS(SELECT 1 FROM catalog_paths p WHERE p.library_id=a.library_id AND p.asset_id=a.id) ORDER BY a.id")?;
+        let rows = statement.query_map(
+            params![
+                lib,
+                crate::cache_pipeline::spec()?,
+                crate::browse_cache::SPEC
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )?;
         for (index, row) in rows.enumerate() {
-            let (id, snapshot, thumbnail, standard) = row?;
+            let (id, snapshot, thumbnail, standard, browse) = row?;
             let mut asset: Value = serde_json::from_str(&snapshot)?;
             let upper = Uuid::parse_str(&id)?.to_string().to_uppercase();
             let asset_paths = paths.remove(&id).unwrap_or_default();
@@ -374,13 +389,25 @@ impl Manager {
             asset["paths"] = json!(asset_paths);
             asset["preview"] = Value::Null;
             asset["thumbnail"] = Value::Null;
+            asset["browseThumbnail"] = Value::Null;
             asset["standard"] = Value::Null;
             if let Some(thumbnail) = thumbnail {
                 let thumbnail: Value = serde_json::from_str(&thumbnail)?;
                 let path = self.app.previews.object_path(&thumbnail["objectRef"])?;
                 asset["thumbnail"] = json!({"downloadURL":self.app.previews.download_url(&thumbnail["objectRef"])?,"width":thumbnail["width"],"height":thumbnail["height"],"version":thumbnail["version"]});
                 if status.include_thumbnails {
-                    thumbnails.push((upper.clone(), path));
+                    thumbnails.push(("thumbnails", upper.clone(), path));
+                }
+            }
+            if let Some(browse) = browse {
+                let browse: Value = serde_json::from_str(&browse)?;
+                asset["browseThumbnail"] = json!({"downloadURL":self.app.previews.download_url(&browse["objectRef"])?,"width":browse["width"],"height":browse["height"],"version":browse["version"]});
+                if status.include_thumbnails {
+                    thumbnails.push((
+                        "browse-thumbnails",
+                        upper.clone(),
+                        self.app.previews.object_path(&browse["objectRef"])?,
+                    ));
                 }
             }
             if let Some(standard) = standard {
@@ -495,8 +522,9 @@ fn append_bytes<W: Write>(tar: &mut tar::Builder<W>, name: &str, bytes: &[u8]) -
     tar.append_data(&mut header, name, bytes)?;
     Ok(())
 }
-fn append_optional_thumbnail<W: Write, F: FnMut(usize) -> std::io::Result<()>>(
+fn append_optional_image<W: Write, F: FnMut(usize) -> std::io::Result<()>>(
     tar: &mut tar::Builder<W>,
+    directory: &str,
     id: &str,
     path: &FsPath,
     report: &mut F,
@@ -510,7 +538,7 @@ fn append_optional_thumbnail<W: Write, F: FnMut(usize) -> std::io::Result<()>>(
             return Ok(false);
         }
     };
-    append_bytes(tar, &format!("thumbnails/{id}.image"), &bytes)?;
+    append_bytes(tar, &format!("{directory}/{id}.image"), &bytes)?;
     report(bytes.len())?;
     Ok(true)
 }
@@ -747,20 +775,23 @@ mod tests {
             reported += count;
             Ok(())
         };
-        assert!(!append_optional_thumbnail(
+        assert!(!append_optional_image(
             &mut tar,
+            "thumbnails",
             "missing",
             &vanished,
             &mut report
         )?);
-        assert!(!append_optional_thumbnail(
+        assert!(!append_optional_image(
             &mut tar,
+            "thumbnails",
             "unreadable",
             &unreadable,
             &mut report
         )?);
-        assert!(append_optional_thumbnail(
+        assert!(append_optional_image(
             &mut tar,
+            "thumbnails",
             "good",
             &good,
             &mut report
@@ -793,7 +824,9 @@ mod tests {
         let good = root.path().join("good.image");
         fs::write(&good, b"available thumbnail")?;
         let mut tar = tar::Builder::new(BrokenWriter);
-        assert!(append_optional_thumbnail(&mut tar, "good", &good, &mut |_| Ok(())).is_err());
+        assert!(
+            append_optional_image(&mut tar, "thumbnails", "good", &good, &mut |_| Ok(())).is_err()
+        );
         Ok(())
     }
 
@@ -830,6 +863,10 @@ mod tests {
             app.previews
                 .put_generated_role("photos", &first, "image-v1", &image, "thumbnail")?;
         let descriptor = json!({"objectRef":object,"width":512,"height":400,"version":"image-v1"});
+        let browse_object =
+            app.previews
+                .put_generated_role("photos", &first, "browse-v1", &image, "browse")?;
+        let browse_descriptor = json!({"objectRef":browse_object,"width":64,"height":50,"version":"browse-v1","sourceThumbnailVersion":"image-v1","spec":crate::browse_cache::SPEC});
         app.store.reconcile_cache()?;
         {
             let db = app.store.lock()?;
@@ -841,6 +878,7 @@ mod tests {
                     first
                 ],
             )?;
+            db.execute("UPDATE media_cache SET browse_thumbnail=?,browse_source_version='image-v1',browse_spec=? WHERE asset_id=?",params![browse_descriptor.to_string(),crate::browse_cache::SPEC,first])?;
             db.execute("UPDATE media_cache SET status='ready',source_hash='obsolete',thumbnail=?,standard=? WHERE asset_id=?",params![descriptor.to_string(),json!({"deferred":true}).to_string(),third])?;
             let missing = app.previews.put_generated_role(
                 "photos",
@@ -858,6 +896,13 @@ mod tests {
                     second
                 ],
             )?;
+        }
+        {
+            let db = app.store.lock()?;
+            // A matching browse spec cannot make an obsolete preview or source current.
+            for id in [&second, &third] {
+                db.execute("UPDATE media_cache SET browse_thumbnail=?,browse_source_version='image-v1',browse_spec=? WHERE asset_id=?",params![browse_descriptor.to_string(),crate::browse_cache::SPEC,id])?;
+            }
         }
         let expected = app.store.library_revision("photos")?["revision"]
             .as_i64()
@@ -881,6 +926,8 @@ mod tests {
         assert_eq!(manifest["assetCount"], 3);
         assert_eq!(manifest["thumbnailCount"], 1);
         assert_eq!(manifest["missingThumbnailCount"], 2);
+        assert_eq!(manifest["browseThumbnailCount"], 1);
+        assert_eq!(manifest["missingBrowseThumbnailCount"], 2);
         if let Ok(output) = std::env::var("KEEPS_OFFLINE_TEST_EXPORT") {
             fs::create_dir_all(&output)?;
             fs::write(FsPath::new(&output).join("fixture.tar"), &bytes)?;
@@ -926,6 +973,11 @@ mod tests {
         assert_eq!(
             entry.path()?.to_string_lossy(),
             format!("thumbnails/{}.image", first.to_uppercase())
+        );
+        let entry = entries.next().unwrap()?;
+        assert_eq!(
+            entry.path()?.to_string_lossy(),
+            format!("browse-thumbnails/{}.image", first.to_uppercase())
         );
         assert!(entries.next().is_none());
         assert_eq!(

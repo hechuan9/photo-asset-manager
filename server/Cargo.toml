@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.88"
 
 [dependencies]
+libc = "0.2"
 http-body-util = "0.1"
 anyhow = "1"
 axum = "0.8"

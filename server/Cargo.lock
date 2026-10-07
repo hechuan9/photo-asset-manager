@@ -610,6 +610,7 @@ dependencies = [
  "chrono",
  "hmac",
  "http-body-util",
+ "libc",
  "notify",
  "rusqlite",
  "serde",

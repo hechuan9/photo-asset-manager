@@ -23,3 +23,9 @@ pub mod tasks;
 pub mod directory_trash;
 
 pub mod offline_rebuild;
+
+pub mod directory_move;
+
+pub mod browse_cache;
+
+pub mod asset_move;

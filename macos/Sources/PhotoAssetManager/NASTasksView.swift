@@ -23,6 +23,10 @@ struct NASTasksView: View {
                             Spacer()
                             Text(Self.statusLabel(taskStatus.automatic.status)).foregroundStyle(.secondary)
                         }
+                        if taskStatus.automatic.status == "running" || taskStatus.automatic.status == "pending" {
+                            ProgressView(taskStatus.automatic.status == "pending" ? "等待更新照片…" : "正在更新照片…")
+                                .progressViewStyle(.linear)
+                        }
                         if let photo = taskStatus.automatic.currentPhoto {
                             Text("当前照片：\(photo)").lineLimit(2).truncationMode(.middle)
                                 .textSelection(.enabled).help(photo)
@@ -44,6 +48,10 @@ struct NASTasksView: View {
                             Spacer()
                             Text(Self.statusLabel(taskStatus.longTask.status)).foregroundStyle(.secondary)
                         }
+                        if taskStatus.longTask.status == "running" || taskStatus.longTask.status == "pending" {
+                            ProgressView(taskStatus.longTask.status == "pending" ? "等待后台任务开始…" : "正在执行后台任务…")
+                                .progressViewStyle(.linear)
+                        }
                         if let kind = taskStatus.longTask.kind {
                             Text(Self.kindLabel(kind))
                         }
@@ -53,7 +61,7 @@ struct NASTasksView: View {
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
                 }
             } else if isBusy {
-                ProgressView("正在读取任务…")
+                ProgressView("正在读取任务…").progressViewStyle(.linear)
             }
             Spacer(minLength: 0)
         }
@@ -115,8 +123,10 @@ struct NASSourceSettingsView: View {
             HStack {
                 Text("来源").font(.title2)
                 Spacer()
-                if isBusy { ProgressView().controlSize(.small) }
                 Button("刷新") { perform { try await refresh() } }.disabled(isBusy)
+            }
+            if isBusy {
+                ProgressView("正在更新 NAS 来源…").progressViewStyle(.linear)
             }
             Text("服务器原片根目录：\(rootPath.isEmpty ? "等待连接" : rootPath)")
                 .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)

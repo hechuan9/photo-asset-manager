@@ -33,7 +33,10 @@ struct DirectoryTrashSheet: View {
             if let pending = library.directoryTrash {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     VStack(alignment: .leading, spacing: 8) {
-                        if !library.directoryTrashFinished { ProgressView().controlSize(.small) }
+                        if !library.directoryTrashFinished {
+                            ProgressView().progressViewStyle(.linear)
+                                .accessibilityLabel(phaseTitle)
+                        }
                         Text(phaseTitle)
                         Text("已用时 \(max(0, Int(context.date.timeIntervalSince(pending.startedAt)))) 秒").foregroundStyle(.secondary)
                         if let message = library.directoryTrashMessage {

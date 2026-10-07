@@ -58,6 +58,12 @@ macOS 使用标准 Settings scene（⌘,）配置 Keeps Server 的服务地址�
 
 macOS 查询、两端修改及 iOS 修订号检查经过 `shared/Sources/KeepsAPI/KeepsClient.swift`；iOS 离线包任务、下载与导入由共享包的 `KeepsOfflineRebuild` 执行。iOS 浏览查询经过 `KeepsLibraryDatabase`，在 Application Support/Keeps/Catalogs 保存本地 SQLite，服务器、图库及凭据摘要决定文件身份。客户端不生成、上传或回放 ledger，不进行本地照片文件扫描、不解析 EXIF，也不从本地原片生成预览。macOS 仅在用户显式导入时递归枚举所选文件夹、计算传输校验哈希并上传文件。
 
+长任务必须显示进度条：有可靠总量时显示真实完成量，无总量时使用线性不定进度并显示当前阶段。移动同时显示用时；导入保留文件及字节进度，后台更新、扫描和目录回收不虚构百分比。
+
+macOS 来源目录树支持在应用内把单个文件夹拖到目标文件夹中。客户端通过 `POST /libraries/{library}/directories/move-tasks` 提交 `path`、`parentPath` 与 `requestID`，由 NAS 持久任务完成移动及索引路径更新；通过 `GET /libraries/{library}/directories/move-tasks/{requestID}` 查询等待、校验、移动、索引和追踪阶段。macOS 保存任务 ID，断线或重启后继续查询同一任务，成功后重载目录并跟随新的选中路径。右键菜单支持重命名文件夹：同一任务接口追加 `name` 并保持原 `parentPath`，沿用进度、断线恢复和索引同步；名称必须是非空单个路径分量，来源根目录禁止重命名。已有同步 `/directories/move` 接口保留供已发布客户端使用。来源根目录不可拖动，不能移入自身、后代或原父目录；NAS 使用不覆盖目标的同文件系统 rename，拒绝同名覆盖和跨文件系统移动；持久移动记录用于服务重启时恢复索引同步。Finder 不参与此操作，日常照片目录整理优先在应用内进行。
+
+macOS 图库支持 Command/Ctrl+A 全选当前筛选结果（自动补齐分页）、Command 点选、Shift 连选、Shift 配合键盘左右方向键扩选与 Esc 取消选择；目录树保留 AppKit 的多选语义，Ctrl+A 选择已展开的可见目录。全选尚在加载时禁止移动或批量修改，切换查询会取消全选。照片可从当前目录拖入目录树的目标文件夹，经 `POST /libraries/{library}/assets/move-tasks` 提交 `requestID`、`assetIDs`、`sourcePath`、`parentPath`，通过同路径 `/{requestID}` 查询持久任务。NAS 只移动来源目录范围内所选照片的有效文件、关联版本和 sidecar，其它目录的副本保留；批量移动先检查所有重名和跨文件系统冲突，逐文件使用不覆盖 rename 与恢复日志，同步照片索引及追踪归属。客户端持久保存任务并在重启后恢复查询，展示阶段、用时与完整失败信息。
+
 客户端不存在“NAS / 本地”双资料库模式。默认浏览统一资料库；服务器来源目录属于按需展开的辅助视图和服务端管理配置。主图库查询不依赖目录导航成功。客户端无需 SMB 挂载，不能把服务器路径作为本机文件 URL 打开；预览和业务交互均走 HTTP。
 
 用户选择的本地照片文件仅作为显式上传来源，客户端不监听或扫描原片资料库。iOS 本地 SQLite 是 NAS 的只读浏览副本，不是独立业务真源。业务请求使用 HTTP JSON，离线快照包和图片通过 HTTP 下载；当前共用手写 KeepsAPI，尚未引入 OpenAPI 客户端生成器。
@@ -95,13 +101,15 @@ schema 8 增加 `remote_cache_tasks`，保存 Linux worker 的领取凭证、输
 
 schema 9 增加照片根身份映射。优先读取内嵌 XMP `xmpMM:OriginalDocumentID`，其次同目录 XMP；合法非空 UUID 直接信任，不要求内容哈希证明。缺少时沿用已有资产 UUID，新资产生成 UUID，并补写 metadata。ExifTool 支持写入的格式直接内嵌；3FR 等不支持格式写入 `原文件名.扩展名.xmp`，不改变 RAW 数据。同根 ID 的不同内容保留为版本/位置，移动后更新路径并保留资产 ID。生成标准图在 NAS 发布前继承根 ID。数据库仍是评分、标签、路径及任务的真源。
 
-schema 10 增加 `catalog_deprecated_files` 和照片关联索引，迁移时在已有目录内重新核对照片关系；仅更新数据库关联和冗余文件说明，不删除或移动磁盘原片。版本 API 返回保留路径及判定依据。当前服务支持 schema 10；版本更旧的服务拒绝打开该数据库，部署前必须核对 schema 并备份双库。
+schema 10 增加 `catalog_deprecated_files` 和照片关联索引，迁移时在已有目录内重新核对照片关系；仅更新数据库关联和冗余文件说明，不删除或移动磁盘原片。版本 API 返回保留路径及判定依据。当前服务支持 schema 11；版本更旧的服务拒绝打开该数据库，部署前必须核对 schema 并备份双库。
+
+schema 11 增加独立浏览图描述、来源缩略图版本与有限重试状态，不使现有 512px 缓存失效。NAS worker 优先处理手动作业、单文件自动变更及缺失普通预览，然后连续补齐浏览图，再执行目录扫描、补漏与常规维护；每张图之间重新检查高优先级任务，最多重试四次；来源变化重新排队，API 和离线包只发布匹配当前来源的版本。部署前停服备份并显式 migrate。
 
 历史文件身份回填属于低优先级维护，每次最多一组照片，维护检查间隔至少 60 秒；自动更新与手动作业优先，正在远端处理的资产跳过。仅 metadata 写入造成的字节哈希变化在现有数据库事务中更新文件、版本、默认图、已完成远端任务及缓存描述，保留缩略图。`cache-status.identityBackfill` 提供 pending/ready/failed/missing 和错误；missing 代表历史路径已不存在，不删除任何照片。合法 ID 已存在时不重写。
 
 临时 worker 在数据库事务中从现有状态索引直接领取一个到期 pending 项（LIMIT 1），不做全库优先排序，也不另设内存任务队列。缺标准的 RAW 仍在同一个任务中先生成完整标准图再生成小图，尚未拆为两个独立阶段。默认 4 并发、8 CPU、12GiB RAM、32GiB 临时预算。日常默认 NAS 本地编码开启（KEEPS_LOCAL_CACHE_ENCODING_ENABLED=1），远端派发关闭（KEEPS_REMOTE_WORKER_ENABLED 未设或为 0）。Linux 只在用户明确安排的一次性大规模处理时启用；服务器开关设为 1 后才能领取任务，Compose 需要显式 bulk profile，且不自动重启。批量处理结束恢复远端开关为 0 并停止 worker。部署见 [Linux worker](../deploy/linux-worker/README.md)。
 
-`KEEPS_CACHE_GC_ENABLED=1` 时，新图验证后在同一事务切换旧 preview 引用并将旧对象放入持久 `media_cache_gc`。等待 20 分钟，每轮最多回收 20 个无当前引用对象，删除前再次核对 derivative_objects 与 media_cache。仅允许专用缓存根内的新 preview/thumbnail 路径及已确认的历史 `64位hex-1200.heic` 格式；原片和标准照片不进入回收队列。尚有引用或生成失败时保留旧文件。状态由 `GET /libraries/{libraryID}/cache-status` 提供；retry/rebuild 每次选择最多 20 张照片，建立独立的一次性手动作业；实际重建在该照片获得执行机会后开始，不抢占当前照片。
+`KEEPS_CACHE_GC_ENABLED=1` 时，新图验证后在同一事务切换旧 preview 引用并将旧对象放入持久 `media_cache_gc`。等待 20 分钟，每轮最多回收 20 个无当前引用对象，删除前再次核对 derivative_objects 与 media_cache。仅允许专用缓存根内的新 preview/thumbnail/browse 路径及已确认的历史 `64位hex-1200.heic` 格式；原片和标准照片不进入回收队列。尚有引用或生成失败时保留旧文件。状态由 `GET /libraries/{libraryID}/cache-status` 提供；retry/rebuild 每次选择最多 20 张照片，建立独立的一次性手动作业；实际重建在该照片获得执行机会后开始，不抢占当前照片。
 
 交互 API 使用独立的长期 URLSession，与共享会话中的图片下载分离，避免目录请求和预览争用同一会话的连接调度。目录展开只返回当前层；服务端为每个目录探测是否存在可见直接子目录，遇到第一个即停止，`hasChildren` 返回真实布尔值，叶子目录不显示展开箭头。
 

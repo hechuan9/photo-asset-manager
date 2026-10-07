@@ -42,9 +42,13 @@ struct ImportView: View {
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             Text(store.message).textSelection(.enabled)
-            if store.isBusy && store.fileCount == 0 { ProgressView().controlSize(.small) }
+            if store.isBusy {
+                ProgressView().progressViewStyle(.linear)
+                    .accessibilityLabel(store.message)
+            }
             if store.fileCount > 0 {
-                ProgressView(value: Double(store.sentBytes), total: Double(max(1, store.totalBytes)))
+                ProgressView("上传数据", value: Double(store.sentBytes), total: Double(max(1, store.totalBytes)))
+                    .progressViewStyle(.linear)
                 Text("\(store.completedFiles) / \(store.fileCount) 个文件 · \(ByteCountFormatter.string(fromByteCount: store.sentBytes, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: store.totalBytes, countStyle: .file))")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -95,7 +99,6 @@ struct ImportView: View {
             HStack {
                 Text("NAS 目标文件夹").font(.headline)
                 Spacer()
-                if loadingDirectories || creatingDirectory { ProgressView().controlSize(.small) }
                 Button("新建文件夹…") {
                     newFolderName = ""
                     creationError = nil
@@ -105,6 +108,10 @@ struct ImportView: View {
                     let previous = history.isEmpty ? nil : history.removeLast()
                     Task { await loadDirectory(previous, remember: false) }
                 }.disabled(targetPath == nil || (history.isEmpty && targetPath == rootPath))
+            }
+            if loadingDirectories || creatingDirectory {
+                ProgressView(creatingDirectory ? "正在创建 NAS 文件夹…" : "正在读取 NAS 目录…")
+                    .progressViewStyle(.linear)
             }
             Text(targetPath ?? "请选择服务器目录")
                 .font(.caption).textSelection(.enabled)

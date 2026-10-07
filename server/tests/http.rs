@@ -1980,3 +1980,339 @@ async fn directory_trash_returns_durable_task_and_status_without_running_native_
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(source.exists());
 }
+
+#[tokio::test]
+async fn directory_rename_accepts_name_and_rejects_reused_request_for_another_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    state
+        .jobs
+        .add_folder("photos", state.jobs.root().to_str().unwrap())
+        .unwrap();
+    let source = state.jobs.root().join("old");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("photo.raw"), b"original").unwrap();
+    let app = router(state.clone());
+    let id = uuid::Uuid::new_v4().to_string();
+    let body = json!({"path":source,"parentPath":state.jobs.root(),"name":"new","requestID":id});
+    let (status, task) = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/directories/move-tasks",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(
+        task["destination"],
+        state.jobs.root().join("new").to_str().unwrap()
+    );
+    let mut different = body.clone();
+    different["name"] = json!("different");
+    assert_eq!(
+        call(
+            app.clone(),
+            "POST",
+            "/libraries/photos/directories/move-tasks",
+            different
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let (status, moved) = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/directories/move",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(moved["path"], task["destination"]);
+    assert_eq!(
+        call(app, "POST", "/libraries/photos/directories/move", body).await,
+        (StatusCode::OK, moved)
+    );
+    assert_eq!(
+        std::fs::read(state.jobs.root().join("new/photo.raw")).unwrap(),
+        b"original"
+    );
+    assert!(!source.exists());
+}
+
+#[tokio::test]
+async fn directory_move_tasks_return_durable_progress_and_keep_sync_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    state
+        .jobs
+        .add_folder("photos", state.jobs.root().to_str().unwrap())
+        .unwrap();
+    let source = state.jobs.root().join("queued");
+    let parent = state.jobs.root().join("target");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&parent).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let app = router(state.clone());
+    let body = json!({"path":source,"parentPath":parent,"requestID":id});
+    let (status, task) = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/directories/move-tasks",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(task["status"], "pending");
+    assert_eq!(task["phase"], "waiting");
+    assert_eq!(task["destination"], parent.join("queued").to_str().unwrap());
+    assert!(source.exists());
+    assert_eq!(
+        call(
+            app.clone(),
+            "GET",
+            &format!("/libraries/photos/directories/move-tasks/{id}"),
+            Value::Null
+        )
+        .await,
+        (StatusCode::OK, task.clone())
+    );
+    assert_eq!(
+        call(
+            app.clone(),
+            "POST",
+            "/libraries/photos/directories/move-tasks",
+            body
+        )
+        .await,
+        (StatusCode::ACCEPTED, task)
+    );
+    let sync = state.jobs.root().join("legacy");
+    std::fs::create_dir(&sync).unwrap();
+    let (status, result) = call(
+        app,
+        "POST",
+        "/libraries/photos/directories/move",
+        json!({"path":sync,"parentPath":parent,"requestID":uuid::Uuid::new_v4().to_string()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["previousPath"], sync.to_str().unwrap());
+    assert_eq!(result["path"], parent.join("legacy").to_str().unwrap());
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = std::thread::spawn({
+        let jobs = state.jobs.clone();
+        let store = state.store.clone();
+        let stop = stop.clone();
+        move || keeps_server::directory_move::run(jobs, store, stop)
+    });
+    let app = router(state);
+    let mut completed = false;
+    for _ in 0..100 {
+        let (status, task) = call(
+            app.clone(),
+            "GET",
+            &format!("/libraries/photos/directories/move-tasks/{id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        if task["status"] == "completed" {
+            completed = true;
+            break;
+        }
+        if task["status"] == "failed" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    worker.join().unwrap().unwrap();
+    assert!(
+        completed,
+        "background worker must finish without another submission"
+    );
+    assert!(parent.join("queued").exists());
+    assert!(!source.exists());
+}
+
+#[tokio::test]
+async fn browse_thumbnail_signed_download_and_stale_source_exclusion() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let id = seed(&state, dir.path(), "browse.jpg");
+    state.store.reconcile_cache().unwrap();
+    let generated = dir.path().join("browse.heic");
+    let bytes = b"browse-object-transport-fixture";
+    std::fs::write(&generated, bytes).unwrap();
+    let object = state
+        .previews
+        .put_generated_role("photos", &id, "browse-hash", &generated, "browse")
+        .unwrap();
+    let source = dir.path().join("originals/browse.jpg");
+    let standard = json!({"path":source,"width":4000,"height":3000,"version":"browse.jpg","sizeBytes":14,"mtimeNs":keeps_server::cache_pipeline::file_mtime(&source).unwrap()});
+    let db = rusqlite::Connection::open(dir.path().join("keeps/db/control_plane.sqlite")).unwrap();
+    let thumb = json!({"objectRef":object,"width":512,"height":384,"version":"preview-v1"});
+    let version = format!("{}:browse-hash", keeps_server::browse_cache::SPEC);
+    let browse = json!({"objectRef":object,"width":64,"height":48,"version":version,"spec":keeps_server::browse_cache::SPEC,"sourceThumbnailVersion":"preview-v1"});
+    db.execute(
+        "UPDATE media_cache SET status='ready',thumbnail=?,standard=?,browse_thumbnail=?",
+        rusqlite::params![thumb.to_string(), standard.to_string(), browse.to_string()],
+    )
+    .unwrap();
+    let app = router(state);
+    let asset_path = format!("/libraries/photos/assets/{id}");
+    let metadata_path = format!("/derivatives/{id}?role=browse&libraryID=photos");
+    let unauthenticated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&metadata_path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+    let (status, asset) = call(app.clone(), "GET", &asset_path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{asset}");
+    assert_eq!(asset["browseThumbnail"]["width"], 64);
+    assert_eq!(asset["browseThumbnail"]["version"], version);
+    let (status, metadata) = call(app.clone(), "GET", &metadata_path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{metadata}");
+    for key in ["width", "height", "version"] {
+        assert_eq!(metadata[key], asset["browseThumbnail"][key]);
+    }
+    let url = url::Url::parse(metadata["downloadURL"].as_str().unwrap()).unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(url.path())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/octet-stream"
+    );
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        bytes
+    );
+    assert_ne!(
+        call(
+            app.clone(),
+            "GET",
+            &format!("{}tampered", url.path()),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    db.execute(
+        "UPDATE media_cache SET thumbnail=json_set(thumbnail,'$.version','preview-v2')",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        call(app.clone(), "GET", &metadata_path, Value::Null)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert!(
+        call(app.clone(), "GET", &asset_path, Value::Null).await.1["browseThumbnail"].is_null()
+    );
+    db.execute(
+        "UPDATE media_cache SET thumbnail=json_set(thumbnail,'$.version','preview-v1')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE catalog_defaults SET content_hash='changed-original'",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE catalog_assets SET content_hash='changed-original'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        call(app.clone(), "GET", &metadata_path, Value::Null)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert!(call(app, "GET", &asset_path, Value::Null).await.1["browseThumbnail"].is_null());
+}
+
+#[tokio::test]
+async fn photo_move_tasks_are_durable_scoped_and_idempotent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = state(tmp.path());
+    let app = router(state.clone());
+    let root = state.jobs.root().to_str().unwrap();
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let body = json!({"requestID":request_id,"assetIDs":[uuid::Uuid::new_v4().to_string()],"sourcePath":format!("{root}/source"),"parentPath":format!("{root}/target")});
+    let path = "/libraries/photos/assets/move-tasks";
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+    let (status, task) = call(app.clone(), "POST", path, body.clone()).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(task["id"], request_id);
+    assert_eq!(task["status"], "pending");
+    assert_eq!(task["assetIDs"], body["assetIDs"]);
+    let (status, repeated) = call(app.clone(), "POST", path, body.clone()).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(repeated, task);
+    let (status, read) = call(
+        app.clone(),
+        "GET",
+        &format!("{path}/{request_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read, task);
+    let mut conflict = body;
+    conflict["parentPath"] = json!(format!("{root}/different"));
+    assert_eq!(
+        call(app.clone(), "POST", path, conflict).await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        call(
+            app,
+            "GET",
+            &format!("/libraries/other/assets/move-tasks/{request_id}"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}

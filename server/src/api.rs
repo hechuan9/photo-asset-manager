@@ -112,6 +112,26 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(directories).post(create_directory),
         )
         .route(
+            "/libraries/{library}/assets/move-tasks",
+            post(submit_asset_move),
+        )
+        .route(
+            "/libraries/{library}/assets/move-tasks/{request_id}",
+            get(asset_move_status),
+        )
+        .route(
+            "/libraries/{library}/directories/move-tasks",
+            post(submit_directory_move),
+        )
+        .route(
+            "/libraries/{library}/directories/move-tasks/{request_id}",
+            get(directory_move_status),
+        )
+        .route(
+            "/libraries/{library}/directories/move",
+            post(move_directory),
+        )
+        .route(
             "/libraries/{library}/directories/trash",
             post(trash_directory),
         )
@@ -214,6 +234,14 @@ fn signed_asset(state: &AppState, mut asset: Value) -> anyhow::Result<Value> {
     {
         asset["thumbnail"] = json!({"downloadURL":state.previews.download_url(&thumbnail["objectRef"])?,"width":thumbnail["width"],"height":thumbnail["height"],"version":thumbnail["version"]});
         asset["standard"] = standard_descriptor(state, &state.library_id, &id, &standard)?;
+    }
+    if let Some(id) = asset["id"].as_str().map(str::to_owned) {
+        asset["browseThumbnail"] = match state.store.browse_descriptor(&state.library_id, &id)? {
+            Some(d) => {
+                json!({"downloadURL":state.previews.download_url(&d["objectRef"])?,"width":d["width"],"height":d["height"],"version":d["version"]})
+            }
+            None => Value::Null,
+        };
     }
     Ok(asset)
 }
@@ -347,6 +375,7 @@ async fn create_directory(
 ) -> ApiResult {
     let result = blocking(move || {
         let _directory_guard = state.jobs.directory_mutation.read().unwrap();
+        crate::directory_move::ensure_reconciled(&state.jobs)?;
         let name = &body.name;
         if name.trim().is_empty()
             || name.starts_with('.')
@@ -497,6 +526,7 @@ async fn add_folder(
         Json(
             blocking(move || {
                 let _directory_guard = state.jobs.directory_mutation.read().unwrap();
+                crate::directory_move::ensure_reconciled(&state.jobs)?;
                 state
                     .jobs
                     .validate_path(std::path::Path::new(&body.path))
@@ -586,7 +616,7 @@ fn validate_derivative(asset: &str, role: &str) -> Result<String, ApiError> {
             "invalid asset UUID".into(),
         )
     })?;
-    if !["preview", "thumbnail", "standard"].contains(&role) {
+    if !["preview", "thumbnail", "browse", "standard"].contains(&role) {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_request".into(),
@@ -605,6 +635,13 @@ async fn derivative_metadata(
     }
     let asset = validate_derivative(&asset, &query.role)?;
     let result = blocking(move || {
+        if query.role == "browse" {
+            let library=query.library.as_deref().unwrap_or(&state.library_id);
+            return match state.store.browse_descriptor(library,&asset)? {
+                Some(d) => Ok(json!({"downloadURL":state.previews.download_url(&d["objectRef"])?,"width":d["width"],"height":d["height"],"version":d["version"]})),
+                None => Ok(Value::Null),
+            };
+        }
         if query.role != "preview" {
             let library=query.library.as_deref().unwrap_or(&state.library_id);
             if let Some((thumbnail,standard))=state.store.cache_descriptors(library,&asset)? {
@@ -896,6 +933,85 @@ async fn task_status(State(state): State<Arc<AppState>>, Path(library): Path<Str
     require_library(&state, &library)?;
     Ok(
         Json(blocking(move || crate::tasks::status(&state.store, &state.jobs, &library)).await?)
+            .into_response(),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveDirectoryRequest {
+    name: Option<String>,
+    path: String,
+    parent_path: String,
+    #[serde(rename = "requestID")]
+    request_id: String,
+}
+async fn move_directory(
+    State(state): State<Arc<AppState>>,
+    Path(library): Path<String>,
+    Json(body): Json<MoveDirectoryRequest>,
+) -> ApiResult {
+    Ok(Json(
+        blocking(move || {
+            crate::directory_move::move_directory(
+                &state.jobs,
+                &state.store,
+                &library,
+                &body.path,
+                &body.parent_path,
+                &body.request_id,
+                body.name.as_deref(),
+            )
+        })
+        .await?,
+    )
+    .into_response())
+}
+
+async fn submit_directory_move(
+    State(state): State<Arc<AppState>>,
+    Path(library): Path<String>,
+    Json(body): Json<MoveDirectoryRequest>,
+) -> ApiResult {
+    let result = blocking(move || {
+        crate::directory_move::submit(
+            &state.jobs,
+            &library,
+            &body.path,
+            &body.parent_path,
+            &body.request_id,
+            body.name.as_deref(),
+        )
+    })
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(result)).into_response())
+}
+async fn directory_move_status(
+    State(state): State<Arc<AppState>>,
+    Path((library, id)): Path<(String, String)>,
+) -> ApiResult {
+    Ok(
+        Json(blocking(move || crate::directory_move::get(&state.jobs, &library, &id)).await?)
+            .into_response(),
+    )
+}
+
+async fn submit_asset_move(
+    State(state): State<Arc<AppState>>,
+    Path(library): Path<String>,
+    Json(body): Json<crate::asset_move::Request>,
+) -> ApiResult {
+    require_library(&state, &library)?;
+    let result = blocking(move || crate::asset_move::submit(&state.jobs, &library, body)).await?;
+    Ok((StatusCode::ACCEPTED, Json(result)).into_response())
+}
+async fn asset_move_status(
+    State(state): State<Arc<AppState>>,
+    Path((library, id)): Path<(String, String)>,
+) -> ApiResult {
+    require_library(&state, &library)?;
+    Ok(
+        Json(blocking(move || crate::asset_move::get(&state.jobs, &library, &id)).await?)
             .into_response(),
     )
 }

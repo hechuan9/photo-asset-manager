@@ -40,7 +40,7 @@ pub fn run(
             run_claimed(&store, &jobs, &previews, &job, &stop)?;
             prefer_manual = false;
             worked = true;
-        } else if let Some(job) = jobs.claim_class("automatic")? {
+        } else if let Some(job) = jobs.claim_automatic_file()? {
             run_claimed(&store, &jobs, &previews, &job, &stop)?;
             prefer_manual = true;
             worked = true;
@@ -50,6 +50,16 @@ pub fn run(
         } else if let Some(job) = jobs.claim_class("manual")? {
             run_claimed(&store, &jobs, &previews, &job, &stop)?;
             prefer_manual = false;
+            worked = true;
+        }
+        if !worked && !stop.load(Ordering::Relaxed) {
+            worked = crate::browse_cache::process_next(&store, &previews)?;
+        }
+        if !worked
+            && !stop.load(Ordering::Relaxed)
+            && let Some(job) = jobs.claim_class("automatic")?
+        {
+            run_claimed(&store, &jobs, &previews, &job, &stop)?;
             worked = true;
         }
         if !worked && !stop.load(Ordering::Relaxed) {
@@ -140,6 +150,9 @@ fn run_slice(
     limit: usize,
 ) -> Result<bool> {
     let _directory_guard = jobs.directory_mutation.read().unwrap();
+    crate::directory_move::ensure_reconciled(jobs)?;
+    let current = jobs.job(&job.id)?.context("claimed job disappeared")?;
+    let job = &current;
     if stopped(jobs, job, stop)? {
         return Ok(false);
     }
@@ -644,6 +657,7 @@ pub fn process_identity_batch(
     stop: &AtomicBool,
 ) -> Result<()> {
     let _directory_guard = jobs.directory_mutation.read().unwrap();
+    crate::directory_move::ensure_reconciled(jobs)?;
     for (folder, text) in jobs.pending_identities(1)? {
         if stop.load(Ordering::Relaxed)
             || jobs.has_due_class("automatic")?

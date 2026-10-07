@@ -55,6 +55,7 @@ async fn main() -> Result<()> {
     };
     let store = Arc::new(Store::open(&database, auto_create)?);
     let jobs = Arc::new(Jobs::open(&root.join("db/jobs.sqlite"), &original)?);
+    keeps_server::directory_move::recover(&jobs, &store)?;
     keeps_server::worker::maintain_revisions(&store, &jobs)?;
     let original_root_names = keeps_server::navigation::parse_root_names(
         jobs.root(),
@@ -93,6 +94,10 @@ async fn main() -> Result<()> {
         let (store, jobs, stop) = (store.clone(), jobs.clone(), stop.clone());
         move || keeps_server::directory_trash::run(jobs, store, stop)
     });
+    let mut directory_move = tokio::task::spawn_blocking({
+        let (store, jobs, stop) = (store.clone(), jobs.clone(), stop.clone());
+        move || keeps_server::directory_move::run(jobs, store, stop)
+    });
     tracing::info!(%address, "Keeps Rust server started");
     let http = axum::serve(
         listener,
@@ -113,10 +118,11 @@ async fn main() -> Result<()> {
         }
     });
     tokio::select! {
-        result=http=>{stop.store(true,Ordering::Relaxed);result?;worker.await??;watcher.await??;directory_trash.await??;}
-        result=&mut watcher=>{let stopping=stop.swap(true,Ordering::Relaxed);result??;worker.await??;directory_trash.await??;if !stopping {bail!("NAS watcher exited unexpectedly");}}
-        result=&mut worker=>{let stopping=stop.swap(true,Ordering::Relaxed);result??;watcher.await??;directory_trash.await??;if !stopping {bail!("NAS worker exited unexpectedly");}}
-        result=&mut directory_trash=>{let stopping=stop.swap(true,Ordering::Relaxed);result??;worker.await??;watcher.await??;if !stopping {bail!("Directory recycling worker exited unexpectedly");}}
+        result=http=>{stop.store(true,Ordering::Relaxed);result?;worker.await??;watcher.await??;directory_trash.await??;directory_move.await??;}
+        result=&mut watcher=>{let stopping=stop.swap(true,Ordering::Relaxed);result??;worker.await??;directory_trash.await??;directory_move.await??;if !stopping {bail!("NAS watcher exited unexpectedly");}}
+        result=&mut worker=>{let stopping=stop.swap(true,Ordering::Relaxed);result??;watcher.await??;directory_trash.await??;directory_move.await??;if !stopping {bail!("NAS worker exited unexpectedly");}}
+        result=&mut directory_trash=>{let stopping=stop.swap(true,Ordering::Relaxed);result??;worker.await??;watcher.await??;directory_move.await??;if !stopping {bail!("Directory recycling worker exited unexpectedly");}}
+        result=&mut directory_move=>{let stopping=stop.swap(true,Ordering::Relaxed);result??;worker.await??;watcher.await??;directory_trash.await??;if !stopping {bail!("Directory move worker exited unexpectedly");}}
     }
     Ok(())
 }

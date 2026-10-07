@@ -117,6 +117,7 @@ CREATE INDEX IF NOT EXISTS media_cache_claim ON media_cache(status,available_at,
 CREATE INDEX IF NOT EXISTS media_cache_audit ON media_cache(status,audited_at);
 CREATE TABLE IF NOT EXISTS cache_runtime(id INTEGER PRIMARY KEY CHECK(id=1),next_batch_at INTEGER NOT NULL DEFAULT 0,last_batch_count INTEGER NOT NULL DEFAULT 0,last_batch_at INTEGER,last_error TEXT,free_bytes INTEGER);
 INSERT OR IGNORE INTO cache_runtime(id) VALUES(1);")?;
+    crate::browse_cache::migrate(db)?;
     crate::remote_worker::migrate(db)?;
     crate::cache_gc::migrate(db)?;
     Ok(())
@@ -195,13 +196,14 @@ impl Store {
         )?;
         let runtime=db.query_row("SELECT next_batch_at,last_batch_count,last_batch_at,last_error,free_bytes FROM cache_runtime WHERE id=1",[],|r| Ok(json!({"nextBatchAt":r.get::<_,i64>(0)?,"lastBatchCount":r.get::<_,i64>(1)?,"lastBatchAt":r.get::<_,Option<i64>>(2)?,"lastError":r.get::<_,Option<String>>(3)?,"freeBytes":r.get::<_,Option<i64>>(4)?})))?;
         Ok(
-            json!({"enabled":true,"localEncodingEnabled":local_encoding_enabled()?,"gc":crate::cache_gc::status(&db,library)?,"runtime":runtime,"totalAssets":inventory,"eligibleAssets":eligible,"pendingInventory":inventory-eligible,"counts":counts,"spec":spec()?,"batchLimit":1,"concurrency":1,"encoderThreads":1,"restSeconds":0,"maxAttempts":MAX_ATTEMPTS,"lastSuccessAt":last,"errors":errors}),
+            json!({"enabled":true,"localEncodingEnabled":local_encoding_enabled()?,"browse":crate::browse_cache::status(&db,library)?,"gc":crate::cache_gc::status(&db,library)?,"runtime":runtime,"totalAssets":inventory,"eligibleAssets":eligible,"pendingInventory":inventory-eligible,"counts":counts,"spec":spec()?,"batchLimit":1,"concurrency":1,"encoderThreads":1,"restSeconds":0,"maxAttempts":MAX_ATTEMPTS,"lastSuccessAt":last,"errors":errors}),
         )
     }
     pub fn rebuild_cache(&self, library: &str) -> Result<usize> {
         Ok(self.lock()?.execute("UPDATE media_cache SET status='pending',attempts=0,available_at=0,last_error=NULL WHERE rowid IN (SELECT rowid FROM media_cache WHERE library_id=? AND status='ready' ORDER BY updated_at LIMIT 20)",[library])?)
     }
     pub fn retry_cache(&self, library: &str) -> Result<usize> {
+        self.lock()?.execute("UPDATE media_cache SET browse_attempts=0,browse_available_at=0,browse_last_error=NULL WHERE library_id=? AND browse_last_error IS NOT NULL",[library])?;
         Ok(self.lock()?.execute("UPDATE media_cache SET status='pending',attempts=0,available_at=0,last_error=NULL,updated_at=0 WHERE rowid IN (SELECT rowid FROM media_cache WHERE library_id=? AND status IN ('pending','failed') AND last_error IS NOT NULL ORDER BY updated_at LIMIT 20)",[library])?)
     }
     pub fn cache_descriptors(&self, library: &str, asset: &str) -> Result<Option<(Value, Value)>> {
@@ -322,6 +324,11 @@ impl Store {
         for (lib, id, thumb, standard) in rows {
             let thumb: Value = serde_json::from_str(&thumb)?;
             let standard: Value = serde_json::from_str(&standard)?;
+            if let Some(browse) = self.browse_descriptor(&lib, &id)?
+                && !previews.contains(&browse["objectRef"])?
+            {
+                self.lock()?.execute("UPDATE media_cache SET browse_thumbnail=NULL,browse_attempts=0,browse_available_at=0 WHERE library_id=? AND asset_id=?",params![lib,id])?;
+            }
             if !previews.contains(&thumb["objectRef"])? || !standard_current(&standard)? {
                 self.lock()?.execute("UPDATE media_cache SET status='pending',attempts=0,available_at=0 WHERE library_id=? AND asset_id=?",params![lib,id])?;
             } else {
@@ -371,6 +378,8 @@ pub fn process_next(
     _previews: &PreviewStorage,
     stop: &AtomicBool,
 ) -> Result<bool> {
+    let _guard = jobs.directory_mutation.read().unwrap();
+    crate::directory_move::ensure_reconciled(jobs)?;
     if stop.load(Ordering::Relaxed) || !local_encoding_enabled()? {
         return Ok(false);
     }

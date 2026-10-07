@@ -446,6 +446,7 @@ async fn complete(
 }
 fn complete_sync(s: &AppState, lib: &str, id: &str) -> Result<Value> {
     let _directory_guard = s.jobs.directory_mutation.read().unwrap();
+    crate::directory_move::ensure_reconciled(&s.jobs)?;
     let _guard = COMMIT
         .lock()
         .map_err(|_| anyhow::anyhow!("worker commit poisoned"))?;

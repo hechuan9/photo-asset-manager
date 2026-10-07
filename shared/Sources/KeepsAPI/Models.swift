@@ -196,7 +196,7 @@ public struct KeepsLongTaskStatus: Decodable, Equatable, Sendable {
     public var error: String?
 }
 
-public struct KeepsAssetQuery: Hashable, Sendable {
+public struct KeepsAssetQuery: Codable, Hashable, Sendable {
     public var q = ""
     public var minRating = 0
     public var flagState: String?
@@ -276,4 +276,24 @@ public struct KeepsAssetVersion: Decodable, Identifiable, Sendable {
         public var path: String
         public var available: Bool
     }
+}
+
+public struct KeepsDirectoryMoveTask: Decodable, Sendable {
+    public var id: UUID
+    public var path: String
+    public var parentPath: String
+    public var destination: String
+    public var status: String
+    public var phase: String
+    public var error: String?
+}
+
+public struct KeepsPhotoMoveTask: Decodable, Sendable {
+    public var id: UUID
+    public var assetIDs: [UUID]
+    public var sourcePath: String
+    public var parentPath: String
+    public var status: String
+    public var phase: String
+    public var error: String?
 }

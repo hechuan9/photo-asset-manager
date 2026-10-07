@@ -78,6 +78,27 @@ public final class KeepsClient: Sendable {
         let response: CreatedDirectory = try await request("POST", library + ["directories"], body: JSONEncoder().encode(["parentPath": parentPath, "name": name]))
         return response.path
     }
+    public func startPhotoMove(assetIDs: [UUID], sourcePath: String, parentPath: String, requestID: UUID) async throws -> KeepsPhotoMoveTask {
+        struct Move: Encodable { let requestID: String; let assetIDs: [String]; let sourcePath: String; let parentPath: String }
+        let body = Move(requestID: requestID.uuidString.lowercased(), assetIDs: assetIDs.map { $0.uuidString.lowercased() }, sourcePath: sourcePath, parentPath: parentPath)
+        return try await request("POST", library + ["assets", "move-tasks"], body: JSONEncoder().encode(body))
+    }
+    public func photoMoveTask(id: UUID) async throws -> KeepsPhotoMoveTask {
+        try await request("GET", library + ["assets", "move-tasks", id.uuidString.lowercased()])
+    }
+    public func startDirectoryMove(path: String, parentPath: String, requestID: UUID, name: String? = nil) async throws -> KeepsDirectoryMoveTask {
+        var body = ["path": path, "parentPath": parentPath, "requestID": requestID.uuidString.lowercased()]
+        body["name"] = name
+        return try await request("POST", library + ["directories", "move-tasks"], body: JSONEncoder().encode(body))
+    }
+    public func directoryMoveTask(id: UUID) async throws -> KeepsDirectoryMoveTask {
+        try await request("GET", library + ["directories", "move-tasks", id.uuidString.lowercased()])
+    }
+    public func moveDirectory(path: String, parentPath: String, requestID: UUID = UUID()) async throws -> String {
+        struct MovedDirectory: Decodable { var path: String }
+        let response: MovedDirectory = try await request("POST", library + ["directories", "move"], body: JSONEncoder().encode(["path": path, "parentPath": parentPath, "requestID": requestID.uuidString.lowercased()]))
+        return response.path
+    }
     public func trashDirectory(path: String, confirmationName: String, requestID: UUID) async throws -> KeepsDirectoryTrashTask {
         try await request("POST", library + ["directories", "trash"], body: JSONEncoder().encode(["path": path, "confirmationName": confirmationName, "requestID": requestID.uuidString.lowercased()]))
     }

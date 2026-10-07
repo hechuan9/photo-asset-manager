@@ -154,7 +154,7 @@ impl PreviewStorage {
         role: &str,
     ) -> Result<Value> {
         ensure!(
-            ["preview", "thumbnail"].contains(&role),
+            ["preview", "thumbnail", "browse"].contains(&role),
             "invalid generated role"
         );
         let object = json!({"bucket":BUCKET,"key":format!("libraries/{library}/assets/{asset}/derivatives/{role}/{hash}.heic")});
@@ -292,7 +292,13 @@ fn validate_upload(request: &Value) -> Result<(&str, Uuid)> {
     ensure!(
         matches!(
             text(file, "role")?,
-            "raw_original" | "jpeg_original" | "sidecar" | "preview" | "thumbnail" | "export"
+            "raw_original"
+                | "jpeg_original"
+                | "sidecar"
+                | "preview"
+                | "thumbnail"
+                | "browse"
+                | "export"
         ),
         "invalid fileObject role"
     );

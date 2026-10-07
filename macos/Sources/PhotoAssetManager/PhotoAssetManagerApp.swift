@@ -5,6 +5,7 @@ import KeepsAPI
 struct PhotoAssetManagerApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var library = LibraryStore()
+    @FocusedValue(\.gallerySelection) private var gallerySelection
     var body: some Scene {
         WindowGroup {
             ContentView().environmentObject(library).frame(minWidth: 1080, minHeight: 720)
@@ -13,8 +14,18 @@ struct PhotoAssetManagerApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1440, height: 900)
         .commands {
+            CommandGroup(after: .pasteboard) {
+                if let gallerySelection {
+                    Button("全选照片", action: gallerySelection.selectAll)
+                        .keyboardShortcut("a", modifiers: .command)
+                        .disabled(library.isDirectoryOperationBlocking)
+                    Button("取消选择照片", action: gallerySelection.deselectAll)
+                        .keyboardShortcut("a", modifiers: [.command, .shift])
+                        .disabled(library.isDirectoryOperationBlocking)
+                }
+            }
             CommandGroup(after: .sidebar) {
-                Toggle("过滤隐藏目录内容", isOn: $library.hiddenDirectoryFilterEnabled).disabled(library.isDirectoryTrashBlocking)
+                Toggle("过滤隐藏目录内容", isOn: $library.hiddenDirectoryFilterEnabled).disabled(library.isDirectoryOperationBlocking)
             }
             CommandMenu("照片") {
                 Group {
@@ -25,12 +36,12 @@ struct PhotoAssetManagerApp: App {
                     Button(rating == 0 ? "清除评分" : "\(rating) 星") { library.updateSelected(KeepsAssetPatch(rating: rating)) }
                         .keyboardShortcut(KeyEquivalent(Character(String(rating))), modifiers: [])
                 }
-                .disabled(library.selectedIDs.isEmpty || library.isMutating)
+                .disabled(library.selectedIDs.isEmpty || library.isMutating || library.isSelectingAll)
                 Divider()
                 Button("留用") { library.updateSelected(KeepsAssetPatch(flagState: "picked")) }.keyboardShortcut("p", modifiers: [])
                 Button("排除") { library.updateSelected(KeepsAssetPatch(flagState: "rejected")) }.keyboardShortcut("x", modifiers: [])
                 Button("清除标记") { library.updateSelected(KeepsAssetPatch(flagState: "unflagged")) }.keyboardShortcut("u", modifiers: [])
-                }.disabled(library.isDirectoryTrashBlocking)
+                }.disabled(library.isDirectoryOperationBlocking || library.isSelectingAll)
             }
         }
         Window("任务追踪", id: "nas-tasks") {
@@ -40,8 +51,8 @@ struct PhotoAssetManagerApp: App {
                 } else {
                     Text("请先在设置中连接服务器。").padding(24)
                 }
-            }.disabled(library.isDirectoryTrashBlocking)
-            .overlay { if library.isDirectoryTrashBlocking { Text("正在删除文件夹，请在主窗口查看进度。").padding().background(.regularMaterial) } }
+            }.disabled(library.isDirectoryOperationBlocking)
+            .overlay { if library.isDirectoryOperationBlocking { Text("正在整理照片或文件夹，请在主窗口查看进度。").padding().background(.regularMaterial) } }
         }
         .windowResizability(.contentSize)
         Settings {
@@ -59,8 +70,8 @@ struct PhotoAssetManagerApp: App {
                 .tabItem { Label("来源", systemImage: "folder") }
             }
             .environmentObject(library)
-            .disabled(library.isDirectoryTrashBlocking)
-            .overlay { if library.isDirectoryTrashBlocking { Text("正在删除文件夹，请在主窗口查看进度。").padding().background(.regularMaterial) } }
+            .disabled(library.isDirectoryOperationBlocking)
+            .overlay { if library.isDirectoryOperationBlocking { Text("正在整理照片或文件夹，请在主窗口查看进度。").padding().background(.regularMaterial) } }
         }
     }
 }

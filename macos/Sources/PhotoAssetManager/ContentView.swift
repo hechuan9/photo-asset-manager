@@ -1,6 +1,22 @@
 import SwiftUI
 import KeepsAPI
 
+struct GallerySelectionActions {
+    let selectAll: () -> Void
+    let deselectAll: () -> Void
+}
+
+private struct GallerySelectionKey: FocusedValueKey {
+    typealias Value = GallerySelectionActions
+}
+
+extension FocusedValues {
+    var gallerySelection: GallerySelectionActions? {
+        get { self[GallerySelectionKey.self] }
+        set { self[GallerySelectionKey.self] = newValue }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.openWindow) private var openWindow
@@ -11,7 +27,6 @@ struct ContentView: View {
     @State private var showsSidebar = true
     @State private var showsInspector = false
     @State private var showsFilters = false
-    @State private var showsSources = false
     @State private var thumbnailSize = 190.0
     @State private var detailMode = false
 
@@ -42,19 +57,28 @@ struct ContentView: View {
         .foregroundStyle(WorkspaceStyle.text)
         .preferredColorScheme(.dark)
         .tint(WorkspaceStyle.accent)
-        .disabled(library.isDirectoryTrashBlocking)
-        .overlay { if library.isDirectoryTrashBlocking { Color.clear.contentShape(Rectangle()).onTapGesture {} } }
+        .disabled(library.isDirectoryOperationBlocking)
+        .overlay { if library.isDirectoryOperationBlocking { Color.clear.contentShape(Rectangle()).onTapGesture {} } }
         .sheet(isPresented: $showsImport, onDismiss: { library.refreshNavigation(); library.refresh(force: true) }) {
-            if let importStore { ImportView(store: importStore, initialTarget: library.query.directory).disabled(library.isDirectoryTrashBlocking) }
+            if let importStore { ImportView(store: importStore, initialTarget: library.query.directory).disabled(library.isDirectoryOperationBlocking) }
+        }
+        .overlay {
+            if library.isMovingDirectory {
+                DirectoryMoveProgressView(library: library)
+            } else if library.photoMove != nil {
+                PhotoMoveProgressView(library: library)
+            }
+        }
+        .sheet(item: $library.directoryToRename) { directory in
+            DirectoryRenameSheet(library: library, directory: directory)
         }
         .sheet(item: $library.directoryToTrash) { directory in
             DirectoryTrashSheet(library: library, directory: directory)
         }
-        .task { library.refresh() }
+        .task { library.refresh(); library.refreshNavigation(force: false) }
         .prefetchKeepsThumbnails(configuration: library.configuration)
         .onChange(of: library.query) { _, _ in library.refresh() }
         .onChange(of: library.query.directory) { _, _ in detailMode = false }
-        .onChange(of: showsSources) { _, visible in if visible { library.refreshNavigation(force: false) } }
     }
 
     private var topBar: some View {
@@ -86,7 +110,7 @@ struct ContentView: View {
             .frame(maxWidth: 620)
             Button { showsFilters.toggle() } label: { Image(systemName: "line.3.horizontal.decrease").frame(width: 28, height: 28) }
                 .buttonStyle(.plain).help("显示或隐藏筛选")
-            Button { library.refresh(force: true); if showsSources { library.refreshNavigation() } } label: {
+            Button { library.refresh(force: true); library.refreshNavigation() } label: {
                 Image(systemName: "arrow.clockwise").frame(width: 28, height: 28)
             }.buttonStyle(.plain).help("刷新资料库").disabled(library.client == nil)
             SettingsLink { Image(systemName: "gearshape").frame(width: 28, height: 28) }
@@ -103,21 +127,16 @@ struct ContentView: View {
             scopeButton("精选", count: library.counts?.picked, trashed: false, picked: true)
             scopeButton("回收站", count: library.counts?.trashed, trashed: true, picked: false)
             Divider().padding(.vertical, 20).padding(.horizontal, 16)
-            Button { showsSources.toggle() } label: {
-                HStack {
-                    Image(systemName: showsSources ? "chevron.down" : "chevron.right").font(.system(size: 10))
-                    Text("服务器来源").font(.system(size: 12, weight: .semibold))
-                    Spacer()
-                    if library.isLoadingNavigation { ProgressView().controlSize(.mini) }
-                }.padding(.horizontal, 16).frame(height: 34)
-            }.buttonStyle(.plain).help("浏览服务器上的来源目录，无需挂载")
-            if showsSources {
-                DirectoryOutlineView(library: library).padding(.horizontal, 6)
-                if let error = library.navigationError {
-                    WorkspaceErrorView(title: "来源暂时不可用", details: error).padding(12)
-                    Button("重试来源") { library.refreshNavigation() }.padding(.horizontal, 12)
-                }
-            } else { Spacer() }
+            if library.isLoadingNavigation {
+                ProgressView().progressViewStyle(.linear)
+                    .accessibilityLabel("正在读取目录")
+                    .padding(.horizontal, 16).padding(.bottom, 8)
+            }
+            DirectoryOutlineView(library: library).padding(.horizontal, 6)
+            if let error = library.navigationError {
+                WorkspaceErrorView(title: "目录暂时不可用", details: error).padding(12)
+                Button("重试读取目录") { library.refreshNavigation() }.padding(.horizontal, 12)
+            }
             Divider()
             Button { openWindow(id: "nas-tasks") } label: {
                 Label("任务追踪", systemImage: "list.bullet.rectangle")
@@ -203,14 +222,28 @@ struct ContentView: View {
         .focusable()
         .focusEffectDisabled()
         .focused($galleryFocused)
-        .onKeyPress(.leftArrow) { library.selectAdjacent(-1); return .handled }
-        .onKeyPress(.rightArrow) { library.selectAdjacent(1); return .handled }
+        .focusedValue(\.gallerySelection, GallerySelectionActions(
+            selectAll: { library.selectAll() }, deselectAll: { library.deselectAll() }
+        ))
+        .onKeyPress(keys: [.leftArrow]) { key in
+            library.selectAdjacent(-1, extending: key.modifiers.contains(.shift)); return .handled
+        }
+        .onKeyPress(keys: [.rightArrow]) { key in
+            library.selectAdjacent(1, extending: key.modifiers.contains(.shift)); return .handled
+        }
+        .onKeyPress(keys: ["a"]) { key in
+            guard key.modifiers.contains(.command) || key.modifiers.contains(.control) else { return .ignored }
+            library.selectAll(); return .handled
+        }
+        .onKeyPress(.escape) { library.deselectAll(); return .handled }
     }
 
     private func galleryTile(_ asset: KeepsAsset, height: CGFloat) -> some View {
         Button {
             galleryFocused = true
-            library.select(asset.id, extending: NSEvent.modifierFlags.contains(.command))
+            let modifiers = NSEvent.modifierFlags
+            library.select(asset.id, extending: modifiers.contains(.command) || modifiers.contains(.control),
+                           range: modifiers.contains(.shift))
         } label: {
             RemotePreview(asset: asset)
                 .frame(width: height * JustifiedAssetGridLayout.aspectRatio(asset.gridPreview), height: height)
@@ -229,6 +262,12 @@ struct ContentView: View {
                 }
                 .contentShape(Rectangle())
         }.buttonStyle(.plain).help(asset.originalFilename)
+            .onDrag { library.photoDragProvider(for: asset.id) }
+            .contextMenu {
+                Button("选择此照片") { library.select(asset.id, extending: false) }
+                Button("全选当前目录照片") { library.selectAll() }
+                Button("取消选择") { library.deselectAll() }
+            }
             .accessibilityLabel(asset.originalFilename)
             .accessibilityAddTraits(library.selectedIDs.contains(asset.id) ? [.isSelected] : [])
     }
@@ -252,7 +291,7 @@ struct ContentView: View {
                     Button { library.updateSelected(KeepsAssetPatch(flagState: library.selectedAsset?.flagState == "picked" ? "unflagged" : "picked")) } label: {
                         Image(systemName: "flag.fill").foregroundStyle(library.selectedAsset?.flagState == "picked" ? WorkspaceStyle.text : Color(white: 0.4))
                     }.buttonStyle(.plain).help("留用")
-                }.disabled(library.isMutating)
+                }.disabled(library.isMutating || library.isSelectingAll)
             }
             Group {
                 if library.isLoading && !library.hasLoadedResults { Text("正在读取…") }
@@ -261,6 +300,7 @@ struct ContentView: View {
                 }
             }
             Spacer(minLength: 4)
+            if library.isSelectingAll { Text("正在选择全部照片…").foregroundStyle(.secondary) }
             if (library.isLoading && !library.isCheckingRevision) || library.isMutating { ProgressView().controlSize(.small) }
             if !detailMode && !showsInspector {
                 Image(systemName: "square.grid.3x3").foregroundStyle(.secondary)

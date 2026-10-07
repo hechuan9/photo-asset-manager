@@ -5,6 +5,7 @@ import OSLog
 
 @MainActor
 final class LibraryStore: ObservableObject {
+    @Published var directoryToRename: KeepsNavigationDirectory?
     @Published var directoryToTrash: KeepsNavigationDirectory?
     @Published var directoryTrash: PendingDirectoryTrash?
     @Published var directoryTrashPhase = "waiting"
@@ -13,6 +14,20 @@ final class LibraryStore: ObservableObject {
     var directoryTrashTracking: Task<Void, Never>?
     var directoryTrashPollInterval: Duration = .seconds(1)
     var isDirectoryTrashBlocking: Bool { directoryTrash != nil }
+    @Published var directoryMove: PendingDirectoryMove?
+    @Published var directoryMovePhase = "waiting"
+    @Published var directoryMoveMessage: String?
+    @Published var directoryMoveFinished = false
+    var directoryMoveTracking: Task<Void, Never>?
+    var directoryMovePollInterval: Duration = .seconds(1)
+    var isMovingDirectory: Bool { directoryMove != nil }
+    @Published var photoMove: PendingPhotoMove?
+    @Published var photoMovePhase = "waiting"
+    @Published var photoMoveMessage: String?
+    @Published var photoMoveFinished = false
+    var photoMoveTracking: Task<Void, Never>?
+    var photoMovePollInterval: Duration = .seconds(1)
+    var isDirectoryOperationBlocking: Bool { isDirectoryTrashBlocking || isMovingDirectory || photoMove != nil }
     @Published private(set) var hiddenDirectoryPaths: Set<String> = []
     @Published private(set) var isUpdatingHiddenDirectory = false
     @Published var hiddenDirectoryFilterEnabled = true {
@@ -24,7 +39,12 @@ final class LibraryStore: ObservableObject {
     }
     @Published private(set) var assets: [KeepsAsset] = []
     @Published var selectedIDs: Set<UUID> = []
-    @Published var query = KeepsAssetQuery()
+    @Published private(set) var isSelectingAll = false
+    private var selectionAnchor: UUID?
+    private var selectionFocus: UUID?
+    @Published var query = KeepsAssetQuery() {
+        didSet { if query != oldValue { isSelectingAll = false } }
+    }
     @Published private(set) var counts: KeepsCounts?
     @Published private(set) var directories: [KeepsNavigationDirectory] = []
     @Published private(set) var expandedPaths: Set<String> = []
@@ -99,6 +119,8 @@ final class LibraryStore: ObservableObject {
             client = settings.map { KeepsClient(configuration: $0, session: session) }
         } catch { lastError = Self.describe(error) }
         restoreDirectoryTrash()
+        restoreDirectoryMove()
+        restorePhotoMove()
     }
 
     var selectedAsset: KeepsAsset? { return assets.first { selectedIDs.contains($0.id) } }
@@ -121,7 +143,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func setDirectoryHidden(_ path: String, hidden: Bool) {
-        guard !isDirectoryTrashBlocking else { return }
+        guard !isDirectoryOperationBlocking else { return }
         guard let client, !isUpdatingHiddenDirectory else { return }
         let generation = navigationGeneration
         isUpdatingHiddenDirectory = true
@@ -139,8 +161,45 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    func canMoveDirectory(_ path: String, to parentPath: String) -> Bool {
+        guard client != nil, !isDirectoryOperationBlocking, !isMutating,
+              !isUpdatingHiddenDirectory, !isCheckingConnection,
+              path.hasPrefix("/"), parentPath.hasPrefix("/"), path != "/",
+              path != parentPath, !parentPath.hasPrefix(path + "/"),
+              (path as NSString).deletingLastPathComponent != parentPath else { return false }
+        return !directories.contains { $0.path == path }
+    }
+
+    func completePhotoMove() {
+        photoMove = nil
+        preferences.removeObject(forKey: "keeps.pendingPhotoMove")
+        selectedIDs = []
+        assetCache.removeAll()
+        displayedQuery = nil
+        displayedPage = nil
+        refreshNavigation()
+        refresh(force: true)
+    }
+
+    func completeDirectoryMove(path: String, parentPath: String, destination: String) {
+        func relocated(_ value: String) -> String {
+            value == path || value.hasPrefix(path + "/") ? destination + value.dropFirst(path.count) : value
+        }
+        let expanded = Set(expandedPaths.map(relocated)).union([parentPath])
+        if let selected = query.directory { query.directory = relocated(selected) }
+        assetCache.removeAll()
+        displayedQuery = nil
+        displayedPage = nil
+        resetNavigation()
+        expandedPaths = expanded
+        directoryMove = nil
+        preferences.removeObject(forKey: "keeps.pendingDirectoryMove")
+        refreshNavigation()
+        refresh(force: true)
+    }
+
     func setDirectoryExpanded(_ path: String, expanded: Bool) {
-        guard !isDirectoryTrashBlocking else { return }
+        guard !isDirectoryOperationBlocking else { return }
         if expanded {
             expandedPaths.insert(path)
             if directoryErrors[path] == nil { loadChildren(of: path) }
@@ -148,7 +207,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func showLibrary(directory: String? = nil, trashed: Bool = false, picked: Bool = false) {
-        guard !isDirectoryTrashBlocking else { return }
+        guard !isDirectoryOperationBlocking else { return }
         query = KeepsAssetQuery()
         query.directory = directory
         query.recursive = true
@@ -162,11 +221,12 @@ final class LibraryStore: ObservableObject {
         loadGeneration += 1
         isLoading = false
         paginationVisible = false
-        assets = []; selectedIDs = []; total = 0; nextCursor = nil; lastError = nil
+        deselectAll()
+        assets = []; total = 0; nextCursor = nil; lastError = nil
     }
 
     func refreshNavigation(force: Bool = true) {
-        guard !isDirectoryTrashBlocking else { return }
+        guard !isDirectoryOperationBlocking else { return }
         guard let client else { return }
         if !force && navigationError == nil && Date().timeIntervalSince(lastNavigationFetch) < 300 { return }
         rootRequestGeneration += 1
@@ -192,7 +252,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func loadChildren(of path: String, refresh: Bool = false) {
-        guard !isDirectoryTrashBlocking else { return }
+        guard !isDirectoryOperationBlocking else { return }
         guard let client, (refresh || directoryChildren[path] == nil), !loadingDirectories.contains(path) else { return }
         let generation = navigationGeneration
         loadingDirectories.insert(path)
@@ -210,6 +270,9 @@ final class LibraryStore: ObservableObject {
                 guard directories.contains(where: { path == $0.path }) || directoryChildren.values.contains(where: { $0.contains(where: { $0.path == path }) }) else { return }
                 removeMissingDirectories(old: directoryChildren[path] ?? [], new: navigation.directories)
                 directoryChildren[path] = navigation.directories
+                for child in navigation.directories where expandedPaths.contains(child.path) {
+                    loadChildren(of: child.path)
+                }
             } catch {
                 let elapsed = started.duration(to: .now).components
                 let milliseconds = Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15
@@ -229,7 +292,8 @@ final class LibraryStore: ObservableObject {
         }
     }
 
-    func pauseLibraryForDirectoryTrash() {
+    func pauseLibraryForDirectoryOperation() {
+        isSelectingAll = false
         loadTask?.cancel()
         loadGeneration += 1
         rootRequestGeneration += 1
@@ -257,7 +321,7 @@ final class LibraryStore: ObservableObject {
 
     @discardableResult
     func checkConnection(baseURL: String, libraryID: String, accessCredential: String, save: Bool) async -> Bool {
-        guard !isDirectoryTrashBlocking, !isCheckingConnection else { return false }
+        guard !isDirectoryOperationBlocking, !isCheckingConnection else { return false }
         isCheckingConnection = true
         clearConnectionFeedback()
         defer { isCheckingConnection = false }
@@ -314,11 +378,19 @@ final class LibraryStore: ObservableObject {
         assets = page.items
         total = page.total
         nextCursor = page.nextCursor
-        selectedIDs.formIntersection(Set(assets.map(\.id)))
+        let available = Set(assets.map(\.id))
+        selectedIDs.formIntersection(available)
+        if let selectionAnchor, !available.contains(selectionAnchor) { self.selectionAnchor = nil }
+        if let selectionFocus, !available.contains(selectionFocus) { self.selectionFocus = nil }
+        if isSelectingAll {
+            selectedIDs = available
+            selectionAnchor = assets.first?.id
+            selectionFocus = assets.last?.id
+        }
     }
 
     func refresh(force: Bool = false) {
-        guard !isDirectoryTrashBlocking else { return }
+        guard !isDirectoryOperationBlocking else { return }
         guard let client else { isLoading = false; return }
         let requestedQuery = effectiveQuery
         let changedQuery = displayedQuery != requestedQuery
@@ -391,7 +463,7 @@ final class LibraryStore: ObservableObject {
     }
 
     private func loadMoreIfNeeded() {
-        guard paginationVisible, lastError == nil else { return }
+        guard paginationVisible || isSelectingAll, lastError == nil else { return }
         loadMore()
     }
 
@@ -399,11 +471,12 @@ final class LibraryStore: ObservableObject {
         guard generation == loadGeneration else { return }
         isLoading = false
         isCheckingRevision = false
+        if nextCursor == nil || lastError != nil { isSelectingAll = false }
         loadMoreIfNeeded()
     }
 
     func loadMore() {
-        guard !isDirectoryTrashBlocking else { return }
+        guard !isDirectoryOperationBlocking else { return }
         guard let client, let cursor = nextCursor, !isLoading, displayedQuery == effectiveQuery else { return }
         let generation = loadGeneration
         var requestedQuery = query
@@ -433,19 +506,47 @@ final class LibraryStore: ObservableObject {
         }
     }
 
-    func select(_ id: UUID, extending: Bool) {
-        guard !isDirectoryTrashBlocking else { return }
-        guard assets.contains(where: { $0.id == id }) else { return }
-        if extending {
-            if selectedIDs.contains(id) { selectedIDs.remove(id) } else { selectedIDs.insert(id) }
-        } else { selectedIDs = [id] }
+    func select(_ id: UUID, extending: Bool = false, range: Bool = false) {
+        guard !isDirectoryOperationBlocking,
+              let target = assets.firstIndex(where: { $0.id == id }) else { return }
+        isSelectingAll = false
+        if range, let anchor = selectionAnchor,
+           let start = assets.firstIndex(where: { $0.id == anchor }) {
+            let ids = Set(assets[min(start, target)...max(start, target)].map(\.id))
+            if extending { selectedIDs.formUnion(ids) } else { selectedIDs = ids }
+        } else {
+            if extending {
+                if selectedIDs.contains(id) { selectedIDs.remove(id) } else { selectedIDs.insert(id) }
+            } else { selectedIDs = [id] }
+            selectionAnchor = id
+        }
+        selectionFocus = id
     }
 
-    func selectAdjacent(_ offset: Int) {
-        guard !isDirectoryTrashBlocking else { return }
-        guard !assets.isEmpty else { return }
-        let index = assets.firstIndex { selectedIDs.contains($0.id) } ?? 0
-        selectedIDs = [assets[min(max(index + offset, 0), assets.count - 1)].id]
+    func selectAdjacent(_ offset: Int, extending: Bool = false) {
+        guard !isDirectoryOperationBlocking, !assets.isEmpty else { return }
+        let focus = selectionFocus.flatMap { id in assets.firstIndex { $0.id == id } }
+        let selected = assets.firstIndex { selectedIDs.contains($0.id) }
+        let index = focus ?? selected
+        let target = index.map { min(max($0 + offset, 0), assets.count - 1) } ?? (offset < 0 ? assets.count - 1 : 0)
+        select(assets[target].id, range: extending)
+    }
+
+    func selectAll() {
+        guard !isDirectoryOperationBlocking, client != nil, displayedQuery == effectiveQuery else { return }
+        isSelectingAll = isLoading || nextCursor != nil
+        selectedIDs = Set(assets.map(\.id))
+        selectionAnchor = assets.first?.id
+        selectionFocus = assets.last?.id
+        loadMoreIfNeeded()
+    }
+
+    func deselectAll() {
+        guard !isDirectoryOperationBlocking else { return }
+        isSelectingAll = false
+        selectedIDs = []
+        selectionAnchor = nil
+        selectionFocus = nil
     }
 
     func updateSelected(_ patch: KeepsAssetPatch) {
@@ -455,7 +556,7 @@ final class LibraryStore: ObservableObject {
     func restoreSelected() { mutateSelected(refreshDirectories: true) { client, id in try await client.restoreAsset(id: id) } }
 
     private func mutateSelected(refreshDirectories: Bool = false, _ mutation: @escaping @Sendable (KeepsClient, UUID) async throws -> KeepsAsset) {
-        guard !isDirectoryTrashBlocking, let client, !isMutating, !selectedIDs.isEmpty else { return }
+        guard !isDirectoryOperationBlocking, !isSelectingAll, let client, !isMutating, !selectedIDs.isEmpty else { return }
         let ids = selectedIDs
         let generation = loadGeneration
         isMutating = true
@@ -476,7 +577,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func refreshPreview(id: UUID) async throws -> URL {
-        guard !isDirectoryTrashBlocking, let client else { throw KeepsAPIError.invalidConfiguration }
+        guard !isDirectoryOperationBlocking, let client else { throw KeepsAPIError.invalidConfiguration }
         return try await client.refreshPreview(assetID: id)
     }
 

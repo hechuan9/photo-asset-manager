@@ -196,6 +196,7 @@ fn trash_with_config(
     recycle: impl FnOnce(&SharedFolder, &Path) -> Result<()>,
 ) -> Result<Value> {
     let _guard = jobs.directory_mutation.write().unwrap();
+    crate::directory_move::ensure_reconciled(jobs)?;
     let source = validate(jobs, library, path, confirmation)?;
     let share = recycle_share(&config()?, &source)?;
     let recycle_result = recycle(&share, &source);
@@ -347,6 +348,7 @@ fn process(
     recycle: impl FnOnce(&SharedFolder, &Path) -> Result<()>,
 ) -> Result<()> {
     let _guard = jobs.directory_mutation.write().unwrap();
+    crate::directory_move::ensure_reconciled(jobs)?;
     let source = Path::new(&current.path);
     let mut native_error = current.error.clone();
     match current.phase.as_str() {

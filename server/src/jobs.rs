@@ -96,10 +96,7 @@ fn covers(parent: &Job, child: &Job) -> bool {
     match parent.scope_kind.as_str() {
         // Precise events stay ahead of a pending full scan instead of inheriting its cost.
         "recursive" => child.scope_kind == "recursive" && child_path.starts_with(parent_path),
-        "directory" => {
-            (child.scope_kind == "directory" && child_path == parent_path)
-                || (child.scope_kind == "file" && child_path.parent() == Some(parent_path))
-        }
+        "directory" => child.scope_kind == "directory" && child_path == parent_path,
         "file" => child.scope_kind == "file" && child_path == parent_path,
         _ => false,
     }
@@ -152,7 +149,9 @@ impl Jobs {
         if !root.is_dir() {
             bail!("originals root must be a directory");
         }
-        let db = Connection::open(path)?;
+        let mut db = Connection::open(path)?;
+        // Progress uses another WAL connection; reserve writes before a queue read can go stale.
+        db.set_transaction_behavior(rusqlite::TransactionBehavior::Immediate);
         db.busy_timeout(std::time::Duration::from_secs(30))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
           CREATE TABLE IF NOT EXISTS worker_activity(id INTEGER PRIMARY KEY CHECK(id=1),library_id TEXT NOT NULL,work_class TEXT NOT NULL,current_photo TEXT,last_error TEXT,active INTEGER NOT NULL DEFAULT 0);
@@ -214,6 +213,7 @@ CREATE TABLE IF NOT EXISTS worker_photo_files(path TEXT PRIMARY KEY);
             UPDATE jobs SET scope_path=(SELECT path FROM folders WHERE id=jobs.folder_id) WHERE scope_path IS NULL;
             DROP INDEX IF EXISTS jobs_live_scope;
             CREATE UNIQUE INDEX jobs_live_scope ON jobs(folder_id,scope_path,scope_kind,work_class) WHERE status IN ('pending','running');")?;
+        crate::directory_move::initialize(&db)?;
         let trash_db = Connection::open(path)?;
         trash_db.busy_timeout(std::time::Duration::from_secs(5))?;
         crate::directory_trash::initialize(&trash_db)?;
@@ -691,15 +691,18 @@ CREATE TABLE IF NOT EXISTS worker_photo_files(path TEXT PRIMARY KEY);
     }
     pub fn claim_class(&self, work_class: &str) -> Result<Option<Job>> {
         validate_work_class(work_class)?;
-        self.claim(Some(work_class))
+        self.claim(Some(work_class), false)
     }
     pub fn claim_next(&self) -> Result<Option<Job>> {
-        self.claim(None)
+        self.claim(None, false)
     }
-    fn claim(&self, work_class: Option<&str>) -> Result<Option<Job>> {
+    pub fn claim_automatic_file(&self) -> Result<Option<Job>> {
+        self.claim(Some("automatic"), true)
+    }
+    fn claim(&self, work_class: Option<&str>, file_only: bool) -> Result<Option<Job>> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
-        let next = tx.query_row(&format!("{JOB_SELECT} WHERE j.status='pending' AND j.available_at<=unixepoch() AND f.active=1 AND (?1 IS NULL OR j.work_class=?1) ORDER BY CASE j.work_class WHEN 'automatic' THEN 2 WHEN 'manual' THEN 1 ELSE 0 END DESC,CASE j.scope_kind WHEN 'file' THEN 2 WHEN 'directory' THEN 1 ELSE 0 END DESC,j.path_sync DESC,CASE WHEN j.path_sync=0 THEN j.refresh_metadata ELSE 0 END DESC,j.created_at,j.rowid LIMIT 1"),[work_class],job).optional()?;
+        let next = tx.query_row(&format!("{JOB_SELECT} WHERE j.status='pending' AND j.available_at<=unixepoch() AND f.active=1 AND (?1 IS NULL OR j.work_class=?1) AND (?2=0 OR j.scope_kind='file') ORDER BY CASE j.work_class WHEN 'automatic' THEN 2 WHEN 'manual' THEN 1 ELSE 0 END DESC,CASE j.scope_kind WHEN 'file' THEN 2 WHEN 'directory' THEN 1 ELSE 0 END DESC,j.path_sync DESC,CASE WHEN j.path_sync=0 THEN j.refresh_metadata ELSE 0 END DESC,j.created_at,j.rowid LIMIT 1"),params![work_class,file_only],job).optional()?;
         let Some(mut next) = next else {
             return Ok(None);
         };
@@ -824,6 +827,74 @@ mod tests {
         let folder = jobs.add_folder("library", ".").unwrap();
         (dir, jobs, folder)
     }
+    #[test]
+    fn foreground_file_claim_defers_scans_without_losing_checkpoints() {
+        let (_dir, jobs, folder) = setup();
+        let recursive = jobs
+            .enqueue_path_change(&folder.id, jobs.root(), 0)
+            .unwrap();
+        let directory = jobs
+            .enqueue_directory_change(&folder.id, jobs.root(), 0)
+            .unwrap();
+        let manual = jobs
+            .enqueue_manual_file(&folder.id, &jobs.root().join("manual.jpg"))
+            .unwrap();
+        let reconcile = jobs.enqueue_external_scan(&folder.id).unwrap();
+        let file = jobs
+            .enqueue_file_change(&folder.id, &jobs.root().join("changed.jpg"), 0)
+            .unwrap();
+        jobs.db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE jobs SET checkpoint='scan-cursor',processed=17 WHERE id=?",
+                [&recursive.id],
+            )
+            .unwrap();
+        assert_eq!(jobs.claim_automatic_file().unwrap().unwrap().id, file.id);
+        jobs.finish(&file.id, None).unwrap();
+        assert_eq!(jobs.claim_class("manual").unwrap().unwrap().id, manual.id);
+        jobs.finish(&manual.id, None).unwrap();
+        // The worker can keep generating browse images while only background scans remain.
+        for _ in 0..25 {
+            assert!(jobs.claim_automatic_file().unwrap().is_none());
+            assert!(jobs.claim_class("manual").unwrap().is_none());
+        }
+        let checkpoint: (String, i64, String, String) = jobs
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT checkpoint,processed,status,work_class FROM jobs WHERE id=?",
+                [&recursive.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            checkpoint,
+            (
+                "scan-cursor".into(),
+                17,
+                "pending".into(),
+                "automatic".into()
+            )
+        );
+        let changed = jobs
+            .enqueue_file_change(&folder.id, &jobs.root().join("another.jpg"), 0)
+            .unwrap();
+        assert_eq!(jobs.claim_automatic_file().unwrap().unwrap().id, changed.id);
+        jobs.finish(&changed.id, None).unwrap();
+        assert_eq!(
+            jobs.claim_class("automatic").unwrap().unwrap().id,
+            directory.id
+        );
+        jobs.finish(&directory.id, None).unwrap();
+        let resumed = jobs.claim_class("automatic").unwrap().unwrap();
+        assert_eq!(resumed.id, recursive.id);
+        assert_eq!(resumed.processed, 17);
+        assert_eq!(jobs.job(&reconcile.id).unwrap().unwrap().status, "pending");
+    }
+
     #[test]
     fn classes_are_independent_and_reconcile_is_last() {
         let (_dir, jobs, folder) = setup();
@@ -1095,7 +1166,7 @@ mod tests {
         let shallow = jobs
             .enqueue_directory_change(&folder.id, jobs.root(), 0)
             .unwrap();
-        assert_eq!(jobs.job(&file.id).unwrap().unwrap().status, "cancelled");
+        assert_eq!(jobs.job(&file.id).unwrap().unwrap().status, "pending");
         assert!(
             !jobs
                 .path_sync_pending("library", &child.join("a.jpg"))
@@ -1515,6 +1586,31 @@ mod tests {
         assert_eq!(after.asset_id, "asset");
         assert_eq!(after.error.as_deref(), Some("error"));
     }
+    #[test]
+    fn queue_transactions_reserve_writer_before_reading_to_avoid_stale_wal_snapshot() -> Result<()>
+    {
+        let (_tmp, jobs, folder) = setup();
+        let mut db = jobs.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let _: String = tx.query_row(
+            "SELECT path FROM folders WHERE id=?1",
+            [&folder.id],
+            |row| row.get(0),
+        )?;
+        let progress = jobs.trash_db.lock().unwrap();
+        progress.busy_timeout(std::time::Duration::ZERO)?;
+        let competing_write =
+            progress.execute("UPDATE folders SET active=active WHERE id=?1", [&folder.id]);
+        assert!(
+            competing_write.is_err(),
+            "a progress commit must not invalidate a queue transaction's read snapshot"
+        );
+        tx.execute("UPDATE folders SET active=active WHERE id=?1", [&folder.id])?;
+        tx.commit()?;
+        progress.execute("UPDATE folders SET active=active WHERE id=?1", [&folder.id])?;
+        Ok(())
+    }
+
     #[test]
     fn paths_cannot_escape_or_enter_excluded_directories() {
         let (dir, jobs, _folder) = setup();
