@@ -109,6 +109,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/libraries/{library}/directories",
             get(directories).post(create_directory),
         )
+        .route(
+            "/libraries/{library}/directories/trash",
+            post(trash_directory),
+        )
+        .route(
+            "/libraries/{library}/directories/trash/{request_id}",
+            get(directory_trash_status),
+        )
         .route("/libraries/{library}/navigation", get(navigation))
         .route(
             "/libraries/{library}/folders",
@@ -335,6 +343,7 @@ async fn create_directory(
     Json(body): Json<CreateDirectoryRequest>,
 ) -> ApiResult {
     let result = blocking(move || {
+        let _directory_guard = state.jobs.directory_mutation.read().unwrap();
         let name = &body.name;
         if name.trim().is_empty()
             || name.starts_with('.')
@@ -373,6 +382,45 @@ async fn create_directory(
     })
     .await?;
     Ok((StatusCode::CREATED, Json(result)).into_response())
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrashDirectoryRequest {
+    #[serde(default, rename = "requestID")]
+    request_id: String,
+    path: String,
+    confirmation_name: String,
+}
+async fn trash_directory(
+    State(state): State<Arc<AppState>>,
+    Path(library): Path<String>,
+    Json(body): Json<TrashDirectoryRequest>,
+) -> ApiResult {
+    let result = blocking(move || {
+        Ok(serde_json::to_value(crate::directory_trash::submit(
+            &state.jobs,
+            &library,
+            &body.path,
+            &body.confirmation_name,
+            &body.request_id,
+        )?)?)
+    })
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(result)).into_response())
+}
+async fn directory_trash_status(
+    State(state): State<Arc<AppState>>,
+    Path((library, request_id)): Path<(String, String)>,
+) -> ApiResult {
+    let result = blocking(move || {
+        Ok(serde_json::to_value(crate::directory_trash::get(
+            &state.jobs,
+            &library,
+            &request_id,
+        )?)?)
+    })
+    .await?;
+    Ok(Json(result).into_response())
 }
 #[derive(Deserialize)]
 struct NavigationQuery {
@@ -445,6 +493,7 @@ async fn add_folder(
         StatusCode::CREATED,
         Json(
             blocking(move || {
+                let _directory_guard = state.jobs.directory_mutation.read().unwrap();
                 state
                     .jobs
                     .validate_path(std::path::Path::new(&body.path))

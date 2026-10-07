@@ -5,6 +5,81 @@ import KeepsAPI
 @testable import PhotoAssetManager
 
 @MainActor struct RemoteLibraryTests {
+    @Test func directoryTrashMenuTargetsClickedFolderAndRejectsWrongConfirmation() async throws {
+        _ = NSApplication.shared
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://tree.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        store.refreshNavigation()
+        try await waitUntil { !store.isLoadingNavigation }
+        let outline = DirectoryOutlineView.DirectoryOutline()
+        let column = NSTableColumn(identifier: .init("directory"))
+        outline.addTableColumn(column)
+        outline.outlineTableColumn = column
+        let coordinator = DirectoryOutlineView.Coordinator(library: store)
+        coordinator.outline = outline
+        outline.dataSource = coordinator
+        outline.delegate = coordinator
+        coordinator.update()
+        let clicked = try #require(outline.item(atRow: 1))
+        let menu = try #require(coordinator.contextMenu(for: clicked))
+        let entry = try #require(menu.items.first { $0.title == "删除文件夹…" })
+        #expect(store.directoryToTrash == nil)
+        #expect(NSApp.sendAction(try #require(entry.action), to: entry.target, from: entry))
+        let directory = try #require(store.directoryToTrash)
+        #expect(directory.path == "other")
+        #expect(outline.selectedRow == -1)
+        do {
+            try await store.trashDirectory(directory, confirmationName: "other ")
+            Issue.record("mismatched name must be rejected")
+        } catch {
+            #expect(store.directoryToTrash?.path == "other")
+        }
+    }
+
+    @Test func directoryTrashRefreshesNavigationAndLeavesDeletedScope() async throws {
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://directory-trash.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
+        store.refreshNavigation()
+        try await waitUntil { !store.isLoadingNavigation }
+        let directory = try #require(store.directories.first)
+        store.showLibrary(directory: directory.path + "/child")
+        try await waitUntil { !store.isLoading }
+        let generation = store.navigationGeneration
+        try await store.trashDirectory(directory, confirmationName: directory.name)
+        try await waitUntil { !store.isLoading && !store.isLoadingNavigation }
+        #expect(store.query.directory == nil)
+        #expect(store.navigationGeneration > generation)
+        #expect(store.directories.isEmpty)
+        #expect(store.selectedIDs.isEmpty)
+        #expect(store.lastError == nil)
+    }
+
+    @Test func directoryCountRemainsFullyVisibleWhenLongNameIsTruncated() throws {
+        _ = NSApplication.shared
+        let cell = DirectoryOutlineView.DirectoryCell(frame: NSRect(x: 0, y: 0, width: 100, height: 30))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300), styleMask: .borderless, backing: .buffered, defer: false)
+        let host = try #require(window.contentView)
+        host.addSubview(cell)
+        cell.translatesAutoresizingMaskIntoConstraints = false
+        let widthConstraint = cell.widthAnchor.constraint(equalToConstant: 100)
+        NSLayoutConstraint.activate([widthConstraint, cell.heightAnchor.constraint(equalToConstant: 30), cell.leadingAnchor.constraint(equalTo: host.leadingAnchor), cell.topAnchor.constraint(equalTo: host.topAnchor)])
+        let directory = try JSONDecoder().decode(KeepsNavigationDirectory.self, from: Data("""
+        {"path":"/photos/long","name":"这是一个非常长的目录名称用于检查数字不会被挤出可见区域","photoCount":1234567,"hasChildren":false}
+        """.utf8))
+        cell.configure(directory, loading: false)
+        #expect(cell.nameLabel.lineBreakMode == .byTruncatingMiddle)
+        for width in [100.0, 130.0, 180.0] {
+            widthConstraint.constant = width
+            host.layoutSubtreeIfNeeded()
+            let countAlignment = cell.countLabel.alignmentRect(forFrame: cell.countLabel.frame)
+            let name = cell.nameLabel
+            let nameAlignment = name.alignmentRect(forFrame: name.frame)
+            #expect(abs(countAlignment.maxX - width) < 0.5)
+            #expect(cell.countLabel.frame.minX >= 0)
+            #expect(cell.countLabel.frame.width >= cell.countLabel.intrinsicContentSize.width)
+            #expect(cell.nameLabel.frame.maxX < cell.countLabel.frame.minX)
+            #expect(cell.nameLabel.frame.width > 0)
+            #expect(abs(countAlignment.minX - nameAlignment.maxX - 6) < 0.5)
+        }
+    }
     @Test func unconfiguredLaunchHasNoLocalLibraryOrBackgroundWork() {
         let store = LibraryStore(loadSavedSettings: false)
         #expect(store.client == nil)
@@ -205,6 +280,25 @@ import KeepsAPI
         #expect(outline.item(atRow: 0) as? DirectoryOutlineView.Coordinator.Node === root)
         #expect(outline.selectedRow == 1)
         #expect(store.query.directory == "root/child")
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 188, height: 400))
+        window.contentView = scroll
+        scroll.documentView = outline
+        outline.indentationPerLevel = 100
+        outline.setFrameSize(NSSize(width: 500, height: 400))
+        outline.reloadData()
+        outline.expandItem(root, expandChildren: true)
+        scroll.layoutSubtreeIfNeeded()
+        for row in 0..<outline.numberOfRows {
+            let frame = outline.frameOfCell(atColumn: 0, row: row)
+            #expect(abs(frame.maxX - (scroll.contentSize.width - 14)) < 0.5)
+            #expect(frame.width >= 100)
+            let cell = try #require(outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? DirectoryOutlineView.DirectoryCell)
+            cell.layoutSubtreeIfNeeded()
+            let countFrame = cell.countLabel.convert(cell.countLabel.bounds, to: scroll.contentView)
+            #expect(countFrame.maxX <= scroll.contentSize.width)
+            #expect(countFrame.minX >= 0)
+        }
     }
 
     @Test func switchingServerRejectsLateNavigationFromOldConnection() async throws {
@@ -244,7 +338,7 @@ import KeepsAPI
         let directory = try #require(store.directories.first)
         cell.configure(directory, loading: false)
         #expect(cell.spinner.isHidden)
-        #expect(cell.imageView?.isHidden == false)
+        #expect(cell.icon.isHidden == false)
         #expect(cell.countLabel.stringValue == "0")
         cell.configure(directory, loading: true)
         #expect(!cell.spinner.isHidden)
@@ -428,6 +522,21 @@ private final class LibraryStubProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        if request.url?.host == "directory-trash.invalid" {
+            if request.url?.path.hasSuffix("/directories/trash") == true {
+                Self.treeRequests.record("directory-trash")
+                var data = request.httpBody ?? Data()
+                if let stream = request.httpBodyStream { stream.open(); defer { stream.close() }; var buffer = [UInt8](repeating: 0, count: 4096); while stream.hasBytesAvailable { let n = stream.read(&buffer, maxLength: buffer.count); if n <= 0 { break }; data.append(buffer, count: n) } }
+                let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                let id = object?["requestID"] as? String ?? UUID().uuidString
+                deliver(body: "{\"id\":\"\(id)\",\"path\":\"2026\",\"status\":\"completed\",\"phase\":\"completed\",\"createdAt\":0,\"updatedAt\":1}", status: 202)
+                return
+            }
+            if request.url?.path.hasSuffix("/navigation") == true, Self.treeRequests.count(for: "directory-trash") > 0 {
+                deliver(body: "{\"directories\":[]}", status: 200)
+                return
+            }
+        }
         if request.url?.host == "slow-old.invalid", request.url?.path.hasSuffix("/navigation") == true {
             Self.treeRequests.record("slow-start")
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { [self] in

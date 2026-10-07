@@ -14,9 +14,10 @@ struct PhotoAssetManagerApp: App {
         .defaultSize(width: 1440, height: 900)
         .commands {
             CommandGroup(after: .sidebar) {
-                Toggle("过滤隐藏目录内容", isOn: $library.hiddenDirectoryFilterEnabled)
+                Toggle("过滤隐藏目录内容", isOn: $library.hiddenDirectoryFilterEnabled).disabled(library.isDirectoryTrashBlocking)
             }
             CommandMenu("照片") {
+                Group {
                 Button("上一张") { library.selectAdjacent(-1) }
                 Button("下一张") { library.selectAdjacent(1) }
                 Divider()
@@ -29,6 +30,7 @@ struct PhotoAssetManagerApp: App {
                 Button("留用") { library.updateSelected(KeepsAssetPatch(flagState: "picked")) }.keyboardShortcut("p", modifiers: [])
                 Button("排除") { library.updateSelected(KeepsAssetPatch(flagState: "rejected")) }.keyboardShortcut("x", modifiers: [])
                 Button("清除标记") { library.updateSelected(KeepsAssetPatch(flagState: "unflagged")) }.keyboardShortcut("u", modifiers: [])
+                }.disabled(library.isDirectoryTrashBlocking)
             }
         }
         Window("任务追踪", id: "nas-tasks") {
@@ -38,7 +40,8 @@ struct PhotoAssetManagerApp: App {
                 } else {
                     Text("请先在设置中连接服务器。").padding(24)
                 }
-            }
+            }.disabled(library.isDirectoryTrashBlocking)
+            .overlay { if library.isDirectoryTrashBlocking { Text("正在删除文件夹，请在主窗口查看进度。").padding().background(.regularMaterial) } }
         }
         .windowResizability(.contentSize)
         Settings {
@@ -56,6 +59,8 @@ struct PhotoAssetManagerApp: App {
                 .tabItem { Label("来源", systemImage: "folder") }
             }
             .environmentObject(library)
+            .disabled(library.isDirectoryTrashBlocking)
+            .overlay { if library.isDirectoryTrashBlocking { Text("正在删除文件夹，请在主窗口查看进度。").padding().background(.regularMaterial) } }
         }
     }
 }

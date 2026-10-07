@@ -17,7 +17,7 @@ curl --fail http://localhost:2283/healthz
 
 原片保持 `/volume2/photo`；`KEEPS_ROOT` 单独保存 `db/`、`previews/` 和维护状态，不存放原片或标准照片。Docker 示例将 `/volume2/docker/keeps/data` 挂载到 `/keeps`。数据库为 `control_plane.sqlite` 和 `jobs.sqlite`，同一状态目录只允许一个服务管理。
 
-`KEEPS_LIBRARY_ID`、token 和 `TZ` 在迁移时保持一致，无时区 EXIF 按 `TZ` 解析。照片目录可写仅用于显式导入、新增标准图及身份 metadata 补写；禁止覆盖、删除或移动已有照片。回收站和停止追踪只修改数据库。
+`KEEPS_LIBRARY_ID`、token 和 `TZ` 在迁移时保持一致，无时区 EXIF 按 `TZ` 解析。照片目录可写用于显式导入、新增标准图及身份 metadata 补写；禁止覆盖或永久删除已有照片。软件回收站和停止追踪只修改数据库。用户输入同名确认后的文件夹删除使用 NAS 共享回收站，详见服务端 README；该功能需要真实 DSM 共享配置，默认 Docker 部署不提供该配置。
 
 业务 API 使用 Bearer token；健康检查和有时效签名的预览下载除外。Compose 将 2283 绑定至回环地址，客户端入口需配置 HTTPS 反向代理或 VPN，保留 Authorization、路径和查询参数。`CONTROL_PLANE_PUBLIC_BASE_URL` 必须与客户端入口一致；令牌和含签名 URL 的日志不提交 Git。
 

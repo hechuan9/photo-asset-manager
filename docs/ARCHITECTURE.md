@@ -111,6 +111,8 @@ Mac 顶栏“导入”（⌘⇧I）选择本机来源文件夹和已有的 NAS �
 
 批次及上传状态保存在 NAS jobs 数据库；同一 manifest ID 重试返回当前状态，已上传文件跳过。Mac 展示文件/字节进度、失败文件和错误，可在当前应用会话继续批次，关闭导入面板后重开仍保留进度；退出应用后不自动恢复本地来源授权和批次。上传期间应用须运行，提交后的整理任务由 NAS 独立执行。完成提示区分“上传提交成功”与后台整理完成。单批次最多 10,000 个文件，每个文件 1 B–8 GiB。
 
+目录删除确认后，macOS 暂停主窗口、快捷键、设置与任务窗口的其他操作，显示后台阶段和经过时间。客户端持久化任务 ID 和目标连接，超时继续查询，重启恢复同一任务；服务器已接受但记录丢失时提示人工核对，不重新删除。任务成功后刷新目录与图库。
+
 ## API 契约
 
 业务路由需要共享访问凭据。首期使用单一 NAS 的 Bearer 认证，不声称具备多用户或租户隔离能力。服务仅接受配置的 `KEEPS_LIBRARY_ID`（默认 `local-library`）；鉴权后拒绝未知图库，返回 HTTP 404 / `library_not_found`，包括空库查询和目录写入。图库 ID 不是 NAS 用户名；合法但尚无照片的图库仍返回成功的空列表。预览下载使用服务端签名 URL。
@@ -129,6 +131,7 @@ Mac 顶栏“导入”（⌘⇧I）选择本机来源文件夹和已有的 NAS �
 | `GET /libraries/{libraryID}/counts` | 全部、精选和回收站计数。 |
 | `GET /libraries/{libraryID}/directories` | 服务器索引中的目录及数量。 |
 | `GET /libraries/{libraryID}/navigation?path=...` | 服务器真实目录导航；省略路径返回追踪范围内的根入口，指定路径返回直接子目录，包含空目录；仅返回 `path`、`directories`，不再返回位置分区或本地暂存状态。 |
+| `POST .../directories/trash` | 提交包含 UUID requestID 与完全相同目录名的持久异步任务，202 返回任务；GET 同路径加 /{requestID} 查询 waiting/recycling/reconciling/completed/failed 阶段，重试幂等。后台调用 DSM 原生 `synorecycle --rmdir`，由 NAS 自动管理回收位置和删除记录；不使用手工移动或永久删除兜底。详见服务端 README。 |
 | `GET` / `POST /libraries/{libraryID}/folders` | 查看追踪目录与原片根路径、添加相对目录。 |
 | `DELETE /libraries/{libraryID}/folders/{folderID}` | 停止追踪，保留原片。 |
 | `POST .../folders/{folderID}/scan` | 提交扫描任务。 |
@@ -145,7 +148,7 @@ Mac 顶栏“导入”（⌘⇧I）选择本机来源文件夹和已有的 NAS �
 - `KEEPS_ROOT=/keeps` 保存数据库、任务数据和可重建预览；宿主机路径 `/volume2/docker/keeps/data`。
 - Compose 只挂载系统数据和 `/volume2/photo` 两个目录，服务端 `ORIGINAL_ROOT=/volume2/photo`。
 - `/volume2/photo` 需要写权限用于创建标准照片；任何已有照片、RAW、sidecar 文件都不得删除、移动或以另一张照片覆盖；允许补写身份 metadata，但不得改变像素或 RAW 成像数据。标准图写入须防止重名覆盖。
-- 停止目录追踪和移入回收站只改变服务器记录，不能对应磁盘删除。
+- 停止目录追踪和图库回收站只改变服务器记录。用户显式输入同名确认的“删除文件夹”是上述文件移动限制的唯一例外：由 DSM 原生回收程序处理整个目录，不永久删除，不自行移动到 `#recycle`。
 - 预览写入 `KEEPS_ROOT/previews`。维护生成的预览和缓存不能触碰原片。
 - SQLite 是唯一业务真源；数据库 WAL 保留用于事务安全，它不是业务 ledger。schema 7 从已有业务表迁移，禁止通过重放旧事件恢复已移除的目录。数据库备份保存评分、标签和关联；文件备份保存照片内容。历史 Python 工具不属于生产运行时。
 

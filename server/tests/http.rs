@@ -1830,3 +1830,85 @@ async fn imports_deduplicate_skips_existing_group_and_rechecks_before_finish() {
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
     }
 }
+
+#[tokio::test]
+async fn directory_trash_requires_exact_confirmation_and_protects_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    state
+        .jobs
+        .add_folder("photos", state.jobs.root().to_str().unwrap())
+        .unwrap();
+    let source = state.jobs.root().join("folder");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("photo.raw"), b"unchanged").unwrap();
+    let app = router(state.clone());
+    for body in [
+        json!({"path":source, "confirmationName":"folder ","requestID":uuid::Uuid::new_v4()}),
+        json!({"path":state.jobs.root(), "confirmationName":"originals","requestID":uuid::Uuid::new_v4()}),
+    ] {
+        let (status, _) = call(
+            app.clone(),
+            "POST",
+            "/libraries/photos/directories/trash",
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    assert_eq!(
+        std::fs::read(source.join("photo.raw")).unwrap(),
+        b"unchanged"
+    );
+}
+
+#[tokio::test]
+async fn directory_trash_returns_durable_task_and_status_without_running_native_program() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    state
+        .jobs
+        .add_folder("photos", state.jobs.root().to_str().unwrap())
+        .unwrap();
+    let source = state.jobs.root().join("folder");
+    std::fs::create_dir(&source).unwrap();
+    let app = router(state);
+    let id = uuid::Uuid::new_v4().to_string();
+    let route = "/libraries/photos/directories/trash";
+    let body = json!({"path":source,"confirmationName":"folder","requestID":id});
+    let (status, task) = call(app.clone(), "POST", route, body.clone()).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(task["status"], "pending");
+    assert_eq!(task["phase"], "waiting");
+    let (status, duplicate) = call(app.clone(), "POST", route, body).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(duplicate, task);
+    let (status, read) = call(app.clone(), "GET", &format!("{route}/{id}"), json!(null)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read, task);
+    let (status, _) = call(
+        app.clone(),
+        "POST",
+        route,
+        json!({"path":source,"confirmationName":"folder"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = call(
+        app.clone(),
+        "POST",
+        route,
+        json!({"path":source,"confirmationName":"folder","requestID":uuid::Uuid::new_v4()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = call(
+        app,
+        "GET",
+        &format!("{route}/{}", uuid::Uuid::new_v4()),
+        json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(source.exists());
+}

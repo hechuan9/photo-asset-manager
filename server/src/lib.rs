@@ -16,3 +16,5 @@ pub mod worker;
 pub mod remote_worker;
 
 pub mod imports;
+
+pub mod directory_trash;

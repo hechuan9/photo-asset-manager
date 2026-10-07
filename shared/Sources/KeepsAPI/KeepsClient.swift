@@ -77,6 +77,12 @@ public final class KeepsClient: Sendable {
         let response: CreatedDirectory = try await request("POST", library + ["directories"], body: JSONEncoder().encode(["parentPath": parentPath, "name": name]))
         return response.path
     }
+    public func trashDirectory(path: String, confirmationName: String, requestID: UUID) async throws -> KeepsDirectoryTrashTask {
+        try await request("POST", library + ["directories", "trash"], body: JSONEncoder().encode(["path": path, "confirmationName": confirmationName, "requestID": requestID.uuidString.lowercased()]))
+    }
+    public func directoryTrashTask(id: UUID) async throws -> KeepsDirectoryTrashTask {
+        try await request("GET", library + ["directories", "trash", id.uuidString.lowercased()])
+    }
     public func addFolder(path: String) async throws -> KeepsFolder {
         try await request("POST", library + ["folders"], body: JSONEncoder().encode(["path": path]))
     }
