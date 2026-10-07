@@ -62,14 +62,14 @@ public actor ThumbnailPrefetch {
     public func run(configuration: KeepsConfiguration, singlePass: Bool = false,
                     progress: (@Sendable (Progress) async -> Void)? = nil) async -> Bool {
         let identity = [configuration.baseURL.absoluteString, configuration.libraryID].map { "\($0.utf8.count):\($0)" }.joined()
-        let key = "thumbnail-prefetch-v2-" + SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
-        while running.contains(key) {
+        let checkpoint = "thumbnail-prefetch-v2-" + SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+        while running.contains(checkpoint) {
             do { try await Task.sleep(for: .milliseconds(250)) } catch { return false }
         }
         guard !Task.isCancelled else { return false }
-        running.insert(key)
-        defer { running.remove(key) }
-        var state = defaults.data(forKey: key).flatMap { try? JSONDecoder().decode(Checkpoint.self, from: $0) } ?? Checkpoint()
+        running.insert(checkpoint)
+        defer { running.remove(checkpoint) }
+        var state = defaults.data(forKey: checkpoint).flatMap { try? JSONDecoder().decode(Checkpoint.self, from: $0) } ?? Checkpoint()
         if state.progress.isComplete { state = Checkpoint() }
         while !Task.isCancelled {
             do {
@@ -84,7 +84,7 @@ public actor ThumbnailPrefetch {
                     query.cursor = state.cursor
                     query.trashed = state.trashed
                     let page = try await fetchPage(configuration, query)
-                    try await process(page, state: &state, key: key, configuration: configuration,
+                    try await process(page, state: &state, key: checkpoint, configuration: configuration,
                                       singlePass: singlePass, progress: progress)
                     state.pageCompleted.removeAll()
                     state.cursor = page.nextCursor
@@ -92,10 +92,10 @@ public actor ThumbnailPrefetch {
                         if state.trashed { state.progress.isComplete = true }
                         else { state.trashed = true }
                     }
-                    try save(state, key: key)
+                    try save(state, key: checkpoint)
                 } while !state.progress.isComplete
                 let result = state.progress.failed == 0 && state.progress.unavailable == 0
-                defaults.removeObject(forKey: key)
+                defaults.removeObject(forKey: checkpoint)
                 await progress?(state.progress)
                 if singlePass { return result }
                 state = Checkpoint()
