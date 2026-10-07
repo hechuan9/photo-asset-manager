@@ -17,8 +17,10 @@ struct KeepsIOSApp: App {
 }
 
 struct IOSRootView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var library: IOSLibraryStore
     @StateObject private var directories = IOSDirectoryStore()
+    @ObservedObject private var thumbnailDownload = IOSThumbnailDownload.shared
     @State private var showingSettings = false
     @State private var showingSearch = false
     @State private var collections = false
@@ -29,6 +31,10 @@ struct IOSRootView: View {
     @State private var visibleDates = ""
     @State private var changing = false
     @State private var confirmTrash = false
+    @State private var galleryReady = false
+    @State private var startupError: String?
+    @State private var preparationAttempt = 0
+    @AppStorage("galleryStyle") private var galleryStyle: KeepsGalleryStyle = .square
     @AppStorage("galleryDensity") private var density: KeepsGalleryDensity = .large
 
     private var showsGallery: Bool { !collections || !collectionPath.isEmpty }
@@ -41,13 +47,15 @@ struct IOSRootView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            if collections {
+            if library.configuration != nil && !galleryReady && !thumbnailDownload.isComplete {
+                Color.black
+            } else if collections {
                 NavigationStack(path: $collectionPath) {
                     IOSCollectionsView(configuration: library.configuration, navigation: directories)
                         .overlay(alignment: .bottom) { bottomBar }
                         .navigationTitle("精选集")
                         .toolbar {
-                            ToolbarItem(placement: .topBarTrailing) {
+                            ToolbarItemGroup(placement: .topBarTrailing) {
                                 Button("连接设置", systemImage: "gearshape") { showingSettings = true }
                             }
                         }
@@ -62,6 +70,9 @@ struct IOSRootView: View {
                 galleryPage().overlay(alignment: .bottom) { bottomBar }
             }
         }
+        .allowsHitTesting(galleryReady || library.configuration == nil)
+        .accessibilityHidden(!galleryReady && library.configuration != nil)
+        .overlay { if !galleryReady, library.configuration != nil { startupScreen } }
         .preferredColorScheme(.dark)
         .tint(.white)
         .sheet(isPresented: $showingSettings) {
@@ -80,10 +91,33 @@ struct IOSRootView: View {
         .confirmationDialog("将所选照片移入回收站？原片不会删除。", isPresented: $confirmTrash, titleVisibility: .visible) {
             Button("移入回收站", role: .destructive) { Task { await changeSelection(trash: true) } }
         }
-        .task { await library.refresh() }
-        .prefetchKeepsThumbnails(configuration: library.configuration)
+        .task(id: library.configuration) { await prepareLibrary() }
+        .onReceive(NotificationCenter.default.publisher(for: NSUbiquitousKeyValueStore.didChangeExternallyNotification)) { _ in
+            restoreCloudConnection()
+        }
+        .task(id: galleryReady && scenePhase == .active) {
+            if galleryReady, scenePhase == .active, let configuration = library.configuration {
+                await thumbnailDownload.update(configuration: configuration) { progress in try await library.synchronizeChecked(progress: progress) }
+            }
+        }
+        .onChange(of: thumbnailDownload.isComplete) { _, complete in
+            if complete && library.assets.isEmpty { galleryReady = true }
+        }
         .onChange(of: library.configuration, initial: true) { _, configuration in
-            directories.configure(configuration)
+            collections = false
+            galleryReady = false
+            startupError = nil
+            preparationAttempt += 1
+            let cloud = NSUbiquitousKeyValueStore.default
+            if let configuration {
+                cloud.set(configuration.baseURL.absoluteString, forKey: "keeps.connection.baseURL")
+                cloud.set(configuration.libraryID, forKey: "keeps.connection.libraryID")
+            }
+            cloud.synchronize()
+            if configuration == nil { Task { restoreCloudConnection() } }
+            thumbnailDownload.configurationChanged(configuration)
+            directories.configure(configuration, database: library.database)
+            directories.synchronize = { await library.synchronize() }
             collectionPath = []
             library.directory = nil
             library.showingPicked = false
@@ -91,43 +125,99 @@ struct IOSRootView: View {
             library.search = ""
             resetSelection()
         }
+        .onChange(of: library.databaseRevision) { _, _ in directories.reload() }
         .onChange(of: collectionPath) { _, _ in
             if collections { applyCollectionScope() }
         }
         .onChange(of: library.assets) { _, assets in
-            selectedIDs.formIntersection(Set(assets.map(\.id)))
             if assets.isEmpty { visibleDates = "" }
         }
     }
 
+    private func restoreCloudConnection() {
+        guard library.configuration == nil else { return }
+        let cloud = NSUbiquitousKeyValueStore.default
+        guard let baseURL = cloud.string(forKey: "keeps.connection.baseURL"),
+              let libraryID = cloud.string(forKey: "keeps.connection.libraryID") else { return }
+        UserDefaults.standard.set(baseURL, forKey: KeepsSettings.baseURLKey)
+        UserDefaults.standard.set(libraryID, forKey: KeepsSettings.libraryIDKey)
+        library.reloadConfiguration()
+    }
+
+    private func prepareLibrary() async {
+        guard let configuration = library.configuration else { return }
+        await library.waitForLocalLoad()
+        guard !Task.isCancelled else { return }
+        if let error = library.lastError { startupError = error; return }
+        await thumbnailDownload.prepare(configuration: configuration, refreshLocal: { await library.refresh() }) { progress in
+            try await library.synchronizeChecked(forceRebuild: true, progress: progress)
+        }
+        guard !Task.isCancelled, library.configuration == configuration else { return }
+        if thumbnailDownload.isComplete && library.assets.isEmpty { galleryReady = true }
+    }
+
+    private var startupScreen: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 20) {
+                Text("正在准备离线图库").font(.title2.bold())
+                IOSOfflineProgressView(download: thumbnailDownload)
+                if let progress = thumbnailDownload.progress {
+                    Text("已缓存 \(progress.cached.formatted()) / \(progress.total.formatted()) 张缩略图")
+                        .monospacedDigit()
+                    if progress.unavailable > 0 {
+                        Text("\(progress.unavailable.formatted()) 张照片的缩略图尚未生成").font(.caption)
+                    }
+                }
+                if let error = startupError ?? thumbnailDownload.error {
+                    Text(error).font(.caption).multilineTextAlignment(.center)
+                }
+                if !thumbnailDownload.isRunning {
+                    Button("继续准备 / 重试") {
+                        startupError = nil
+                        preparationAttempt += 1
+                        Task { await prepareLibrary() }
+                    }
+                }
+                Text("全部缩略图就绪后自动进入。可以切换到其他应用，中断后会复用已下载的图片。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("连接设置") { showingSettings = true }
+            }.padding(32)
+        }.accessibilityIdentifier("library-startup")
+    }
+
     private func galleryPage(route: IOSCollectionRoute? = nil) -> some View {
-        VStack(spacing: 0) {
-            if let error = library.lastError {
-                VStack {
-                    Text(error).font(.caption).lineLimit(3)
-                    Text("从底部上拉刷新").font(.caption)
-                }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)).padding(.horizontal)
-            }
+        let configuration = library.configuration
+        return VStack(spacing: 0) {
             ZStack {
                 if library.configuration == nil {
                     ContentUnavailableView("连接 NAS 图库", systemImage: "externaldrive", description: Text("在连接设置中填写服务地址和访问令牌。"))
                 } else if library.assets.isEmpty {
                     ScrollView {
                         Group {
-                            if library.isLoading && !library.hasLoadedResults { ProgressView("正在载入图库") }
-                            else { ContentUnavailableView(library.lastError == nil ? "没有照片" : "无法加载图库", systemImage: library.lastError == nil ? "photo" : "wifi.exclamationmark", description: Text("从底部上拉刷新")) }
+                            if library.isLoadingLocal { ProgressView("正在打开图库…") }
+                            else if library.isSyncing && !library.hasLoadedResults { ProgressView("正在建立本地图库…") }
+                            else { ContentUnavailableView(library.lastError == nil ? "没有照片" : "无法加载图库", systemImage: library.lastError == nil ? "photo" : "wifi.exclamationmark", description: Text("照片会自动同步")) }
                         }.frame(maxWidth: .infinity, minHeight: 300)
                     }
-                    .bottomPullRefresh(bottomInset: 90) { await library.refreshFromBottom() }
                 } else {
-                    IOSWaterfallGallery(selecting: $selecting, selectedIDs: $selectedIDs, density: $density, visibleDates: $visibleDates)
-                        .id("\(library.showingTrash)|\(library.showingPicked)|\(library.search)|\(library.directory ?? "")")
+                    IOSWaterfallGallery(selecting: $selecting, selectedIDs: $selectedIDs, density: $density, visibleDates: $visibleDates,
+                                        style: galleryStyle, preparationFinished: { error in
+                            guard library.configuration == configuration else { return }
+                            startupError = error
+                            if error == nil { galleryReady = true }
+                        })
+                        .id("\(library.configuration?.baseURL.absoluteString ?? "")|\(library.configuration?.libraryID ?? "")|\(preparationAttempt)|\(library.showingTrash)|\(library.showingPicked)|\(library.search)|\(library.directory ?? "")")
                         .allowsHitTesting(!changing)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()
             .backgroundExtensionEffect()
+            .overlay(alignment: .top) {
+                galleryStatus
+                    .allowsHitTesting(false)
+            }
             .overlay(alignment: .top) {
                 if let route, route.hasChildren, showingDirectories, !selecting {
                     IOSDirectoryBrowser(configuration: library.configuration, path: route.directory, navigation: directories)
@@ -141,6 +231,28 @@ struct IOSRootView: View {
             header(route: route).disabled(changing)
         }
         .background { Color.black.ignoresSafeArea() }
+        .overlay(alignment: .bottom) {
+            if thumbnailDownload.isRunning {
+                IOSOfflineProgressView(download: thumbnailDownload)
+                    .padding(12)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .padding()
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var galleryStatus: some View {
+        if let error = library.lastError {
+            VStack(spacing: 6) {
+                Text(error).font(.caption).lineLimit(3)
+                Text("照片会自动同步").font(.caption)
+            }
+            .padding(10)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal)
+        }
     }
 
     private func header(route: IOSCollectionRoute?) -> some View {
@@ -166,10 +278,15 @@ struct IOSRootView: View {
                             .accessibilityLabel(showingDirectories ? "收起子文件夹" : "显示子文件夹")
                     }
                     Menu {
-                        Picker("照片大小", selection: $density) {
-                            Text("大图 · 完整比例").tag(KeepsGalleryDensity.large)
-                            Text("中图 · 完整比例").tag(KeepsGalleryDensity.medium)
-                            Text("密集 · 小方块").tag(KeepsGalleryDensity.compact)
+                        Button("放大", systemImage: "plus.magnifyingglass") {
+                            density = density.pinched(magnification: 1.4)
+                        }.disabled(density == .single)
+                        Button("缩小", systemImage: "minus.magnifyingglass") {
+                            density = density.pinched(magnification: 0.7)
+                        }.disabled(density == .compact)
+                        Picker("网格布局", selection: $galleryStyle) {
+                            Text("方形网格").tag(KeepsGalleryStyle.square)
+                            Text("原始比例网格").tag(KeepsGalleryStyle.aspectRatio)
                         }
                         Divider()
                         Button("连接设置", systemImage: "gearshape") { showingSettings = true }
@@ -263,7 +380,7 @@ struct IOSRootView: View {
                 if trash { asset = try await client.trashAsset(id: id) }
                 else if library.showingTrash { asset = try await client.restoreAsset(id: id) }
                 else { asset = try await client.updateAsset(id: id, patch: KeepsAssetPatch(flagState: "picked")) }
-                library.update(asset); selectedIDs.remove(id)
+                await library.update(asset); selectedIDs.remove(id)
             }
             resetSelection()
         } catch { library.lastError = String(reflecting: error) }
@@ -292,6 +409,7 @@ struct IOSSearchSheet: View {
 }
 
 struct IOSSettingsView: View {
+    @ObservedObject private var download = IOSThumbnailDownload.shared
     @Environment(\.dismiss) private var dismiss
     @State private var baseURL: String
     @State private var libraryID: String
@@ -309,13 +427,21 @@ struct IOSSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("离线图库进度") {
+                    IOSOfflineProgressView(download: download)
+                }
+                Section("iCloud 副本") {
+                    Text(download.cloudStatus).font(.subheadline)
+                    Text("仅保存 Keeps 数据库快照和缩略图，不会加入系统照片库。同一 iCloud 账户重装后恢复图库连接和已保存的副本；访问令牌仍只保留在本机钥匙串。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Section("NAS 服务") {
                     TextField("服务地址", text: $baseURL).keyboardType(.URL)
                     TextField("图库 ID", text: $libraryID)
                     SecureField("访问令牌", text: $token)
                 }.textInputAutocapitalization(.never).autocorrectionDisabled().disabled(isChecking)
                 Section {
-                    Text("照片、评分、标签和回收站状态由 NAS 保存。此设备仅保存连接设置和可清理的图片缓存。")
+                    Text("照片、评分、标签和回收站状态由 NAS 保存。此设备保存可离线浏览的图库副本与图片缓存，联网时从 NAS 同步更新。")
                     Text("移入回收站只隐藏图库记录，原片保持不变。")
                     Text("使用 HTTPS 服务地址时，Wi-Fi 和蜂窝网络均可连接。使用局域网地址时，请允许本地网络访问并连接 NAS 所在网络。")
                 }
@@ -362,7 +488,9 @@ struct IOSSettingsView: View {
 }
 
 
+@MainActor
 final class ThumbnailBackgroundDelegate: NSObject, UIApplicationDelegate {
+    static var activeWork: Task<Void, Never>?
     private static let identifier = "local.keeps.thumbnail-prefetch"
     private static let logger = Logger(subsystem: "local.keeps", category: "thumbnail-background")
 
@@ -371,18 +499,30 @@ final class ThumbnailBackgroundDelegate: NSObject, UIApplicationDelegate {
         let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.identifier, using: .main) { task in
             let work = Task { @MainActor in
                 Self.schedule()
+                guard !IOSThumbnailDownload.shared.isRunning else {
+                    task.setTaskCompleted(success: true)
+                    return
+                }
                 do {
                     guard let configuration = try KeepsSettings.load() else {
                         task.setTaskCompleted(success: true)
                         return
                     }
-                    let completed = await ThumbnailPrefetch.shared.run(configuration: configuration, singlePass: true)
+                    Self.logger.info("Background thumbnail task started")
+                    let library = IOSLibraryStore(configuration: configuration, loadSettings: false)
+                    try await library.synchronizeChecked()
+                    guard !Task.isCancelled else { task.setTaskCompleted(success: false); return }
+                    let completed = await ThumbnailPrefetch.shared.runLocal(configuration: configuration, downloadMissing: true)
+                    try Task.checkCancellation()
+                    try await KeepsCloudReplica.shared.backup(configuration: configuration)
+                    Self.logger.info("Background thumbnail task finished: success=\(completed), cancelled=\(Task.isCancelled)")
                     task.setTaskCompleted(success: completed && !Task.isCancelled)
                 } catch {
                     Self.logger.error("Background thumbnails failed: \(String(reflecting: error), privacy: .public)")
                     task.setTaskCompleted(success: false)
                 }
             }
+            Self.activeWork = work
             task.expirationHandler = { work.cancel() }
         }
         if !registered { Self.logger.error("Background thumbnail task registration failed") }
@@ -390,10 +530,30 @@ final class ThumbnailBackgroundDelegate: NSObject, UIApplicationDelegate {
     }
 
     static func schedule() {
-        let request = BGProcessingTaskRequest(identifier: identifier)
-        request.requiresNetworkConnectivity = true
-        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
-        do { try BGTaskScheduler.shared.submit(request) }
-        catch { logger.error("Background thumbnail scheduling failed: \(String(reflecting: error), privacy: .public)") }
+        Task { @MainActor in
+            let pending = await BGTaskScheduler.shared.pendingTaskRequests()
+            guard !pending.contains(where: { $0.identifier == identifier }) else { return }
+            let request = BGProcessingTaskRequest(identifier: identifier)
+            request.requiresNetworkConnectivity = true
+            request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+            do { try BGTaskScheduler.shared.submit(request) }
+            catch { logger.error("Background thumbnail scheduling failed: \(String(reflecting: error), privacy: .public)") }
+        }
+    }
+}
+
+private struct IOSOfflineProgressView: View {
+    @ObservedObject var download: IOSThumbnailDownload
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(download.status)
+                Spacer()
+                Text("\(download.systemProgress.percentage)%").monospacedDigit()
+            }.font(.caption)
+            ProgressView(value: download.systemProgress.fractionCompleted)
+        }
+        .accessibilityElement(children: .combine)
     }
 }

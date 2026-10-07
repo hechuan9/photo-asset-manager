@@ -217,15 +217,25 @@ fn claim_sync(s: &AppState, lib: &str, body: Value, enabled: Option<&str>) -> Re
         s.previews.free_bytes()? > 2 * 1024 * 1024 * 1024,
         "cache disk low"
     );
-    let Some((id, asset, hash)) = claim_pending(&s.store, lib, worker)? else {
-        return Ok(json!({"task":null}));
+    let mut deferred_count = 0;
+    let (id, asset, hash) = loop {
+        if deferred_count >= crate::cache_pipeline::BATCH {
+            return Ok(json!({"task":null}));
+        }
+        let Some(candidate) = claim_pending(&s.store, lib, worker)? else {
+            return Ok(json!({"task":null}));
+        };
+        if !s.store.defer_cache_for_scan(&s.jobs, lib, &candidate.1)? {
+            break candidate;
+        }
+        deferred_count += 1;
     };
     let prepared = (|| -> Result<Option<Task>> {
         let selected = s.store.default_version(lib, &asset)?;
         let selected = match selected {
             Some(v) => v,
             None => s.store.lock()?.query_row(
-                "SELECT content_hash,path FROM catalog_paths WHERE library_id=? AND asset_id=? AND content_hash=? ORDER BY path LIMIT 1",
+                "SELECT content_hash,path FROM catalog_paths p WHERE library_id=? AND asset_id=? AND content_hash=? AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path) ORDER BY path LIMIT 1",
                 params![lib,asset,hash], |r| Ok(crate::versions::DefaultVersion { content_hash:r.get(0)?, path:r.get(1)? })
             ).optional()?.context("no indexed source path")?,
         };
@@ -442,6 +452,12 @@ fn complete_sync(s: &AppState, lib: &str, id: &str) -> Result<Value> {
         "UPDATE remote_cache_tasks SET expires_at=unixepoch()+? WHERE id=? AND completed=0",
         params![LEASE, id],
     )?;
+    ensure!(
+        s.jobs.folders()?.iter().any(|folder| folder.active
+            && folder.library_id == lib
+            && t.path.starts_with(&folder.path)),
+        "source directory is no longer tracked"
+    );
     validate(s, &t)?;
     let root = scratch(s, &t)?;
     let thumb = root.join("thumbnail.heic");
@@ -605,6 +621,38 @@ mod tests {
             .lock()?
             .execute("UPDATE catalog_assets SET trashed=1", [])?;
         assert!(claim_pending(&store, "lib", "worker")?.is_none());
+        Ok(())
+    }
+    #[test]
+    fn sibling_scan_revokes_remote_lease_before_encoding_existing_source() -> Result<()> {
+        let (root, store) = pending_setup()?;
+        let originals = root.path().join("photos");
+        fs::create_dir_all(&originals)?;
+        let source = originals.join("photo.3fr");
+        fs::write(&source, b"original")?;
+        let jobs = crate::jobs::Jobs::open(&root.path().join("jobs.sqlite"), &originals)?;
+        let folder = jobs.add_folder("lib", ".")?;
+        let originals = jobs.root().to_path_buf();
+        let source = originals.join("photo.3fr");
+        jobs.enqueue_file_change(&folder.id, &originals.join("photo.heic"), 0)?;
+        store.lock()?.execute(
+            "INSERT INTO catalog_paths VALUES('lib',?,'asset','hash','raw_original')",
+            [source.to_str().unwrap()],
+        )?;
+        let (_, asset, _) = claim_pending(&store, "lib", "worker")?.unwrap();
+        assert!(store.defer_cache_for_scan(&jobs, "lib", &asset)?);
+        let remaining: i64 = store.lock()?.query_row(
+            "SELECT count(*) FROM remote_cache_tasks WHERE completed=0",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(remaining, 0);
+        let attempts: i64 = store.lock()?.query_row(
+            "SELECT attempts FROM media_cache WHERE asset_id='asset'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(attempts, 0);
         Ok(())
     }
     #[test]

@@ -5,7 +5,10 @@
 	<key>UIBackgroundModes</key>
 	<array><string>processing</string></array>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
-	<array><string>local.keeps.thumbnail-prefetch</string></array>
+	<array>
+        <string>local.keeps.thumbnail-prefetch</string>
+        <string>com.hechuan.Keeps.thumbnail-download</string>
+    </array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSAppTransportSecurity</key>

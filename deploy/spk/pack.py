@@ -45,6 +45,8 @@ def pack(payload, output):
     with tarfile.open(output, "w") as archive:
         for source in sorted(TEMPLATE.rglob("*")):
             relative = source.relative_to(TEMPLATE)
+            if "__pycache__" in relative.parts or source.suffix == ".pyc":
+                continue
             if source.is_file() and relative.parts[0] != "bin":
                 add_file(archive, source, str(relative), relative.parts[0] == "scripts")
         info = tarfile.TarInfo("package.tgz")

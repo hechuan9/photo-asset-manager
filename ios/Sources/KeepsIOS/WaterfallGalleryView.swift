@@ -7,76 +7,16 @@ struct IOSWaterfallGallery: View {
     @Binding var selectedIDs: Set<UUID>
     @Binding var density: KeepsGalleryDensity
     @Binding var visibleDates: String
+    var style: KeepsGalleryStyle
+    var preparationFinished: (String?) -> Void
     @State private var selected: KeepsAsset?
     @State private var information: KeepsAsset?
-    @State private var olderVisible = false
-    @State private var hasScrolled = false
-    @State private var loadingOlder = false
-    @State private var focusedAssetID: UUID?
-    @State private var scrollRowID: UUID?
-    @State private var layout = KeepsPhotoGrid.Snapshot()
 
     var body: some View {
-        GeometryReader { geometry in
-            let rows = layout.rows
-            let assetsByID = Dictionary(uniqueKeysWithValues: library.assets.map { ($0.id, $0) })
-            ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 1) {
-                    if library.canLoadMore {
-                        Button("载入更早的照片") { loadOlder() }
-                            .frame(maxWidth: .infinity).padding().disabled(library.isLoading || loadingOlder)
-                            .onScrollVisibilityChange(threshold: 0.01) { visible in
-                                olderVisible = visible
-                                if visible { loadOlderIfNeeded() }
-                            }
-                    }
-                    ForEach(Array(rows.reversed())) { row in
-                        IOSPhotoGridRow(
-                            row: row, assetsByID: assetsByID,
-                            width: geometry.size.width,
-                            selecting: $selecting, selectedIDs: $selectedIDs, compact: density == .compact,
-                            open: open, showInformation: { information = $0 }
-                        ).id(row.id)
-                    }
-                }.scrollTargetLayout()
-            }
-            .contentMargins(.bottom, 0, for: .scrollContent)
-            .scrollPosition(id: $scrollRowID)
-            .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .defaultScrollAnchor(.top, for: .alignment)
-            .bottomPullRefresh(bottomInset: 90) { await library.refreshFromBottom() }
-            .simultaneousGesture(MagnifyGesture().onEnded { value in
-                let next = density.pinched(magnification: value.magnification)
-                if next != density { density = next }
-            })
-            .onAppear { updateLayout(width: geometry.size.width, reset: true) }
-            .onChange(of: geometry.size.width) { _, width in updateLayout(width: width, reset: true) }
-            .onChange(of: library.layoutRevision) { _, _ in
-                updateLayout(width: geometry.size.width, reset: true)
-            }
-            .onChange(of: density) { _, _ in
-                updateLayout(width: geometry.size.width, reset: true)
-                if let focusedAssetID, let row = layout.rows.first(where: { $0.slots.contains { $0.id == focusedAssetID } }) {
-                    proxy.scrollTo(row.id, anchor: .center)
-                }
-            }
-            .onChange(of: library.assets) { _, _ in updateLayout(width: geometry.size.width) }
-            .onScrollPhaseChange { _, phase in
-                if phase == .interacting { hasScrolled = true; loadOlderIfNeeded() }
-            }
-            .onScrollTargetVisibilityChange(idType: UUID.self, threshold: 0.2) { ids in
-                let visible = Set(ids)
-                let visibleAssets = rows.filter { visible.contains($0.id) }
-                    .flatMap { row in row.slots.compactMap { assetsByID[$0.id] } }
-                if !visibleAssets.isEmpty { focusedAssetID = visibleAssets[visibleAssets.count / 2].id }
-                let dates = visibleAssets.map { String(($0.captureTime ?? $0.createdAt).prefix(10)) }.sorted()
-                if let first = dates.first, let last = dates.last {
-                    visibleDates = first == last ? first : "\(first) – \(last)"
-                }
-            }
-            }
-        }
+        IOSPhotoCollectionView(library: library, selecting: $selecting, selectedIDs: $selectedIDs,
+                               density: $density, visibleDates: $visibleDates,
+                               style: style, preparationFinished: preparationFinished,
+                               open: { selected = $0 }, information: { information = $0 })
         .fullScreenCover(item: $selected) { asset in IOSPhotoViewer(initialAsset: asset).environmentObject(library) }
         .sheet(item: $information) { asset in
             NavigationStack {
@@ -84,91 +24,6 @@ struct IOSWaterfallGallery: View {
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { information = nil } } }
             }.environmentObject(library)
         }
-    }
-
-    private func updateLayout(width: CGFloat, reset: Bool = false) {
-        let previousRows = layout.rows
-        layout.update(ids: library.assets.map(\.id),
-                      aspectRatios: library.assets.map { JustifiedAssetGridLayout.aspectRatio($0.gridPreview) },
-                      width: width, density: density, reset: reset)
-        guard !reset, let scrollRowID, !layout.rows.contains(where: { $0.id == scrollRowID }),
-              let index = previousRows.firstIndex(where: { $0.id == scrollRowID }) else { return }
-        let surviving = Set(layout.rows.map(\.id))
-        self.scrollRowID = previousRows[index...].first(where: { surviving.contains($0.id) })?.id
-            ?? previousRows[..<index].last(where: { surviving.contains($0.id) })?.id
-    }
-
-    private func open(_ asset: KeepsAsset) {
-        if selecting {
-            if !selectedIDs.insert(asset.id).inserted { selectedIDs.remove(asset.id) }
-        } else { selected = asset }
-    }
-
-    private func loadOlderIfNeeded() {
-        guard hasScrolled, olderVisible, library.lastError == nil else { return }
-        loadOlder()
-    }
-
-    private func loadOlder() {
-        guard !loadingOlder, !library.isLoading, library.canLoadMore else { return }
-        loadingOlder = true
-        Task {
-            defer { loadingOlder = false }
-            await library.loadMore()
-        }
-    }
-}
-
-private struct IOSPhotoGridRow: View {
-    @EnvironmentObject private var library: IOSLibraryStore
-    let row: KeepsPhotoGrid.Snapshot.StableRow
-    let assetsByID: [UUID: KeepsAsset]
-    let width: CGFloat
-    @Binding var selecting: Bool
-    @Binding var selectedIDs: Set<UUID>
-    let compact: Bool
-    let open: (KeepsAsset) -> Void
-    let showInformation: (KeepsAsset) -> Void
-    @State private var visible = false
-
-    var body: some View {
-        // 行的占位尺寸始终确定，图片仅在可见时解码，避免长图库持有所有预览。
-        Color.clear.frame(width: width, height: row.height)
-            .overlay(alignment: .leading) {
-                if visible {
-                    HStack(spacing: 1) {
-                        ForEach(Array(row.slots.reversed())) { slot in
-                            if let asset = assetsByID[slot.id] {
-                            Button { open(asset) } label: {
-                                IOSPreviewImage(asset: asset, configuration: library.configuration, contentMode: compact ? .fill : .fit)
-                                    .frame(width: slot.size.width, height: slot.size.height)
-                                    .overlay(alignment: .bottomTrailing) {
-                                        if selecting {
-                                            Image(systemName: selectedIDs.contains(asset.id) ? "checkmark.circle.fill" : "circle")
-                                                .font(compact ? .caption : .title3)
-                                                .foregroundStyle(selectedIDs.contains(asset.id) ? .cyan : .white)
-                                                .shadow(radius: 2).padding(3)
-                                        } else if asset.flagState == "picked" {
-                                            Image(systemName: "heart.fill").font(compact ? .caption2 : .body)
-                                                .foregroundStyle(.white).shadow(radius: 2).padding(3)
-                                        }
-                                    }
-                            }.buttonStyle(.plain).accessibilityLabel(asset.originalFilename)
-                                .accessibilityAddTraits(selectedIDs.contains(asset.id) ? .isSelected : [])
-                                .contextMenu {
-                                    Button("查看照片", systemImage: "photo") { open(asset) }
-                                    Button("选择", systemImage: "checkmark.circle") { selecting = true; selectedIDs.insert(asset.id) }
-                                    Button("信息与整理", systemImage: "info.circle") { showInformation(asset) }
-                                }
-                            } else {
-                                Color.clear.frame(width: slot.size.width, height: slot.size.height)
-                                    .accessibilityHidden(true)
-                            }
-                        }
-                    }
-                }
-            }
-            .onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
     }
 }
 
@@ -186,6 +41,7 @@ struct IOSPhotoViewer: View {
     @State private var selection: UUID
     @State private var photos: [KeepsAsset] = []
     @State private var controlsVisible = true
+    @State private var restoringSelection = false
     @State private var information: KeepsAsset?
     let initialAsset: KeepsAsset
 
@@ -250,11 +106,24 @@ struct IOSPhotoViewer: View {
         .statusBarHidden(!controlsVisible)
         .onAppear { photos = library.assets.isEmpty ? [initialAsset] : library.chronologicalAssets }
         .onChange(of: library.assets) { _, updated in
-            photos = updated.reversed()
-            if !photos.contains(where: { $0.id == selection }) { dismiss() }
+            if updated.contains(where: { $0.id == selection }) {
+                photos = updated.reversed()
+            } else if !restoringSelection {
+                let retained = current
+                restoringSelection = true
+                Task {
+                    let found = await library.restoreWindow(around: retained)
+                    restoringSelection = false
+                    if !found && selection == retained.id { dismiss() }
+                }
+            }
         }
         .task(id: selection) {
-            if photos.prefix(3).contains(where: { $0.id == selection }), library.canLoadMore { await library.loadMore() }
+            if photos.prefix(3).contains(where: { $0.id == selection }), library.canLoadMore {
+                await library.loadMore()
+            } else if photos.suffix(3).contains(where: { $0.id == selection }), library.canLoadNewer {
+                await library.loadNewer()
+            }
         }
         .sheet(item: $information) { asset in
             NavigationStack {
@@ -299,7 +168,7 @@ struct IOSAssetDetail: View {
                     KeepsAssetVersionsView(assetID: asset.id, revision: asset.updatedAt, configuration: configuration) { updated in
                         guard library.configuration == configuration else { return }
                         asset = updated
-                        library.update(updated)
+                        Task { await library.update(updated) }
                     }.id(asset.id.uuidString + configuration.baseURL.absoluteString + configuration.libraryID)
                 }
             }
@@ -349,7 +218,7 @@ struct IOSAssetDetail: View {
         let tagList = tags.replacingOccurrences(of: "，", with: ",").split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         do {
             asset = try await KeepsClient(configuration: configuration).updateAsset(id: asset.id, patch: KeepsAssetPatch(rating: rating, flagState: flag, colorLabel: color.isEmpty ? nil : color, clearColorLabel: color.isEmpty, tags: tagList))
-            library.update(asset); applyFields(); saved = true
+            await library.update(asset); applyFields(); saved = true
         } catch { self.error = String(reflecting: error) }
     }
     private func toggleTrash() async {
@@ -359,7 +228,7 @@ struct IOSAssetDetail: View {
         do {
             let client = KeepsClient(configuration: configuration)
             asset = try await (asset.trashed ? client.restoreAsset(id: asset.id) : client.trashAsset(id: asset.id))
-            library.update(asset); onRemoved(asset.id); dismiss()
+            await library.update(asset); onRemoved(asset.id); dismiss()
         } catch { self.error = String(reflecting: error) }
     }
 }

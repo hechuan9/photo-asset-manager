@@ -1,0 +1,1081 @@
+//! Immutable offline exports: a point-in-time client catalog and its available small images.
+use crate::{
+    api::{ApiError, AppState},
+    store::StoreError,
+};
+use anyhow::{Context, Result, ensure};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use rusqlite::{Connection, OpenFlags, params};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::{Read, Write},
+    path::{Path as FsPath, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use uuid::Uuid;
+
+const RETENTION_SECONDS: i64 = 48 * 60 * 60;
+const CLIENT_SCHEMA: &str = "CREATE TABLE assets(id TEXT PRIMARY KEY,snapshot TEXT NOT NULL,sort_time TEXT NOT NULL,filename TEXT NOT NULL,camera TEXT NOT NULL,rating INTEGER NOT NULL,flag TEXT NOT NULL,color TEXT,trashed INTEGER NOT NULL);
+CREATE INDEX assets_sort ON assets(trashed,sort_time DESC,id);
+CREATE TABLE paths(asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,path TEXT NOT NULL,PRIMARY KEY(asset_id,path));
+CREATE INDEX paths_path ON paths(path,asset_id);
+CREATE TABLE seen(id TEXT PRIMARY KEY); CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE hidden(path TEXT PRIMARY KEY); CREATE TABLE navigation(path TEXT PRIMARY KEY,snapshot TEXT NOT NULL);";
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct Status {
+    id: String,
+    state: String,
+    phase: String,
+    completed: i64,
+    total: i64,
+    revision: Option<i64>,
+    byte_count: Option<i64>,
+    sha256: Option<String>,
+    error: Option<String>,
+    #[serde(default)]
+    created_at: i64,
+    #[serde(default = "yes")]
+    include_thumbnails: bool,
+    #[serde(skip)]
+    last_progress_save: Option<Instant>,
+}
+fn yes() -> bool {
+    true
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildRequest {
+    #[serde(default = "yes")]
+    include_thumbnails: bool,
+}
+struct Manager {
+    app: Arc<AppState>,
+    root: PathBuf,
+    initialized: Mutex<bool>,
+}
+
+pub fn router(app: Arc<AppState>) -> Router<Arc<AppState>> {
+    let manager = Arc::new(Manager {
+        root: app
+            .previews
+            .keeps_root()
+            .join("tmp/offline-rebuild")
+            .join(format!("{:x}", Sha256::digest(app.library_id.as_bytes()))),
+        app,
+        initialized: Mutex::new(false),
+    });
+    Router::new()
+        .route("/libraries/{library}/offline-rebuild", post(start))
+        .route("/libraries/{library}/offline-rebuild/{id}", get(status))
+        .route(
+            "/libraries/{library}/offline-rebuild/{id}/download",
+            get(download),
+        )
+        .with_state(manager)
+}
+fn missing() -> anyhow::Error {
+    StoreError {
+        status: 404,
+        code: "offline_rebuild_not_found".into(),
+        message: "offline rebuild not found".into(),
+    }
+    .into()
+}
+impl Manager {
+    fn directory(&self, id: &str) -> Result<PathBuf> {
+        let id = Uuid::parse_str(id).map_err(|_| missing())?;
+        Ok(self.root.join(id.to_string()))
+    }
+    fn save(&self, status: &Status) -> Result<()> {
+        let dir = self.directory(&status.id)?;
+        fs::create_dir_all(&dir)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(&dir)?;
+        serde_json::to_writer(&mut temporary, status)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(dir.join("status.json"))?;
+        Ok(())
+    }
+    fn load(&self, id: &str) -> Result<Status> {
+        let path = self.directory(id)?.join("status.json");
+        if !path.is_file() {
+            return Err(missing());
+        }
+        Ok(serde_json::from_reader(fs::File::open(path)?)?)
+    }
+    fn initialize(&self, initialized: &mut bool) -> Result<()> {
+        if *initialized {
+            return Ok(());
+        }
+        fs::create_dir_all(&self.root)?;
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if Uuid::parse_str(&name).is_err() {
+                continue;
+            }
+            if !entry.path().join("status.json").is_file() {
+                fs::remove_dir_all(entry.path()).context("remove unpublished offline export")?;
+                continue;
+            }
+            let mut status = self.load(&name)?;
+            if status.state == "building" {
+                status.state = "failed".into();
+                status.error = Some(
+                    "Server restarted before offline rebuild completed; request a new rebuild"
+                        .into(),
+                );
+                self.save(&status)?;
+            }
+        }
+        *initialized = true;
+        Ok(())
+    }
+    fn begin(self: &Arc<Self>, include_thumbnails: bool) -> Result<Status> {
+        let mut initialized = self
+            .initialized
+            .lock()
+            .map_err(|_| anyhow::anyhow!("offline rebuild mutex poisoned"))?;
+        self.initialize(&mut initialized)?;
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if Uuid::parse_str(&name).is_err() {
+                continue;
+            }
+            let status = self.load(&name)?;
+            if status.state == "building" {
+                if status.include_thumbnails == include_thumbnails {
+                    return Ok(status);
+                }
+                continue;
+            }
+            if chrono::Utc::now().timestamp() - status.created_at > RETENTION_SECONDS {
+                fs::remove_dir_all(entry.path()).context("remove expired offline export")?;
+            }
+        }
+        let status = Status {
+            id: Uuid::new_v4().to_string(),
+            state: "building".into(),
+            phase: "snapshot".into(),
+            completed: 0,
+            total: 1,
+            revision: None,
+            byte_count: None,
+            sha256: None,
+            error: None,
+            created_at: chrono::Utc::now().timestamp(),
+            include_thumbnails,
+            last_progress_save: None,
+        };
+        self.save(&status)?;
+        let manager = self.clone();
+        let mut work = status.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = manager.build(&mut work) {
+                tracing::error!(error=?error, id=%work.id,"offline rebuild failed");
+                work.state = "failed".into();
+                work.error = Some(format!("{error:#}"));
+                if let Err(error) = manager.save(&work) {
+                    tracing::error!(error=?error,"persist failed offline rebuild");
+                }
+            }
+        });
+        Ok(status)
+    }
+    fn read_status(&self, id: &str) -> Result<Status> {
+        let mut initialized = self
+            .initialized
+            .lock()
+            .map_err(|_| anyhow::anyhow!("offline rebuild mutex poisoned"))?;
+        self.initialize(&mut initialized)?;
+        self.load(id)
+    }
+    fn progress(&self, status: &mut Status, phase: &str, completed: i64, total: i64) -> Result<()> {
+        let phase_changed = status.phase != phase;
+        status.phase = phase.into();
+        status.completed = completed;
+        status.total = total;
+        if phase_changed
+            || completed >= total
+            || status
+                .last_progress_save
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
+        {
+            self.save(status)?;
+            status.last_progress_save = Some(Instant::now());
+        }
+        Ok(())
+    }
+    fn build(&self, status: &mut Status) -> Result<()> {
+        let dir = self.directory(&status.id)?;
+        let work = tempfile::tempdir_in(&dir)?;
+        let source_path = {
+            let db = self.app.store.lock()?;
+            PathBuf::from(db.path().context("catalog must be a file")?)
+        };
+        let source = Connection::open_with_flags(source_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        source.busy_timeout(Duration::from_secs(30))?;
+        let revision = pin_read_snapshot(&source, &self.app.library_id)?;
+        let mut frozen = Connection::open(work.path().join("source.sqlite"))?;
+        {
+            let backup = rusqlite::backup::Backup::new(&source, &mut frozen)?;
+            loop {
+                let step = backup.step(2048)?;
+                let progress = backup.progress();
+                self.progress(
+                    status,
+                    "snapshot",
+                    i64::from(progress.pagecount - progress.remaining),
+                    i64::from(progress.pagecount),
+                )?;
+                match step {
+                    rusqlite::backup::StepResult::Done => break,
+                    rusqlite::backup::StepResult::More => (),
+                    _ => anyhow::bail!("snapshot backup could not continue: {step:?}"),
+                }
+            }
+        }
+        source.execute_batch("ROLLBACK")?;
+        drop(source);
+        let lib = &self.app.library_id;
+        status.revision = Some(revision);
+        let total:i64=frozen.query_row("SELECT count(*) FROM catalog_assets a WHERE library_id=? AND EXISTS(SELECT 1 FROM catalog_paths p WHERE p.library_id=a.library_id AND p.asset_id=a.id)",[lib],|r|r.get(0))?;
+        self.progress(status, "catalog", 0, total)?;
+        let mut target = Connection::open(work.path().join("catalog.sqlite"))?;
+        target.execute_batch(CLIENT_SCHEMA)?;
+        let thumbnails = self.catalog(&frozen, &mut target, status)?;
+        let manifest = json!({"formatVersion":1,"libraryID":lib,"revision":revision,"assetCount":total,"thumbnailCount":thumbnails.len(),"missingThumbnailCount":total-thumbnails.len() as i64});
+        drop(target);
+        drop(frozen);
+        let archive_total = fs::metadata(work.path().join("catalog.sqlite"))?.len()
+            + thumbnails
+                .iter()
+                .map(|(_, path)| fs::metadata(path).map(|meta| meta.len()))
+                .collect::<std::io::Result<Vec<_>>>()?
+                .iter()
+                .sum::<u64>();
+        self.progress(status, "archive", 0, archive_total as i64)?;
+        let archive = fs::File::create(work.path().join("library.tar"))?;
+        let mut tar = tar::Builder::new(archive);
+        let bytes = serde_json::to_vec(&manifest)?;
+        append_bytes(&mut tar, "manifest.json", &bytes)?;
+        let mut packed = 0;
+        let mut last_report = 0;
+        let mut report = |count: usize| -> std::io::Result<()> {
+            packed += count as u64;
+            if packed - last_report >= 8 * 1024 * 1024 || packed == archive_total {
+                self.progress(status, "archive", packed as i64, archive_total as i64)
+                    .map_err(std::io::Error::other)?;
+                last_report = packed;
+            }
+            Ok(())
+        };
+        append_file(
+            &mut tar,
+            "catalog.sqlite",
+            &work.path().join("catalog.sqlite"),
+            &mut report,
+        )?;
+        for (id, path) in &thumbnails {
+            append_file(
+                &mut tar,
+                &format!("thumbnails/{id}.image"),
+                path,
+                &mut report,
+            )?;
+        }
+        let archive = tar.into_inner()?;
+        archive.sync_all()?;
+        let mut file = fs::File::open(work.path().join("library.tar"))?;
+        let length = file.metadata()?.len();
+        let mut hash = Sha256::new();
+        let mut buffer = vec![0; 1024 * 1024];
+        self.progress(status, "verifying", 0, length as i64)?;
+        let mut read = 0;
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+            read += count;
+            if read % (32 * 1024 * 1024) < count {
+                self.progress(status, "verifying", read as i64, length as i64)?;
+            }
+        }
+        status.sha256 = Some(format!("{:x}", hash.finalize()));
+        status.byte_count = Some(length as i64);
+        fs::rename(work.path().join("library.tar"), dir.join("library.tar"))?;
+        status.state = "ready".into();
+        self.progress(status, "ready", length as i64, length as i64)?;
+        Ok(())
+    }
+    fn catalog(
+        &self,
+        source: &Connection,
+        target: &mut Connection,
+        status: &mut Status,
+    ) -> Result<Vec<(String, PathBuf)>> {
+        let lib = &self.app.library_id;
+        let tx = target.transaction()?;
+        let mut paths = BTreeMap::<String, Vec<String>>::new();
+        let mut statement = source.prepare(
+            "SELECT asset_id,path FROM catalog_paths WHERE library_id=? ORDER BY asset_id,path",
+        )?;
+        for row in statement.query_map([lib], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })? {
+            let (id, path) = row?;
+            paths.entry(id).or_default().push(path);
+        }
+        let mut thumbnails = Vec::new();
+        let mut statement=source.prepare("SELECT a.id,a.snapshot,c.thumbnail,c.standard FROM catalog_assets a LEFT JOIN catalog_defaults d ON d.library_id=a.library_id AND d.asset_id=a.id LEFT JOIN media_cache c ON c.library_id=a.library_id AND c.asset_id=a.id AND c.status='ready' AND c.source_hash=coalesce(d.content_hash,a.content_hash) AND c.spec=?2 WHERE a.library_id=?1 AND EXISTS(SELECT 1 FROM catalog_paths p WHERE p.library_id=a.library_id AND p.asset_id=a.id) ORDER BY a.id")?;
+        let rows = statement.query_map(params![lib, crate::cache_pipeline::spec()?], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        for (index, row) in rows.enumerate() {
+            let (id, snapshot, thumbnail, standard) = row?;
+            let mut asset: Value = serde_json::from_str(&snapshot)?;
+            let upper = Uuid::parse_str(&id)?.to_string().to_uppercase();
+            let asset_paths = paths.remove(&id).unwrap_or_default();
+            asset["id"] = json!(upper);
+            asset["paths"] = json!(asset_paths);
+            asset["preview"] = Value::Null;
+            asset["thumbnail"] = Value::Null;
+            asset["standard"] = Value::Null;
+            if let Some(thumbnail) = thumbnail {
+                let thumbnail: Value = serde_json::from_str(&thumbnail)?;
+                let path = self.app.previews.object_path(&thumbnail["objectRef"])?;
+                if !status.include_thumbnails || path.is_file() {
+                    asset["thumbnail"] = json!({"downloadURL":self.app.previews.download_url(&thumbnail["objectRef"])?,"width":thumbnail["width"],"height":thumbnail["height"],"version":thumbnail["version"]});
+                    if status.include_thumbnails {
+                        thumbnails.push((upper.clone(), path));
+                    }
+                }
+            }
+            if let Some(standard) = standard {
+                asset["standard"] = crate::api::standard_descriptor(
+                    &self.app,
+                    lib,
+                    &id,
+                    &serde_json::from_str(&standard)?,
+                )?;
+            }
+            tx.prepare_cached("INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?)")?
+                .execute(params![
+                    upper,
+                    serde_json::to_string(&asset)?,
+                    asset["captureTime"]
+                        .as_str()
+                        .or(asset["createdAt"].as_str())
+                        .unwrap_or(""),
+                    asset["originalFilename"].as_str().unwrap_or(""),
+                    asset["cameraModel"].as_str().unwrap_or(""),
+                    asset["rating"].as_i64().unwrap_or(0),
+                    asset["flagState"].as_str().unwrap_or("unflagged"),
+                    asset["colorLabel"].as_str(),
+                    asset["trashed"].as_bool().unwrap_or(false)
+                ])?;
+            for path in asset_paths {
+                tx.prepare_cached("INSERT INTO paths VALUES(?,?)")?
+                    .execute(params![upper, path])?;
+            }
+            if index % 100 == 0 {
+                self.progress(status, "catalog", index as i64 + 1, status.total)?;
+            }
+        }
+        let mut statement =
+            source.prepare("SELECT path FROM catalog_hidden_directories WHERE library_id=?")?;
+        for path in statement.query_map([lib], |r| r.get::<_, String>(0))? {
+            tx.execute("INSERT INTO hidden VALUES(?)", [path?])?;
+        }
+        self.progress(status, "navigation", 0, 1)?;
+        let mut pending = vec![None];
+        let mut visited = BTreeSet::new();
+        let mut completed = 0;
+        while let Some(path) = pending.pop() {
+            if !visited.insert(path.clone()) {
+                continue;
+            }
+            let mut navigation = crate::navigation::navigation(
+                &self.app.jobs,
+                lib,
+                path.as_deref(),
+                &self.app.original_root_names,
+            )?;
+            for child in navigation["directories"]
+                .as_array_mut()
+                .context("navigation directories")?
+            {
+                let path = child["path"].as_str().context("directory path")?.to_owned();
+                let root = path.trim_end_matches('/');
+                let count:i64=source.query_row("SELECT count(DISTINCT p.asset_id) FROM catalog_paths p JOIN catalog_assets a ON a.library_id=p.library_id AND a.id=p.asset_id WHERE p.library_id=?1 AND p.path>=?2 AND p.path<?3 AND a.trashed=0",params![lib,format!("{root}/"),format!("{root}0")],|r|r.get(0))?;
+                child["photoCount"] = json!(count);
+                if child["hasChildren"].as_bool() == Some(true) {
+                    pending.push(Some(path));
+                } else {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO navigation VALUES(?,?)",
+                        params![
+                            path,
+                            serde_json::to_string(&json!({"path":path,"directories":[]}))?
+                        ],
+                    )?;
+                }
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO navigation VALUES(?,?)",
+                params![
+                    path.unwrap_or_default(),
+                    serde_json::to_string(&navigation)?
+                ],
+            )?;
+            completed += 1;
+            self.progress(
+                status,
+                "navigation",
+                completed,
+                completed + pending.len() as i64,
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO metadata VALUES('revision',?)",
+            [status.revision.context("snapshot revision")?.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(thumbnails)
+    }
+}
+fn pin_read_snapshot(source: &Connection, library: &str) -> Result<i64> {
+    source.execute_batch("BEGIN DEFERRED")?;
+    // BEGIN alone does not acquire a read snapshot; an actual read pins the WAL view
+    // so independent NAS writers cannot restart subsequent incremental backup steps.
+    Ok(source.query_row(
+        "SELECT coalesce((SELECT revision FROM catalog_version_revision WHERE library_id=?1),0)",
+        [library],
+        |row| row.get(0),
+    )?)
+}
+
+fn append_bytes<W: Write>(tar: &mut tar::Builder<W>, name: &str, bytes: &[u8]) -> Result<()> {
+    let mut header = tar::Header::new_ustar();
+    header.set_size(bytes.len() as u64);
+    header.set_mode(0o600);
+    header.set_cksum();
+    tar.append_data(&mut header, name, bytes)?;
+    Ok(())
+}
+struct ProgressReader<'a, F: FnMut(usize) -> std::io::Result<()>> {
+    file: fs::File,
+    report: &'a mut F,
+}
+impl<F: FnMut(usize) -> std::io::Result<()>> Read for ProgressReader<'_, F> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.file.read(buffer)?;
+        (self.report)(count)?;
+        Ok(count)
+    }
+}
+fn append_file<W: Write, F: FnMut(usize) -> std::io::Result<()>>(
+    tar: &mut tar::Builder<W>,
+    name: &str,
+    path: &FsPath,
+    report: &mut F,
+) -> Result<()> {
+    let file = fs::File::open(path)?;
+    let mut header = tar::Header::new_ustar();
+    header.set_size(file.metadata()?.len());
+    header.set_mode(0o600);
+    header.set_cksum();
+    tar.append_data(&mut header, name, ProgressReader { file, report })?;
+    Ok(())
+}
+async fn start(
+    State(manager): State<Arc<Manager>>,
+    Json(request): Json<BuildRequest>,
+) -> Result<Response, ApiError> {
+    Ok(Json(
+        tokio::task::spawn_blocking(move || manager.begin(request.include_thumbnails))
+            .await
+            .map_err(anyhow::Error::from)??,
+    )
+    .into_response())
+}
+async fn status(
+    State(manager): State<Arc<Manager>>,
+    Path((_library, id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    Ok(Json(
+        tokio::task::spawn_blocking(move || manager.read_status(&id))
+            .await
+            .map_err(anyhow::Error::from)??,
+    )
+    .into_response())
+}
+fn range(value: &str, length: u64) -> Result<(u64, u64)> {
+    let value = value.strip_prefix("bytes=").context("invalid range unit")?;
+    let (start, end) = value.split_once('-').context("invalid range")?;
+    ensure!(!value.contains(','), "multiple ranges unsupported");
+    let (start, end) = if start.is_empty() {
+        let suffix: u64 = end.parse()?;
+        ensure!(suffix > 0, "empty suffix");
+        (length.saturating_sub(suffix), length.saturating_sub(1))
+    } else {
+        (
+            start.parse()?,
+            if end.is_empty() {
+                length.saturating_sub(1)
+            } else {
+                end.parse::<u64>()?.min(length.saturating_sub(1))
+            },
+        )
+    };
+    ensure!(
+        length > 0 && start < length && end >= start,
+        "unsatisfiable range"
+    );
+    Ok((start, end))
+}
+async fn download(
+    State(manager): State<Arc<Manager>>,
+    Path((_library, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let status = manager.read_status(&id)?;
+    if status.state != "ready" {
+        return Err(anyhow::Error::from(StoreError {
+            status: 409,
+            code: "offline_rebuild_not_ready".into(),
+            message: "offline rebuild is not ready".into(),
+        })
+        .into());
+    }
+    let mut file = tokio::fs::File::open(manager.directory(&id)?.join("library.tar"))
+        .await
+        .map_err(anyhow::Error::from)?;
+    let length = file.metadata().await.map_err(anyhow::Error::from)?.len();
+    let etag = format!(
+        "\"{}\"",
+        status.sha256.context("ready export missing hash")?
+    );
+    let requested = headers.get(header::RANGE).filter(|_| {
+        headers
+            .get(header::IF_RANGE)
+            .is_none_or(|value| value.to_str().ok() == Some(etag.as_str()))
+    });
+    let selected = if let Some(value) = requested {
+        match value
+            .to_str()
+            .ok()
+            .and_then(|value| range(value, length).ok())
+        {
+            Some(range) => Some(range),
+            None => {
+                return Ok((
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    [
+                        (header::CONTENT_RANGE, format!("bytes */{length}")),
+                        (header::ETAG, etag),
+                    ],
+                )
+                    .into_response());
+            }
+        }
+    } else {
+        None
+    };
+    let (start, end) = selected.unwrap_or((0, length.saturating_sub(1)));
+    let count = end - start + 1;
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(anyhow::Error::from)?;
+    let mut response =
+        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file.take(count)))
+            .into_response();
+    *response.status_mut() = if selected.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    let headers = response.headers_mut();
+    for (key, value) in [
+        (header::CONTENT_TYPE, "application/x-tar".into()),
+        (header::ACCEPT_RANGES, "bytes".into()),
+        (header::CONTENT_LENGTH, count.to_string()),
+        (header::ETAG, etag),
+    ] {
+        headers.insert(key, value.parse().map_err(anyhow::Error::from)?);
+    }
+    if selected.is_some() {
+        headers.insert(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{length}")
+                .parse()
+                .map_err(anyhow::Error::from)?,
+        );
+    }
+    Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    fn fixture(root: &FsPath) -> Arc<AppState> {
+        let originals = root.join("originals");
+        fs::create_dir(&originals).unwrap();
+        let keeps = root.join("keeps");
+        Arc::new(AppState {
+            store: Arc::new(
+                crate::store::Store::open(&keeps.join("db/catalog.sqlite"), true).unwrap(),
+            ),
+            previews: Arc::new(
+                crate::previews::PreviewStorage::new(
+                    &keeps,
+                    Some(&originals),
+                    "http://localhost",
+                    "test-signing-key",
+                )
+                .unwrap(),
+            ),
+            jobs: Arc::new(
+                crate::jobs::Jobs::open(&keeps.join("db/jobs.sqlite"), &originals).unwrap(),
+            ),
+            access_token: "test-token".into(),
+            library_id: "photos".into(),
+            original_root_names: Default::default(),
+        })
+    }
+    fn seed(app: &AppState, root: &FsPath, name: &str) -> String {
+        let path = root.join("originals").canonicalize().unwrap().join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"original must remain").unwrap();
+        app.store.ingest_original("photos",path.to_str().unwrap(),&json!({"contentHash":name,"sizeBytes":20,"role":"jpeg_original"}),&json!({"captureTime":"2024-01-01T00:00:00Z","cameraMake":"Canon","cameraModel":"R3","lensModel":"50mm","originalFilename":name,"contentFingerprint":name,"metadataFingerprint":name,"rating":2,"flagState":"picked","tags":[],"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z"})).unwrap()
+    }
+    fn manager(app: Arc<AppState>) -> Manager {
+        Manager {
+            root: app
+                .previews
+                .keeps_root()
+                .join("tmp/offline-rebuild")
+                .join(format!("{:x}", Sha256::digest(app.library_id.as_bytes()))),
+            app,
+            initialized: Mutex::new(false),
+        }
+    }
+    fn fresh() -> Status {
+        Status {
+            id: Uuid::new_v4().to_string(),
+            state: "building".into(),
+            phase: "snapshot".into(),
+            completed: 0,
+            total: 1,
+            revision: None,
+            byte_count: None,
+            sha256: None,
+            error: None,
+            created_at: chrono::Utc::now().timestamp(),
+            include_thumbnails: true,
+            last_progress_save: None,
+        }
+    }
+    #[test]
+    fn bundle_has_client_schema_hidden_trash_and_only_current_available_thumbnail() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let app = fixture(root.path());
+        app.jobs.add_folder(
+            "photos",
+            root.path()
+                .join("originals")
+                .canonicalize()?
+                .to_str()
+                .unwrap(),
+        )?;
+        let first = seed(&app, root.path(), "hidden/one.jpg");
+        let second = seed(&app, root.path(), "two.jpg");
+        let third = seed(&app, root.path(), "three.jpg");
+        app.store.set_hidden_directory(
+            "photos",
+            root.path()
+                .join("originals/hidden")
+                .canonicalize()?
+                .to_str()
+                .unwrap(),
+            true,
+        )?;
+        app.store.set_trashed("photos", &second, true)?;
+        let image = root.path().join("image.heic");
+        use base64::Engine;
+        let png=base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6SAAAAABJRU5ErkJggg==")?;
+        fs::write(&image, png)?;
+        let object =
+            app.previews
+                .put_generated_role("photos", &first, "image-v1", &image, "thumbnail")?;
+        let descriptor = json!({"objectRef":object,"width":512,"height":400,"version":"image-v1"});
+        app.store.reconcile_cache()?;
+        {
+            let db = app.store.lock()?;
+            db.execute(
+                "UPDATE media_cache SET status='ready',thumbnail=?,standard=? WHERE asset_id=?",
+                params![
+                    descriptor.to_string(),
+                    json!({"deferred":true}).to_string(),
+                    first
+                ],
+            )?;
+            db.execute("UPDATE media_cache SET status='ready',source_hash='obsolete',thumbnail=?,standard=? WHERE asset_id=?",params![descriptor.to_string(),json!({"deferred":true}).to_string(),third])?;
+        }
+        let expected = app.store.library_revision("photos")?["revision"]
+            .as_i64()
+            .unwrap();
+        let manager = manager(app.clone());
+        let mut status = fresh();
+        manager.save(&status)?;
+        manager.build(&mut status)?;
+        assert_eq!(status.state, "ready");
+        assert_eq!(status.revision, Some(expected));
+        let bytes = fs::read(manager.directory(&status.id)?.join("library.tar"))?;
+        assert_eq!(status.sha256, Some(format!("{:x}", Sha256::digest(&bytes))));
+        let mut archive = tar::Archive::new(&bytes[..]);
+        let mut entries = archive.entries()?;
+        let mut entry = entries.next().unwrap()?;
+        assert_eq!(entry.path()?.to_str(), Some("manifest.json"));
+        assert_eq!(entry.header().as_bytes()[257..263], *b"ustar\0");
+        let mut manifest = String::new();
+        entry.read_to_string(&mut manifest)?;
+        let manifest: Value = serde_json::from_str(&manifest)?;
+        assert_eq!(manifest["assetCount"], 3);
+        assert_eq!(manifest["thumbnailCount"], 1);
+        assert_eq!(manifest["missingThumbnailCount"], 2);
+        if let Ok(output) = std::env::var("KEEPS_OFFLINE_TEST_EXPORT") {
+            fs::create_dir_all(&output)?;
+            fs::write(FsPath::new(&output).join("fixture.tar"), &bytes)?;
+            fs::write(
+                FsPath::new(&output).join("manifest.json"),
+                serde_json::to_vec_pretty(&manifest)?,
+            )?;
+            fs::write(
+                FsPath::new(&output).join("status.json"),
+                serde_json::to_vec_pretty(&status)?,
+            )?;
+        }
+        let mut entry = entries.next().unwrap()?;
+        assert_eq!(entry.path()?.to_str(), Some("catalog.sqlite"));
+        entry.unpack(root.path().join("client.sqlite"))?;
+        let db = Connection::open(root.path().join("client.sqlite"))?;
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM assets", [], |r| r.get::<_, i64>(0))?,
+            3
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM assets WHERE trashed=1", [], |r| r
+                .get::<_, i64>(0))?,
+            1
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM hidden", [], |r| r.get::<_, i64>(0))?,
+            1
+        );
+        assert_eq!(
+            db.query_row("SELECT value FROM metadata WHERE key='revision'", [], |r| r
+                .get::<_, String>(0))?,
+            expected.to_string()
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM navigation WHERE path=''", [], |r| r
+                .get::<_, i64>(
+                0
+            ))?,
+            1
+        );
+        let entry = entries.next().unwrap()?;
+        assert_eq!(
+            entry.path()?.to_string_lossy(),
+            format!("thumbnails/{}.image", first.to_uppercase())
+        );
+        assert!(entries.next().is_none());
+        assert_eq!(
+            fs::read(root.path().join("originals/hidden/one.jpg"))?,
+            b"original must remain"
+        );
+        app.store
+            .patch_asset("photos", &first, &json!({"rating":5}))?;
+        assert_eq!(
+            db.query_row(
+                "SELECT rating FROM assets WHERE id=?",
+                [first.to_uppercase()],
+                |r| r.get::<_, i64>(0)
+            )?,
+            2
+        );
+        Ok(())
+    }
+    #[test]
+    fn pinned_snapshot_stays_consistent_during_independent_writer_commits() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("source.sqlite");
+        let setup = Connection::open(&path)?;
+        setup.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE catalog_version_revision(library_id TEXT PRIMARY KEY,revision INTEGER); INSERT INTO catalog_version_revision VALUES('photos',7); CREATE TABLE samples(id INTEGER PRIMARY KEY, label TEXT, bytes BLOB);")?;
+        for id in 0..64 {
+            setup.execute(
+                "INSERT INTO samples VALUES(?,'original',zeroblob(8192))",
+                [id],
+            )?;
+        }
+        drop(setup);
+        let source = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        assert_eq!(pin_read_snapshot(&source, "photos")?, 7);
+        let (request_tx, request_rx) = std::sync::mpsc::channel::<()>();
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || -> Result<()> {
+            let mut writer = Connection::open(path)?;
+            while request_rx.recv().is_ok() {
+                let tx = writer.transaction()?;
+                tx.execute(
+                    "UPDATE catalog_version_revision SET revision=revision+1",
+                    [],
+                )?;
+                tx.execute("UPDATE samples SET label='changed' WHERE id=0", [])?;
+                tx.execute(
+                    "INSERT INTO samples(label,bytes) VALUES('new',zeroblob(8192))",
+                    [],
+                )?;
+                tx.commit()?;
+                ack_tx.send(())?;
+            }
+            Ok(())
+        });
+        // A commit before the first backup step must also be outside the pinned view.
+        request_tx.send(())?;
+        ack_rx.recv()?;
+        let mut target = Connection::open(root.path().join("target.sqlite"))?;
+        let mut previous = 0;
+        let mut steps = 0;
+        {
+            let backup = rusqlite::backup::Backup::new(&source, &mut target)?;
+            loop {
+                let step = backup.step(8)?;
+                let progress = backup.progress();
+                let completed = progress.pagecount - progress.remaining;
+                assert!(
+                    completed > previous,
+                    "backup restarted: {previous} -> {completed}"
+                );
+                previous = completed;
+                steps += 1;
+                if step == rusqlite::backup::StepResult::Done {
+                    break;
+                }
+                assert_eq!(step, rusqlite::backup::StepResult::More);
+                request_tx.send(())?;
+                ack_rx.recv()?;
+            }
+        }
+        drop(request_tx);
+        writer.join().expect("writer thread")?;
+        assert!(steps > 1);
+        assert_eq!(
+            target.query_row("SELECT revision FROM catalog_version_revision", [], |r| r
+                .get::<_, i64>(
+                0
+            ))?,
+            7
+        );
+        assert_eq!(
+            target.query_row("SELECT count(*) FROM samples", [], |r| r.get::<_, i64>(0))?,
+            64
+        );
+        assert_eq!(
+            target.query_row("SELECT label FROM samples WHERE id=0", [], |r| r
+                .get::<_, String>(0))?,
+            "original"
+        );
+        source.execute_batch("ROLLBACK")?;
+        assert!(
+            source.query_row("SELECT revision FROM catalog_version_revision", [], |r| r
+                .get::<_, i64>(
+                0
+            ))? > 7
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn interrupted_export_becomes_failed_and_new_id_is_required() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let manager = manager(fixture(root.path()));
+        let status = fresh();
+        manager.save(&status)?;
+        let found = manager.read_status(&status.id)?;
+        assert_eq!(found.state, "failed");
+        assert!(found.error.unwrap().contains("restarted"));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn download_auth_ranges_and_immutable_etag() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let app = fixture(root.path());
+        seed(&app, root.path(), "photo.jpg");
+        let manager = manager(app.clone());
+        let mut state = fresh();
+        manager.save(&state)?;
+        manager.build(&mut state)?;
+        let app = crate::api::router(app);
+        let path = format!("/libraries/photos/offline-rebuild/{}/download", state.id);
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(&path).body(Body::empty())?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path.replace("/photos/", "/other/"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&path)
+                    .header("Authorization", "Bearer test-token")
+                    .header("Range", "bytes=0-511")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "512");
+        assert_eq!(
+            response.headers()[header::ETAG],
+            format!("\"{}\"", state.sha256.unwrap())
+        );
+        assert_eq!(response.into_body().collect().await?.to_bytes().len(), 512);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&path)
+                    .header("Authorization", "Bearer test-token")
+                    .header("Range", "bytes=99999999-")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&path)
+                    .header("Authorization", "Bearer test-token")
+                    .header("Range", "bytes=0-10")
+                    .header("If-Range", "\"obsolete\"")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn post_builds_and_poll_returns_ready_status() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let app = fixture(root.path());
+        seed(&app, root.path(), "photo.jpg");
+        let app = crate::api::router(app);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/libraries/photos/offline-rebuild")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{\"includeThumbnails\":false}"))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let state: Status =
+            serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+        assert!(!state.include_thumbnails);
+        let mut ready = false;
+        for _ in 0..200 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/libraries/photos/offline-rebuild/{}", state.id))
+                        .header("Authorization", "Bearer test-token")
+                        .body(Body::empty())?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let status: Status =
+                serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+            assert_ne!(status.state, "failed", "{:?}", status.error);
+            if status.state == "ready" {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn in_flight_reuse_distinguishes_thumbnail_option() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let manager = Arc::new(manager(fixture(root.path())));
+        *manager.initialized.lock().unwrap() = true;
+        let building = fresh();
+        manager.save(&building)?;
+        assert_eq!(manager.begin(true)?.id, building.id);
+        let other = manager.begin(false)?;
+        assert_ne!(other.id, building.id);
+        for _ in 0..200 {
+            if manager.read_status(&other.id)?.state != "building" {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        anyhow::bail!("export did not complete")
+    }
+    #[test]
+    fn ranges_are_bounded_and_support_suffix_and_resume() {
+        assert_eq!(range("bytes=10-", 100).unwrap(), (10, 99));
+        assert_eq!(range("bytes=-10", 100).unwrap(), (90, 99));
+        assert_eq!(range("bytes=0-200", 100).unwrap(), (0, 99));
+        assert!(range("bytes=0-1,3-4", 100).is_err());
+        assert!(range("bytes=100-", 100).is_err());
+        assert!(range("bytes=-0", 100).is_err());
+    }
+}

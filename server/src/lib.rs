@@ -6,6 +6,7 @@ pub mod identity;
 pub mod jobs;
 pub mod media;
 pub mod navigation;
+mod photo_relations;
 pub mod previews;
 pub mod revisions;
 pub mod store;
@@ -17,4 +18,8 @@ pub mod remote_worker;
 
 pub mod imports;
 
+pub mod tasks;
+
 pub mod directory_trash;
+
+pub mod offline_rebuild;

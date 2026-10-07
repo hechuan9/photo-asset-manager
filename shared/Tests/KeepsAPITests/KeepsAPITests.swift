@@ -41,6 +41,33 @@ struct KeepsAPITests {
         #expect(restored == task)
     }
 
+    @Test func taskStatusUsesServerPhotoCountsAndAggregatedLongTask() async throws {
+        let fixture = Fixture { request in
+            #expect(request.httpMethod == "GET")
+            #expect(request.url!.path == "/api/libraries/library/task-status")
+            return (200, """
+            {"automatic":{"status":"running","currentPhoto":"旅行/IMG.3FR","remainingPhotos":17,"failedPhotos":2,"error":"thumbnail failed"},"longTask":{"status":"pending","kind":"reconcile","error":null}}
+            """)
+        }
+        let status = try await fixture.client.taskStatus()
+        #expect(status.automatic.currentPhoto == "旅行/IMG.3FR")
+        #expect(status.automatic.remainingPhotos == 17)
+        #expect(status.automatic.failedPhotos == 2)
+        #expect(status.automatic.error == "thumbnail failed")
+        #expect(status.longTask.status == "pending")
+        #expect(status.longTask.kind == "reconcile")
+        #expect(status.longTask.error == nil)
+    }
+
+    @Test func idleTaskStatusDecodesNullableFields() throws {
+        let status = try JSONDecoder().decode(KeepsTaskStatus.self, from: Data("""
+        {"automatic":{"status":"idle","currentPhoto":null,"remainingPhotos":0,"failedPhotos":0,"error":null},"longTask":{"status":"idle","kind":null,"error":null}}
+        """.utf8))
+        #expect(status.automatic.currentPhoto == nil)
+        #expect(status.automatic.remainingPhotos == 0)
+        #expect(status.longTask.kind == nil)
+    }
+
     @Test func createDirectoryUsesLibraryAndSeparateParentAndName() async throws {
         let fixture = Fixture { request in
             #expect(request.httpMethod == "POST")

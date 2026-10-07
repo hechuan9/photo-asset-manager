@@ -37,14 +37,15 @@ public final class KeepsClient: Sendable {
         try await request("GET", library + ["assets", id.uuidString])
     }
     public func versions(assetID: UUID) async throws -> [KeepsAssetVersion] {
-        let response: Versions = try await request("GET", library + ["assets", assetID.uuidString, "versions"])
-        return response.items
+        try await versionDetails(assetID: assetID).items
+    }
+    public func versionDetails(assetID: UUID) async throws -> KeepsAssetVersions {
+        try await request("GET", library + ["assets", assetID.uuidString, "versions"])
     }
     public func setDefaultVersion(assetID: UUID, contentHash: String) async throws -> [KeepsAssetVersion] {
-        let response: Versions = try await request("PUT", library + ["assets", assetID.uuidString, "default-version"], body: JSONEncoder().encode(["contentHash": contentHash]))
+        let response: KeepsAssetVersions = try await request("PUT", library + ["assets", assetID.uuidString, "default-version"], body: JSONEncoder().encode(["contentHash": contentHash]))
         return response.items
     }
-    private struct Versions: Decodable { var items: [KeepsAssetVersion] }
     public func updateAsset(id: UUID, patch: KeepsAssetPatch) async throws -> KeepsAsset {
         try await request("PATCH", library + ["assets", id.uuidString], body: JSONEncoder().encode(patch))
     }
@@ -91,6 +92,9 @@ public final class KeepsClient: Sendable {
     }
     public func scanFolder(id: String) async throws -> KeepsJob {
         try await request("POST", library + ["folders", id, "scan"])
+    }
+    public func taskStatus() async throws -> KeepsTaskStatus {
+        try await request("GET", library + ["task-status"])
     }
     public func jobs() async throws -> KeepsJobsResponse { try await request("GET", library + ["jobs"]) }
     public func retryJob(id: String) async throws -> KeepsJob {

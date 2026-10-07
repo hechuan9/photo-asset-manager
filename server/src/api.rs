@@ -71,6 +71,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .merge(crate::remote_worker::router())
         .merge(crate::imports::router())
+        .merge(crate::offline_rebuild::router(state.clone()))
         .route("/libraries/{library}/assets", get(assets))
         .route(
             "/libraries/{library}/assets/{asset}",
@@ -99,6 +100,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/libraries/{library}/revision", get(revision))
         .route("/libraries/{library}/counts", get(counts))
         .route("/libraries/{library}/cache-status", get(cache_status))
+        .route("/libraries/{library}/task-status", get(task_status))
         .route("/libraries/{library}/cache-retry", post(cache_retry))
         .route("/libraries/{library}/cache-rebuild", post(cache_rebuild))
         .route(
@@ -186,9 +188,10 @@ fn require_library(state: &AppState, library: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn blocking<F>(operation: F) -> Result<Value, ApiError>
+async fn blocking<F, T>(operation: F) -> Result<T, ApiError>
 where
-    F: FnOnce() -> anyhow::Result<Value> + Send + 'static,
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
 {
     tokio::task::spawn_blocking(operation)
         .await
@@ -754,7 +757,7 @@ async fn default_version(
     .into_response())
 }
 
-fn standard_descriptor(
+pub(crate) fn standard_descriptor(
     state: &AppState,
     library: &str,
     asset: &str,
@@ -873,7 +876,7 @@ async fn cache_status(
 async fn cache_retry(State(state): State<Arc<AppState>>, Path(library): Path<String>) -> ApiResult {
     require_library(&state, &library)?;
     Ok(
-        Json(blocking(move || Ok(json!({"requeued":state.store.retry_cache(&library)?,"gcRequeued":state.store.retry_cache_garbage(&library)?}))).await?)
+        Json(blocking(move || Ok(json!({"requeued":crate::cache_pipeline::queue_manual(&state.store,&state.jobs,&library,false)?,"gcRequeued":state.store.retry_cache_garbage(&library)?}))).await?)
             .into_response(),
     )
 }
@@ -884,7 +887,15 @@ async fn cache_rebuild(
 ) -> ApiResult {
     require_library(&state, &library)?;
     Ok(
-        Json(blocking(move || Ok(json!({"requeued":state.store.rebuild_cache(&library)?}))).await?)
+        Json(blocking(move || Ok(json!({"requeued":crate::cache_pipeline::queue_manual(&state.store,&state.jobs,&library,true)?}))).await?)
+            .into_response(),
+    )
+}
+
+async fn task_status(State(state): State<Arc<AppState>>, Path(library): Path<String>) -> ApiResult {
+    require_library(&state, &library)?;
+    Ok(
+        Json(blocking(move || crate::tasks::status(&state.store, &state.jobs, &library)).await?)
             .into_response(),
     )
 }

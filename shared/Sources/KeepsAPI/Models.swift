@@ -39,10 +39,11 @@ public struct KeepsAsset: Codable, Identifiable, Equatable, Sendable {
     public var preview: KeepsPreview?
     public var thumbnail: KeepsPreview? = nil
     public var standard: KeepsPreview? = nil
+    public var paths: [String]? = nil
     public var gridPreview: KeepsPreview? { thumbnail ?? preview }
 }
 
-public struct KeepsAssetPage: Decodable, Sendable {
+public struct KeepsAssetPage: Codable, Sendable {
     public var items: [KeepsAsset]
     public var total: Int
     public var nextCursor: String?
@@ -98,7 +99,7 @@ public struct KeepsDirectory: Decodable, Identifiable, Equatable, Sendable {
     public var id: String { path }
 }
 
-public struct KeepsNavigationDirectory: Decodable, Identifiable, Equatable, Sendable {
+public struct KeepsNavigationDirectory: Codable, Identifiable, Equatable, Sendable {
     public var path: String
     public var name: String
     public var photoCount: Int
@@ -136,9 +137,13 @@ public struct KeepsDirectoryTrashTask: Codable, Equatable, Identifiable, Sendabl
     }
 }
 
-public struct KeepsNavigation: Decodable, Sendable {
+public struct KeepsNavigation: Codable, Sendable {
     public var path: String?
     public var directories: [KeepsNavigationDirectory]
+    public init(path: String?, directories: [KeepsNavigationDirectory]) {
+        self.path = path
+        self.directories = directories
+    }
 }
 
 public struct KeepsFolder: Decodable, Identifiable, Equatable, Sendable {
@@ -170,6 +175,25 @@ public struct KeepsJob: Decodable, Identifiable, Equatable, Sendable {
 
 public struct KeepsJobsResponse: Decodable, Sendable {
     public var jobs: [KeepsJob]
+}
+
+public struct KeepsTaskStatus: Decodable, Equatable, Sendable {
+    public var automatic: KeepsAutomaticTaskStatus
+    public var longTask: KeepsLongTaskStatus
+}
+
+public struct KeepsAutomaticTaskStatus: Decodable, Equatable, Sendable {
+    public var status: String
+    public var currentPhoto: String?
+    public var remainingPhotos: Int
+    public var failedPhotos: Int
+    public var error: String?
+}
+
+public struct KeepsLongTaskStatus: Decodable, Equatable, Sendable {
+    public var status: String
+    public var kind: String?
+    public var error: String?
 }
 
 public struct KeepsAssetQuery: Hashable, Sendable {
@@ -215,6 +239,18 @@ public struct KeepsAssetPatch: Encodable, Sendable {
         if clearColorLabel { try values.encodeNil(forKey: .colorLabel) }
         else { try values.encodeIfPresent(colorLabel, forKey: .colorLabel) }
         try values.encodeIfPresent(tags, forKey: .tags)
+    }
+}
+
+public struct KeepsAssetVersions: Decodable, Sendable {
+    public var items: [KeepsAssetVersion]
+    public var deprecatedFiles: [DeprecatedFile]?
+
+    public struct DeprecatedFile: Decodable, Sendable {
+        public var path: String
+        public var retainedPath: String
+        public var basis: String
+        public var reason: String
     }
 }
 

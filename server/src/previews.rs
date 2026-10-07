@@ -89,6 +89,10 @@ impl PreviewStorage {
         })
     }
 
+    pub(crate) fn keeps_root(&self) -> &Path {
+        self.root.parent().expect("preview root has parent")
+    }
+
     pub fn free_bytes(&self) -> Result<i64> {
         crate::cache_pipeline::free_bytes(&self.root)
     }
@@ -189,7 +193,7 @@ impl PreviewStorage {
         }
     }
 
-    fn object_path(&self, object: &Value) -> Result<PathBuf> {
+    pub(crate) fn object_path(&self, object: &Value) -> Result<PathBuf> {
         let key = validate_object(object).map_err(|error| {
             let message = error.to_string();
             error.context(PreviewError::input(message))

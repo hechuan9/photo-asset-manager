@@ -30,7 +30,6 @@ struct IOSCollectionsView: View {
         .background(.black)
         .contentMargins(.bottom, 100, for: .scrollContent)
         .task(id: configuration) { await navigation.load(configuration: configuration, path: nil) }
-        .bottomPullRefresh(bottomInset: 90) { await navigation.load(configuration: configuration, path: nil, force: true) }
     }
 }
 
@@ -53,7 +52,6 @@ struct IOSDirectoryBrowser: View {
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
             }
             .contentMargins(.bottom, contentHeight > geometry.size.height - 100 ? 100 : 0, for: .scrollContent)
-            .bottomPullRefresh { await navigation.load(configuration: configuration, path: path, force: true) }
             .frame(height: min(contentHeight, geometry.size.height))
             .background(.ultraThinMaterial)
             .clipped()
@@ -74,7 +72,7 @@ private struct IOSDirectoryRows: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("目录刷新失败，显示已缓存内容").font(.caption)
                     Text(error).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-                    Text("从底部上拉刷新").font(.caption)
+                    Text("请检查连接设置后重新打开").font(.caption)
                 }
             }
             if !connected {
@@ -86,7 +84,7 @@ private struct IOSDirectoryRows: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Label("无法读取目录", systemImage: "wifi.exclamationmark")
                     Text(error).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                    Text("从底部上拉刷新").font(.caption)
+                    Text("请检查连接设置后重新打开").font(.caption)
                 }.padding(.vertical, 8)
             } else if state.directories?.isEmpty != false {
                 Text(path == nil ? "暂无服务器目录" : "没有子目录")
@@ -106,56 +104,5 @@ private struct IOSDirectoryRows: View {
                 }
             }
         }
-    }
-}
-
-/// Only an upward finger drag beyond the bottom edge can request a refresh.
-private struct BottomPullRefresh: ViewModifier {
-    let action: () async -> Void
-    var bottomInset: CGFloat = 0
-    @State private var overscroll: CGFloat = 0
-    @State private var translation: CGFloat = 0
-    @State private var dragging = false
-    @State private var armed = false
-    @State private var refreshing = false
-
-    func body(content: Content) -> some View {
-        content
-            .scrollBounceBehavior(.always)
-            .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                let bottom = max(-geometry.contentInsets.top,
-                    geometry.contentSize.height + geometry.contentInsets.bottom - geometry.containerSize.height)
-                return max(0, geometry.contentOffset.y - bottom)
-            } action: { _, distance in
-                overscroll = distance
-                if dragging && translation < -60 && distance > 60 { armed = true }
-            }
-            .simultaneousGesture(DragGesture().onChanged { value in
-                dragging = true
-                translation = value.translation.height
-                if translation < -60 && overscroll > 60 { armed = true }
-            }.onEnded { _ in
-                let shouldRefresh = armed && !refreshing
-                dragging = false; armed = false; translation = 0
-                guard shouldRefresh else { return }
-                refreshing = true
-                Task {
-                    await action()
-                    refreshing = false
-                }
-            })
-            .overlay(alignment: .bottom) {
-                if refreshing { ProgressView().padding(12).background(.regularMaterial, in: Capsule()).padding(.bottom, bottomInset) }
-                else if dragging && overscroll > 15 {
-                    Text(armed ? "松开刷新" : "继续上拉刷新")
-                        .font(.caption).padding(10).background(.regularMaterial, in: Capsule()).padding(.bottom, bottomInset)
-                }
-            }
-    }
-}
-
-extension View {
-    func bottomPullRefresh(bottomInset: CGFloat = 0, _ action: @escaping () async -> Void) -> some View {
-        modifier(BottomPullRefresh(action: action, bottomInset: bottomInset))
     }
 }

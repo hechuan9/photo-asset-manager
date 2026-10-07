@@ -30,30 +30,69 @@ pub fn run(
     MediaProcessor::new()
         .probe()
         .context("NAS media runtime unavailable")?;
-    let mut next_cache = Instant::now();
+    crate::tasks::recover(&jobs)?;
     store.recover_cache()?;
+    let mut prefer_manual = false;
+    let mut next_maintenance = Instant::now();
     while !stop.load(Ordering::Relaxed) {
-        if Instant::now() >= next_cache {
-            crate::cache_pipeline::process_batch(&store, &jobs, &previews, &stop)?;
-            next_cache = Instant::now() + Duration::from_secs(crate::cache_pipeline::REST_SECONDS);
+        let mut worked = false;
+        if prefer_manual && let Some(job) = jobs.claim_class("manual")? {
+            run_claimed(&store, &jobs, &previews, &job, &stop)?;
+            prefer_manual = false;
+            worked = true;
+        } else if let Some(job) = jobs.claim_class("automatic")? {
+            run_claimed(&store, &jobs, &previews, &job, &stop)?;
+            prefer_manual = true;
+            worked = true;
+        } else if crate::cache_pipeline::process_next(&store, &jobs, &previews, &stop)? {
+            prefer_manual = true;
+            worked = true;
+        } else if let Some(job) = jobs.claim_class("manual")? {
+            run_claimed(&store, &jobs, &previews, &job, &stop)?;
+            prefer_manual = false;
+            worked = true;
         }
-        if let Some(job) = jobs.claim_next()? {
-            let result = run_one(&store, &jobs, &previews, &job, &stop);
-            if stop.load(Ordering::Relaxed) {
-                break;
+        if !worked && !stop.load(Ordering::Relaxed) {
+            if Instant::now() >= next_maintenance {
+                crate::cache_pipeline::maintain(&store, &jobs, &previews, &stop)?;
+                next_maintenance = Instant::now() + Duration::from_secs(60);
+                continue;
             }
-            match result {
-                Ok(true) => jobs.finish(&job.id, None)?,
-                Ok(false) => {}
-                Err(error) => {
-                    let trace = format!("{error:#}");
-                    tracing::error!(job_id = %job.id, error = %trace, "NAS scan failed");
-                    jobs.finish(&job.id, Some(&trace))?;
-                }
+            if let Some(job) = jobs.claim_class("reconcile")? {
+                run_claimed(&store, &jobs, &previews, &job, &stop)?;
+                worked = true;
             }
-            maintain_revisions(&store, &jobs)?;
-        } else {
+        }
+        maintain_revisions(&store, &jobs)?;
+        if !worked {
             std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    Ok(())
+}
+
+fn run_claimed(
+    store: &Store,
+    jobs: &Jobs,
+    previews: &PreviewStorage,
+    job: &Job,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let result = run_slice(store, jobs, previews, job, stop, 1);
+    if stop.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    match result {
+        Ok(true) => jobs.finish(&job.id, None)?,
+        Ok(false) => {
+            if jobs.job(&job.id)?.is_some_and(|j| j.status == "running") {
+                jobs.yield_job(&job.id)?;
+            }
+        }
+        Err(error) => {
+            let trace = format!("{error:#}");
+            tracing::error!(job_id=%job.id,error=%trace,"NAS photo task failed");
+            jobs.finish(&job.id, Some(&trace))?;
         }
     }
     Ok(())
@@ -89,10 +128,22 @@ pub fn run_one(
     job: &Job,
     stop: &AtomicBool,
 ) -> Result<bool> {
+    run_slice(store, jobs, previews, job, stop, usize::MAX)
+}
+
+fn run_slice(
+    store: &Store,
+    jobs: &Jobs,
+    previews: &PreviewStorage,
+    job: &Job,
+    stop: &AtomicBool,
+    limit: usize,
+) -> Result<bool> {
     let _directory_guard = jobs.directory_mutation.read().unwrap();
     if stopped(jobs, job, stop)? {
         return Ok(false);
     }
+    let mut units = 0;
     let root = jobs.validate_scan_path(Path::new(&job.path), &job.scope_kind)?;
     let mut progress = Progress {
         processed: job.processed,
@@ -119,7 +170,6 @@ pub fn run_one(
                 last_name: None,
             },
         };
-        let started = Instant::now();
         loop {
             if stopped(jobs, job, stop)? {
                 return Ok(false);
@@ -164,12 +214,7 @@ pub fn run_one(
                 if stopped(jobs, job, stop)? {
                     return Ok(false);
                 }
-                if jobs.should_yield(job)?
-                    || (!job.path_sync
-                        && !job.refresh_metadata
-                        && started.elapsed() > Duration::from_secs(30)
-                        && jobs.has_pending_changes(&job.id)?)
-                {
+                if units >= limit || (limit == usize::MAX && jobs.should_yield(job)?) {
                     jobs.yield_job(&job.id)?;
                     return Ok(false);
                 }
@@ -196,9 +241,7 @@ pub fn run_one(
                             stop,
                             &mut progress,
                         )?;
-                        if stopped(jobs, job, stop)? {
-                            return Ok(false);
-                        }
+                        units += 1;
                     }
                 }
                 cursor.last_name = Some(name);
@@ -211,13 +254,15 @@ pub fn run_one(
     if stopped(jobs, job, stop)? {
         return Ok(false);
     }
-    store.mark_missing_scope_with_revision(
+    if store.mark_missing_scope_with_revision(
         &job.library_id,
         &job.path,
         &job.scope_kind,
         Some(&job.id),
-    )?;
-    store.reconcile_cache()?;
+    )? > 0
+    {
+        store.reconcile_cache()?;
+    }
     if job.scope_kind == "file" && progress.failed > 0 {
         bail!(
             "{} files failed; latest failure: {}",
@@ -254,7 +299,7 @@ fn process_entry(
     previews: &PreviewStorage,
     job: &Job,
     path: &Path,
-    stop: &AtomicBool,
+    _stop: &AtomicBool,
     progress: &mut Progress,
 ) -> Result<()> {
     publish(
@@ -263,10 +308,7 @@ fn process_entry(
         progress,
         Some(path.to_str().context("original path must be UTF-8")?),
     )?;
-    let result = process_file(store, jobs, previews, job, path, stop);
-    if stopped(jobs, job, stop)? {
-        return Ok(());
-    }
+    let result = process_photo(store, jobs, previews, job, path);
     match result {
         Ok(true) => progress.processed += 1,
         Ok(false) => progress.skipped += 1,
@@ -281,9 +323,6 @@ fn process_entry(
                 store.note_revision_activity(&queued.library_id, &queued.id, &queued.path)?;
             }
         }
-    }
-    if (progress.processed + progress.skipped + progress.failed) % 20 == 0 {
-        crate::cache_pipeline::process_batch(store, jobs, previews, stop)?;
     }
     Ok(())
 }
@@ -315,6 +354,118 @@ fn file_stamp(path: &Path) -> Result<(i64, i64)> {
     let mtime = i64::try_from(metadata.modified()?.duration_since(UNIX_EPOCH)?.as_nanos())
         .context("original modification time exceeds supported range")?;
     Ok((size, mtime))
+}
+
+fn photo_paths(store: &Store, library: &str, path: &Path) -> Result<Vec<PathBuf>> {
+    let parent = path.parent().context("photo has no directory")?;
+    let stem = path
+        .file_stem()
+        .context("photo has no filename")?
+        .to_string_lossy();
+    let mut paths = vec![path.to_path_buf()];
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && media::is_photo(&entry.path())
+            && entry
+                .path()
+                .file_stem()
+                .is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case(&stem))
+        {
+            paths.push(entry.path());
+        }
+    }
+    {
+        let db = store.lock()?;
+        let mut q=db.prepare("SELECT path FROM catalog_paths WHERE library_id=?1 AND asset_id IN (SELECT asset_id FROM catalog_paths WHERE library_id=?1 AND path=?2)")?;
+        for item in q.query_map(rusqlite::params![library, path.to_str()], |r| {
+            r.get::<_, String>(0)
+        })? {
+            let p = PathBuf::from(item?);
+            if p.parent() == Some(parent) && p.is_file() {
+                paths.push(p);
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn process_photo(
+    store: &Store,
+    jobs: &Jobs,
+    previews: &PreviewStorage,
+    job: &Job,
+    path: &Path,
+) -> Result<bool> {
+    let paths = photo_paths(store, &job.library_id, path)?;
+    // Wait for the whole pair to finish copying before starting a non-preemptible unit.
+    for source in &paths {
+        let stamp = file_stamp(source)?;
+        let unchanged = jobs
+            .file_state(
+                &job.folder_id,
+                source.to_str().context("photo path must be UTF-8")?,
+            )?
+            .is_some_and(|f| (f.size, f.mtime_ns) == stamp);
+        if !unchanged && recently_modified(stamp.1) {
+            let queued = jobs.enqueue_file_change(&job.folder_id, source, 2)?;
+            store.note_revision_activity(&queued.library_id, &queued.id, &queued.path)?;
+            return Ok(false);
+        }
+    }
+    crate::tasks::begin_photo(jobs, &job.library_id, &job.work_class, path, &paths)?;
+    let uninterrupted = AtomicBool::new(false);
+    let result = (|| {
+        let mut changed = false;
+        for source in &paths {
+            changed |= if job.work_class == "maintenance" {
+                process_file_with_identity(
+                    store,
+                    jobs,
+                    previews,
+                    job,
+                    source,
+                    &uninterrupted,
+                    true,
+                )?
+            } else {
+                process_file(store, jobs, previews, job, source, &uninterrupted)?
+            };
+        }
+        let assets = {
+            let db = store.lock()?;
+            let mut ids = std::collections::BTreeSet::new();
+            for source in &paths {
+                use rusqlite::OptionalExtension;
+                if let Some(id) = db
+                    .query_row(
+                        "SELECT asset_id FROM catalog_paths WHERE library_id=? AND path=?",
+                        rusqlite::params![job.library_id, source.to_str()],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()?
+                {
+                    ids.insert(id);
+                }
+            }
+            ids
+        };
+        for id in assets {
+            if job.work_class == "manual" && (job.refresh_metadata || job.scope_kind == "file") {
+                store.lock()?.execute("UPDATE media_cache SET status='pending',attempts=0,available_at=0,last_error=NULL WHERE library_id=? AND asset_id=? AND status<>'processing'",rusqlite::params![job.library_id,id])?;
+            }
+            crate::cache_pipeline::process_asset(store, jobs, previews, &job.library_id, &id)?;
+        }
+        Ok(changed)
+    })();
+    let error = result
+        .as_ref()
+        .err()
+        .map(|e: &anyhow::Error| format!("{e:#}"));
+    crate::tasks::finish(jobs, error.as_deref())?;
+    result
 }
 
 fn process_file(
@@ -350,7 +501,9 @@ fn process_file_with_identity(
         .as_ref()
         .map(|p| p.version.clone())
         .unwrap_or_default();
+    let force = job.work_class == "manual" && job.refresh_metadata;
     if !backfill
+        && !force
         && job.scope_kind != "file"
         && let Some(previous) = &previous
         && previous.size == size
@@ -364,6 +517,7 @@ fn process_file_with_identity(
         return Ok(false);
     }
     if !backfill
+        && !force
         && let Some(previous) = &previous
         && previous.size == size
         && previous.mtime_ns == mtime
@@ -436,14 +590,6 @@ fn process_file_with_identity(
             identity_checked = true;
             return Ok(true);
         }
-        if previous
-            .as_ref()
-            .is_some_and(|previous| previous.error.is_none())
-            && !backfill
-        {
-            jobs.identity_pending(&job.folder_id, text)?;
-            return Ok(true);
-        }
         let root = store.root_id(&job.library_id, &asset_id)?;
         let old_hash = hash.clone();
         let updated = store.with_identity_update(&job.library_id, text, &old_hash, || {
@@ -498,8 +644,11 @@ pub fn process_identity_batch(
     stop: &AtomicBool,
 ) -> Result<()> {
     let _directory_guard = jobs.directory_mutation.read().unwrap();
-    for (folder, text) in jobs.pending_identities(20)? {
-        if stop.load(Ordering::Relaxed) || jobs.has_path_sync()? {
+    for (folder, text) in jobs.pending_identities(1)? {
+        if stop.load(Ordering::Relaxed)
+            || jobs.has_due_class("automatic")?
+            || jobs.has_due_class("manual")?
+        {
             break;
         }
         let path = Path::new(&text);
@@ -509,6 +658,7 @@ pub fn process_identity_batch(
         }
         let job = Job {
             id: "identity-backfill".into(),
+            work_class: "maintenance".into(),
             scope_kind: "file".into(),
             folder_id: folder.id.clone(),
             library_id: folder.library_id,
@@ -525,9 +675,7 @@ pub fn process_identity_batch(
             started_at: None,
             finished_at: None,
         };
-        if let Err(error) =
-            process_file_with_identity(store, jobs, previews, &job, path, stop, true)
-        {
+        if let Err(error) = process_photo(store, jobs, previews, &job, path) {
             let trace = format!("{error:#}");
             tracing::error!(path=%text,error=%trace,"photo identity backfill failed");
             jobs.identity_result(&folder.id, &text, Some(&trace))?;
@@ -792,6 +940,11 @@ mod tests {
         let object = previews.put_generated("library", &id, "preview-hash", &fake_preview)?;
         store.declare_generated_preview("library", &id, &json!({"assetID":id,"role":"preview","fileObject":{"contentHash":"preview-hash","sizeBytes":15,"role":"preview"},"objectRef":object,"pixelSize":{"width":100,"height":100}}))?;
         jobs.record_file(&folder.id, path, size, mtime, &id, &hash, None)?;
+        store.reconcile_cache()?;
+        store.lock()?.execute(
+            "UPDATE media_cache SET status='ready',thumbnail='{}',standard='{}'",
+            [],
+        )?;
         jobs.enqueue_external_scan(&folder.id)?;
         let claimed = jobs.claim_next()?.unwrap();
         drop(jobs);
@@ -929,13 +1082,15 @@ mod tests {
         assert_eq!(jobs.job(&queued.id)?.unwrap().status, "pending");
         assert!(store.revision_batch_ids()?.contains(&queued.id));
         jobs.claim_next()?.unwrap();
-        jobs.enqueue_change(&folder.id, Path::new(&folder.path), 0)?;
+        let changed = jobs.enqueue_change(&folder.id, Path::new(&folder.path), 0)?;
+        store.note_revision_activity("library", &changed.id, &folder.path)?;
         jobs.finish(&queued.id, None)?;
         maintain_revisions(&store, &jobs)?;
-        assert_eq!(jobs.job(&queued.id)?.unwrap().status, "pending");
-        assert!(store.revision_batch_ids()?.contains(&queued.id));
-        jobs.claim_next()?.unwrap();
-        jobs.finish(&queued.id, None)?;
+        assert_eq!(jobs.job(&queued.id)?.unwrap().status, "completed");
+        assert!(store.revision_batch_ids()?.contains(&changed.id));
+        let active = jobs.claim_next()?.unwrap();
+        assert_eq!(active.id, changed.id);
+        jobs.finish(&active.id, None)?;
         maintain_revisions(&store, &jobs)?;
         assert!(!store.revision_batch_ids()?.contains(&queued.id));
         Ok(())

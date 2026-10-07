@@ -19,6 +19,7 @@ public actor PreviewCache {
     private let images = NSCache<NSString, CGImage>()
     private struct Entry { var size: Int; var accessed: Date }
     private var entries: [String: Entry] = [:]
+    private var prepared = false
     private var indexed = false
     private var pending: [String: Task<(Data, String), Error>] = [:]
 
@@ -63,6 +64,58 @@ public actor PreviewCache {
         return image
     }
 
+    /// Cache writes validate images before atomic persistence; inventory only needs file metadata.
+    public func cachedKeys() throws -> Set<String> {
+        try prepare()
+        var keys: Set<String> = []
+        for file in try FileManager.default.contentsOfDirectory(at: directory,
+                includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]) {
+            let key = file.lastPathComponent
+            guard key.count == 64, key.allSatisfy({ $0.isHexDigit }) else { continue }
+            let values = try file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            if values.isRegularFile == true, (values.fileSize ?? 0) > 0 { keys.insert(key) }
+        }
+        return keys
+    }
+
+    public func containsCachedKey(_ key: String) throws -> Bool {
+        let file = directory.appendingPathComponent(key)
+        do {
+            let values = try file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            return values.isRegularFile == true && (values.fileSize ?? 0) > 0
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
+            return false
+        }
+    }
+
+    public func cachedFileURL(forKey key: String) throws -> URL? {
+        try Self.validateCacheKey(key)
+        try prepare()
+        let file = directory.appendingPathComponent(key)
+        do {
+            guard try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true,
+                  Self.isImage(try Data(contentsOf: file)) else { return nil }
+            return file
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
+            return nil
+        }
+    }
+
+    public func importCachedFile(from source: URL, key: String) throws {
+        try Self.validateCacheKey(key)
+        if try cachedFileURL(forKey: key) != nil { return }
+        let data = try Data(contentsOf: source)
+        guard Self.isImage(data) else { throw URLError(.cannotDecodeContentData) }
+        try store(data, key: key)
+        guard try cachedFileURL(forKey: key) != nil else { throw CocoaError(.fileWriteOutOfSpace) }
+    }
+
+    private static func validateCacheKey(_ key: String) throws {
+        guard key.utf8.count == 64, key.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+            throw CocoaError(.fileReadInvalidFileName)
+        }
+    }
+
     public var isDownloading: Bool { !pending.isEmpty }
 
     public func prefetch(assetID: UUID, preview: KeepsPreview, configuration: KeepsConfiguration) async throws -> Bool {
@@ -71,26 +124,25 @@ public actor PreviewCache {
         guard free > 2 * 1024 * 1024 * 1024 else { return false }
         guard pending.isEmpty else { return false }
         let key = Self.key(assetID: assetID, preview: preview, configuration: configuration, role: role)
-        _ = try await bytes(key: key, assetID: assetID, preview: preview, configuration: configuration)
-        return true
+        let (_, actualKey) = try await bytes(key: key, assetID: assetID, preview: preview, configuration: configuration)
+        return FileManager.default.fileExists(atPath: directory.appendingPathComponent(actualKey).path)
     }
 
     private func bytes(key: String, assetID: UUID, preview: KeepsPreview, configuration: KeepsConfiguration) async throws -> (Data, String) {
         try prepare()
-        if entries[key] != nil {
-            let file = directory.appendingPathComponent(key)
-            do {
-                let data = try Data(contentsOf: file)
-                guard Self.isImage(data) else {
-                    try FileManager.default.removeItem(at: file)
-                    entries[key] = nil
-                    return try await download(key: key, assetID: assetID, preview: preview, configuration: configuration)
-                }
-                try touch(key)
-                return (data, key)
-            } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+        let file = directory.appendingPathComponent(key)
+        do {
+            let data = try Data(contentsOf: file)
+            guard Self.isImage(data) else {
+                try FileManager.default.removeItem(at: file)
                 entries[key] = nil
+                return try await download(key: key, assetID: assetID, preview: preview, configuration: configuration)
             }
+            entries[key] = Entry(size: data.count, accessed: Date())
+            try touch(key)
+            return (data, key)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            entries[key] = nil
         }
         return try await download(key: key, assetID: assetID, preview: preview, configuration: configuration)
     }
@@ -153,12 +205,19 @@ public actor PreviewCache {
     }
 
     private func prepare() throws {
-        guard !indexed || !FileManager.default.fileExists(atPath: directory.path) else { return }
+        guard !prepared || !FileManager.default.fileExists(atPath: directory.path) else { return }
         if migrateLegacy {
             try Self.migrateLegacyCache(in: URL.cachesDirectory)
         }
         entries.removeAll()
+        indexed = false
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        prepared = true
+    }
+    private func indexForEviction() throws {
+        guard !indexed else { return }
+        // Cache hits use their stable filename; only eviction needs the whole directory.
+        entries.removeAll()
         for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]) {
             let name = file.lastPathComponent
             guard name.count == 64, name.allSatisfy({ $0.isHexDigit }) else { continue }
@@ -167,7 +226,6 @@ public actor PreviewCache {
             entries[name] = Entry(size: values.fileSize ?? 0, accessed: values.contentModificationDate ?? .distantPast)
         }
         indexed = true
-        try trim()
     }
     private func touch(_ key: String) throws {
         guard var entry = entries[key] else { return }
@@ -197,6 +255,7 @@ public actor PreviewCache {
         let available = try directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage
         let lowSpace = available.map { $0 < 1024 * 1024 * 1024 } ?? false
         guard limit != Int.max || lowSpace else { return }
+        try indexForEviction()
         var total = entries.values.reduce(0) { $0 + $1.size }
         guard total > limit || lowSpace else { return }
         let target = lowSpace ? max(0, total - 256 * 1024 * 1024) : limit / 5 * 4

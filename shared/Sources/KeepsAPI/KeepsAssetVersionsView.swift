@@ -6,6 +6,7 @@ public struct KeepsAssetVersionsView: View {
     public let configuration: KeepsConfiguration
     public var onSelection: (KeepsAsset) -> Void
     @State private var versions: [KeepsAssetVersion] = []
+    @State private var deprecatedFiles: [KeepsAssetVersions.DeprecatedFile] = []
     @State private var busy = false
     @State private var error: String?
 
@@ -32,6 +33,22 @@ public struct KeepsAssetVersionsView: View {
                     if !version.available { Text("文件暂不可用").font(.caption).foregroundStyle(.secondary) }
                 }
             }
+            if !deprecatedFiles.isEmpty {
+                DisclosureGroup("已弃用的重复文件") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("以下文件仅标记为弃用，磁盘文件未删除。").foregroundStyle(.secondary)
+                        ForEach(deprecatedFiles, id: \.path) { file in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(file.path)
+                                Text("保留位置：\(file.retainedPath)")
+                                Text("弃用原因：\(file.reason)").foregroundStyle(.secondary)
+                            }
+                            .textSelection(.enabled)
+                        }
+                    }
+                    .font(.caption)
+                }
+            }
             if versions.isEmpty && !busy && error == nil {
                 Text("暂无版本信息，保留当前预览。").font(.caption).foregroundStyle(.secondary)
             }
@@ -42,12 +59,13 @@ public struct KeepsAssetVersionsView: View {
     }
 
     private func load() async {
-        versions = []; error = nil; busy = true
+        versions = []; deprecatedFiles = []; error = nil; busy = true
         defer { busy = false }
         do {
-            let result = try await KeepsClient(configuration: configuration).versions(assetID: assetID)
+            let result = try await KeepsClient(configuration: configuration).versionDetails(assetID: assetID)
             try Task.checkCancellation()
-            versions = result
+            versions = result.items
+            deprecatedFiles = result.deprecatedFiles ?? []
         } catch { if !Task.isCancelled { self.error = String(reflecting: error) } }
     }
 
