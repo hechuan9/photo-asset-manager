@@ -23,11 +23,16 @@ pub fn migrate(db: &Connection) -> Result<()> {
     Ok(())
 }
 pub fn expire(db: &Connection) -> Result<()> {
-    db.execute("UPDATE media_cache SET status=CASE WHEN attempts>=4 THEN 'failed' ELSE 'pending' END,available_at=unixepoch()+60,last_error='remote worker lease expired' WHERE status='processing' AND EXISTS(SELECT 1 FROM remote_cache_tasks r WHERE r.library_id=media_cache.library_id AND r.asset_id=media_cache.asset_id AND r.completed=0 AND r.expires_at<=unixepoch())",[])?;
-    db.execute(
-        "UPDATE remote_cache_tasks SET completed=-1 WHERE completed=0 AND expires_at<=unixepoch()",
-        [],
-    )?;
+    let expired = db.prepare("SELECT id,library_id,asset_id,source_hash FROM remote_cache_tasks WHERE completed=0 AND expires_at<=unixepoch()")?
+        .query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, library, asset, hash) in expired {
+        cache::record_failure(db, &library, &asset, &hash, "remote worker lease expired")?;
+        db.execute(
+            "UPDATE remote_cache_tasks SET completed=-1 WHERE id=? AND completed=0",
+            [id],
+        )?;
+    }
     Ok(())
 }
 #[derive(Clone)]
@@ -537,9 +542,9 @@ fn complete_sync(s: &AppState, lib: &str, id: &str) -> Result<Value> {
 fn fail_task(store: &Store, lib: &str, id: &str, error: &str) -> Result<()> {
     let mut db = store.lock()?;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let asset:Option<String>=tx.query_row("SELECT asset_id FROM remote_cache_tasks WHERE id=? AND library_id=? AND completed=0 AND expires_at>unixepoch()",params![id,lib],|r|r.get(0)).optional()?;
-    let asset = asset.ok_or_else(conflict)?;
-    tx.execute("UPDATE media_cache SET status=CASE WHEN attempts>=4 THEN 'failed' ELSE 'pending' END,last_error=?,available_at=unixepoch()+60*attempts*attempts,updated_at=unixepoch() WHERE library_id=? AND asset_id=? AND status='processing'",params![error,lib,asset])?;
+    let source: Option<(String,String)> = tx.query_row("SELECT asset_id,source_hash FROM remote_cache_tasks WHERE id=? AND library_id=? AND completed=0 AND expires_at>unixepoch()", params![id,lib],|row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+    let (asset, hash) = source.ok_or_else(conflict)?;
+    cache::record_failure(&tx, lib, &asset, &hash, error)?;
     tx.execute(
         "UPDATE remote_cache_tasks SET completed=-1 WHERE id=?",
         [id],
@@ -603,6 +608,15 @@ mod tests {
             .execute("UPDATE media_cache SET status='processing'", [])?;
         store.lock()?.execute("INSERT INTO remote_cache_tasks VALUES('task','lib','asset','hash','hash','/photo/test.jpg','worker',unixepoch()+1800,0)",[])?;
         Ok((root, store))
+    }
+    fn add_indexed_source(root: &std::path::Path, store: &Store) -> Result<()> {
+        let source = root.join("photo.jpg");
+        fs::write(&source, b"original")?;
+        store.lock()?.execute(
+            "INSERT INTO catalog_paths VALUES('lib',?,'asset','hash','jpeg_original')",
+            [source.to_str().unwrap()],
+        )?;
+        Ok(())
     }
     fn pending_setup() -> Result<(tempfile::TempDir, Store)> {
         let (root, store) = setup()?;
@@ -781,6 +795,7 @@ mod tests {
     #[test]
     fn startup_preserves_active_lease_and_expiry_requeues_once() -> Result<()> {
         let (_root, store) = setup()?;
+        add_indexed_source(_root.path(), &store)?;
         store.recover_cache()?;
         assert!(task(&store, "lib", "task").is_ok());
         store
@@ -812,6 +827,7 @@ mod tests {
     #[test]
     fn expired_fourth_attempt_is_failed_and_stale_failure_cannot_touch_replacement() -> Result<()> {
         let (_root, store) = setup()?;
+        add_indexed_source(_root.path(), &store)?;
         store
             .lock()?
             .execute("UPDATE media_cache SET attempts=4", [])?;
@@ -825,6 +841,65 @@ mod tests {
             .execute("UPDATE media_cache SET status='processing'", [])?;
         assert!(fail_task(&store, "lib", "task", "late error").is_err());
         assert_eq!(store.cache_status("lib")?["counts"]["processing"], 1);
+        Ok(())
+    }
+    #[test]
+    fn stale_failure_and_expiry_preserve_replacement_cache() -> Result<()> {
+        for expired in [false, true] {
+            let (_root, store) = setup()?;
+            store.lock()?.execute("UPDATE media_cache SET source_hash='replacement',status='processing',attempts=2,last_error='current error',available_at=123",[])?;
+            if expired {
+                store
+                    .lock()?
+                    .execute("UPDATE remote_cache_tasks SET expires_at=0", [])?;
+                expire(&*store.lock()?)?;
+            } else {
+                fail_task(&store, "lib", "task", "stale error")?;
+            }
+            let row=store.lock()?.query_row("SELECT source_hash,status,attempts,last_error,available_at FROM media_cache WHERE asset_id='asset'",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,String>(3)?,r.get::<_,i64>(4)?)))?;
+            assert_eq!(
+                row,
+                (
+                    "replacement".into(),
+                    "processing".into(),
+                    2,
+                    "current error".into(),
+                    123
+                )
+            );
+            assert_eq!(
+                store.lock()?.query_row(
+                    "SELECT completed FROM remote_cache_tasks WHERE id='task'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                -1
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn missing_indexed_source_ends_remote_failure_without_retry() -> Result<()> {
+        for expired in [false, true] {
+            let (_root, store) = setup()?;
+            if expired {
+                store
+                    .lock()?
+                    .execute("UPDATE remote_cache_tasks SET expires_at=0", [])?;
+                expire(&*store.lock()?)?;
+            } else {
+                fail_task(&store, "lib", "task", "no indexed source")?;
+            }
+            assert_eq!(
+                store.lock()?.query_row(
+                    "SELECT status FROM media_cache WHERE asset_id='asset'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )?,
+                "cancelled"
+            );
+            assert!(claim_pending(&store, "lib", "worker")?.is_none());
+        }
         Ok(())
     }
     #[test]

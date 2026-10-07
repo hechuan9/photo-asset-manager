@@ -202,7 +202,7 @@ pub fn status(store: &Store, jobs: &Jobs, library: &str) -> Result<Value> {
         {
             manual.extend(scope.photo_ids(&db, library)?);
         }
-        let mut q=db.prepare("SELECT c.asset_id,c.status,c.last_error FROM media_cache c JOIN catalog_assets a ON a.library_id=c.library_id AND a.id=c.asset_id WHERE c.library_id=? AND a.trashed=0 AND c.status<>'ready'")?;
+        let mut q=db.prepare("SELECT c.asset_id,c.status,c.last_error FROM media_cache c JOIN catalog_assets a ON a.library_id=c.library_id AND a.id=c.asset_id WHERE c.library_id=? AND a.trashed=0 AND c.status IN ('pending','processing','failed')")?;
         for row in q.query_map([library], |r| {
             Ok((
                 r.get::<_, String>(0)?,

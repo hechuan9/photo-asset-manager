@@ -48,6 +48,58 @@ pub fn local_encoding_enabled() -> Result<bool> {
 pub const BATCH: usize = 20;
 const MAX_ATTEMPTS: i64 = 4;
 
+/// Recheck this failed attempt against current catalog state before consuming retries.
+/// Returns false when the attempt is obsolete, so callers do not fail its parent photo job.
+pub(crate) fn record_failure(
+    db: &Connection,
+    lib: &str,
+    id: &str,
+    expected_hash: &str,
+    error: &str,
+) -> Result<bool> {
+    let current: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM media_cache WHERE library_id=? AND asset_id=? AND source_hash=? AND status='processing')",
+        params![lib,id,expected_hash], |r| r.get(0),
+    )?;
+    if !current {
+        return Ok(false);
+    }
+    let target: Option<String> = db.query_row(
+        "SELECT coalesce(d.content_hash,a.content_hash) FROM catalog_assets a LEFT JOIN catalog_defaults d ON d.library_id=a.library_id AND d.asset_id=a.id WHERE a.library_id=?1 AND a.id=?2 AND a.trashed=0 AND EXISTS(SELECT 1 FROM catalog_paths p WHERE p.library_id=a.library_id AND p.asset_id=a.id AND p.content_hash=coalesce(d.content_hash,a.content_hash) AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path))",
+        params![lib,id], |r| r.get(0),
+    ).optional()?;
+    match target {
+        None => {
+            db.execute("UPDATE media_cache SET status='cancelled',last_error=NULL,available_at=0,updated_at=unixepoch() WHERE library_id=? AND asset_id=?",params![lib,id])?;
+            tracing::info!(
+                library_id = lib,
+                asset_id = id,
+                source_hash = expected_hash,
+                error,
+                reason = "asset has no eligible indexed source",
+                "Obsolete media task cancelled"
+            );
+            Ok(false)
+        }
+        Some(hash) if hash != expected_hash => {
+            db.execute("UPDATE media_cache SET source_hash=?,spec=?,status='pending',attempts=0,available_at=0,last_error=NULL,updated_at=unixepoch() WHERE library_id=? AND asset_id=?",params![hash,spec()?,lib,id])?;
+            tracing::info!(
+                library_id = lib,
+                asset_id = id,
+                source_hash = expected_hash,
+                new_hash = hash,
+                error,
+                "Media task retargeted after source change"
+            );
+            Ok(false)
+        }
+        Some(_) => {
+            db.execute("UPDATE media_cache SET status=CASE WHEN attempts>=? THEN 'failed' ELSE 'pending' END,last_error=?,available_at=unixepoch()+60*attempts*attempts,updated_at=unixepoch() WHERE library_id=? AND asset_id=?",params![MAX_ATTEMPTS,error,lib,id])?;
+            Ok(true)
+        }
+    }
+}
+
 pub fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS photos(library_id TEXT NOT NULL,id TEXT NOT NULL,snapshot TEXT NOT NULL,PRIMARY KEY(library_id,id));
 CREATE TABLE IF NOT EXISTS videos(library_id TEXT NOT NULL,id TEXT NOT NULL,snapshot TEXT NOT NULL,PRIMARY KEY(library_id,id));
@@ -84,7 +136,7 @@ impl Store {
         Ok(())
     }
     pub fn reconcile_cache(&self) -> Result<()> {
-        self.lock()?.execute("INSERT INTO media_cache(library_id,asset_id,source_hash,spec) SELECT a.library_id,a.id,coalesce(d.content_hash,a.content_hash),? FROM catalog_assets a LEFT JOIN catalog_defaults d ON a.library_id=d.library_id AND a.id=d.asset_id WHERE a.trashed=0 ON CONFLICT(library_id,asset_id) DO UPDATE SET source_hash=excluded.source_hash,spec=excluded.spec,status='pending',attempts=0,available_at=0,last_error=NULL WHERE media_cache.source_hash!=excluded.source_hash OR media_cache.spec!=excluded.spec", [spec()?])?;
+        self.lock()?.execute("INSERT INTO media_cache(library_id,asset_id,source_hash,spec) SELECT a.library_id,a.id,coalesce(d.content_hash,a.content_hash),? FROM catalog_assets a LEFT JOIN catalog_defaults d ON a.library_id=d.library_id AND a.id=d.asset_id WHERE a.trashed=0 ON CONFLICT(library_id,asset_id) DO UPDATE SET source_hash=excluded.source_hash,spec=excluded.spec,status='pending',attempts=0,available_at=0,last_error=NULL WHERE media_cache.source_hash!=excluded.source_hash OR media_cache.spec!=excluded.spec OR (media_cache.status='cancelled' AND EXISTS(SELECT 1 FROM catalog_paths p WHERE p.library_id=excluded.library_id AND p.asset_id=excluded.asset_id AND p.content_hash=excluded.source_hash AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path)))", [spec()?])?;
         Ok(())
     }
     pub fn recover_cache(&self) -> Result<()> {
@@ -92,6 +144,24 @@ impl Store {
             "UPDATE media_cache SET status='pending' WHERE status='processing' AND NOT EXISTS(SELECT 1 FROM remote_cache_tasks r WHERE r.library_id=media_cache.library_id AND r.asset_id=media_cache.asset_id AND r.completed=0 AND r.expires_at>unixepoch())",
             [],
         )?;
+        Ok(())
+    }
+    // Revisit one terminal failure per existing idle maintenance pass, without encoding.
+    fn recheck_failed_cache(&self) -> Result<()> {
+        let mut db = self.lock()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row: Option<(String,String,String,String)> = tx.query_row(
+            "SELECT library_id,asset_id,source_hash,coalesce(last_error,'media generation failed') FROM media_cache WHERE status='failed' AND available_at<=unixepoch() ORDER BY available_at LIMIT 1",
+            [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+        ).optional()?;
+        if let Some((lib, id, hash, error)) = row {
+            tx.execute(
+                "UPDATE media_cache SET status='processing' WHERE library_id=? AND asset_id=?",
+                params![lib, id],
+            )?;
+            record_failure(&tx, &lib, &id, &hash, &error)?;
+        }
+        tx.commit()?;
         Ok(())
     }
     pub fn cache_status(&self, library: &str) -> Result<Value> {
@@ -171,9 +241,18 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
-    pub(crate) fn cache_failed(&self, lib: &str, id: &str, error: &str) -> Result<()> {
-        self.lock()?.execute("UPDATE media_cache SET status=CASE WHEN attempts>=? THEN 'failed' ELSE 'pending' END,last_error=?,available_at=unixepoch()+60*attempts*attempts,updated_at=unixepoch() WHERE library_id=? AND asset_id=?",params![MAX_ATTEMPTS,error,lib,id])?;
-        Ok(())
+    pub(crate) fn cache_failed(
+        &self,
+        lib: &str,
+        id: &str,
+        hash: &str,
+        error: &str,
+    ) -> Result<bool> {
+        let mut db = self.lock()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let failed = record_failure(&tx, lib, id, hash, error)?;
+        tx.commit()?;
+        Ok(failed)
     }
     pub(crate) fn cache_publish(
         &self,
@@ -193,11 +272,11 @@ impl Store {
             )
             .optional()?
             .flatten();
-        let changed=tx.execute("UPDATE media_cache SET status='ready',thumbnail=?,standard=?,last_error=NULL,updated_at=unixepoch() WHERE library_id=? AND asset_id=? AND source_hash=? AND spec=? AND EXISTS(SELECT 1 FROM catalog_assets a LEFT JOIN catalog_defaults d ON a.library_id=d.library_id AND a.id=d.asset_id WHERE a.library_id=? AND a.id=? AND coalesce(d.content_hash,a.content_hash)=?)",params![thumbnail.to_string(),standard.to_string(),lib,id,hash,spec()?,lib,id,hash])?;
+        let changed=tx.execute("UPDATE media_cache SET status='ready',thumbnail=?,standard=?,last_error=NULL,updated_at=unixepoch() WHERE library_id=? AND asset_id=? AND source_hash=? AND spec=? AND status<>'cancelled' AND EXISTS(SELECT 1 FROM catalog_assets a LEFT JOIN catalog_defaults d ON a.library_id=d.library_id AND a.id=d.asset_id WHERE a.library_id=? AND a.id=? AND coalesce(d.content_hash,a.content_hash)=?)",params![thumbnail.to_string(),standard.to_string(),lib,id,hash,spec()?,lib,id,hash])?;
         if changed == 0 {
             tx.execute(
-                "UPDATE media_cache SET status='pending' WHERE library_id=? AND asset_id=?",
-                params![lib, id],
+                "UPDATE media_cache SET status='pending' WHERE library_id=? AND asset_id=? AND source_hash=? AND status='processing'",
+                params![lib, id, hash],
             )?;
         } else {
             tx.execute("UPDATE remote_cache_tasks SET completed=1 WHERE library_id=? AND asset_id=? AND source_hash=? AND completed=0",params![lib,id,hash])?;
@@ -311,9 +390,10 @@ pub fn process_next(
         store.lock()?.execute("UPDATE media_cache SET status='pending',attempts=MAX(attempts-1,0),available_at=unixepoch()+30 WHERE library_id=? AND asset_id=?",params![lib,id])?;
         Ok(())
     })();
-    if let Err(error) = result {
+    if let Err(error) = result
+        && store.cache_failed(&lib, &id, &hash, &format!("{error:#}"))?
+    {
         tracing::error!(asset_id=%id,error=%format!("{error:#}"),"could not schedule photo update");
-        store.cache_failed(&lib, &id, &format!("{error:#}"))?;
     }
     Ok(true)
 }
@@ -329,7 +409,7 @@ pub fn process_asset(
     let selected: Option<(String, String)> = {
         let mut db = store.lock()?;
         let tx = db.transaction()?;
-        tx.execute("INSERT INTO media_cache(library_id,asset_id,source_hash,spec) SELECT a.library_id,a.id,coalesce(d.content_hash,a.content_hash),?3 FROM catalog_assets a LEFT JOIN catalog_defaults d ON d.library_id=a.library_id AND d.asset_id=a.id WHERE a.library_id=?1 AND a.id=?2 AND a.trashed=0 ON CONFLICT(library_id,asset_id) DO UPDATE SET source_hash=excluded.source_hash,spec=excluded.spec,status='pending',attempts=0,available_at=0,last_error=NULL WHERE media_cache.source_hash!=excluded.source_hash OR media_cache.spec!=excluded.spec",params![lib,id,spec()?])?;
+        tx.execute("INSERT INTO media_cache(library_id,asset_id,source_hash,spec) SELECT a.library_id,a.id,coalesce(d.content_hash,a.content_hash),?3 FROM catalog_assets a LEFT JOIN catalog_defaults d ON d.library_id=a.library_id AND d.asset_id=a.id WHERE a.library_id=?1 AND a.id=?2 AND a.trashed=0 ON CONFLICT(library_id,asset_id) DO UPDATE SET source_hash=excluded.source_hash,spec=excluded.spec,status='pending',attempts=0,available_at=0,last_error=NULL WHERE media_cache.source_hash!=excluded.source_hash OR media_cache.spec!=excluded.spec OR (media_cache.status='cancelled' AND EXISTS(SELECT 1 FROM catalog_paths p WHERE p.library_id=excluded.library_id AND p.asset_id=excluded.asset_id AND p.content_hash=excluded.source_hash AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path)))",params![lib,id,spec()?])?;
         let row: Option<(String, String)> = tx
             .query_row(
                 "SELECT source_hash,status FROM media_cache WHERE library_id=? AND asset_id=?",
@@ -346,14 +426,14 @@ pub fn process_asset(
     let Some((hash, status)) = selected else {
         return Ok(());
     };
-    if status == "ready" {
+    if status == "ready" || status == "cancelled" {
         return Ok(());
     }
     ensure!(
         status == "pending",
         "photo media is {status}; retry pending processing before completing the photo"
     );
-    let result = (|| {
+    let mut result = (|| {
         ensure!(
             local_encoding_enabled()?,
             "local photo encoding is disabled"
@@ -364,8 +444,10 @@ pub fn process_asset(
         );
         generate(store, jobs, previews, lib, id, &hash)
     })();
-    if let Err(error) = &result {
-        store.cache_failed(lib, id, &format!("{error:#}"))?;
+    if let Err(error) = &result
+        && !store.cache_failed(lib, id, &hash, &format!("{error:#}"))?
+    {
+        result = Ok(());
     }
     store.lock()?.execute("UPDATE cache_runtime SET last_batch_count=1,last_batch_at=unixepoch(),next_batch_at=0 WHERE id=1",[])?;
     result
@@ -388,6 +470,7 @@ pub fn maintain(
             "UPDATE cache_runtime SET free_bytes=?,next_batch_at=0 WHERE id=1",
             [previews.free_bytes()?],
         )?;
+        store.recheck_failed_cache()?;
         store.reconcile_cache()?;
         store.audit_cache(previews)?;
         if crate::cache_gc::enabled()? {
@@ -632,6 +715,82 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn obsolete_failure_stays_cancelled_until_source_is_reindexed() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("db"), true)?;
+        let jobs = Jobs::open(&dir.path().join("jobs"), dir.path())?;
+        seed(&store, 1)?;
+        store.reconcile_cache()?;
+        let (lib, id, hash) = store.claim_cache()?.unwrap();
+        assert!(!store.cache_failed(&lib, &id, &hash, "no indexed source path")?);
+        store.reconcile_cache()?;
+        assert!(store.claim_cache()?.is_none());
+        let status = crate::tasks::status(&store, &jobs, &lib)?;
+        assert_eq!(status["automatic"]["remainingPhotos"], 0);
+        assert_eq!(status["automatic"]["failedPhotos"], 0);
+        store.cache_publish(&lib, &id, &hash, &json!({}), &json!({}))?;
+        assert_eq!(store.cache_status(&lib)?["counts"]["cancelled"], 1);
+        store.lock()?.execute(
+            "INSERT INTO catalog_paths VALUES('lib','/photos/restored.jpg',?,?,'jpeg_original')",
+            params![id, hash],
+        )?;
+        store.reconcile_cache()?;
+        assert_eq!(store.claim_cache()?.unwrap().2, hash);
+        Ok(())
+    }
+
+    #[test]
+    fn failure_retargets_changed_source_without_charging_new_version() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("db"), true)?;
+        seed(&store, 1)?;
+        store.reconcile_cache()?;
+        let (lib, id, old) = store.claim_cache()?.unwrap();
+        store
+            .lock()?
+            .execute("UPDATE catalog_assets SET content_hash='new'", [])?;
+        store.lock()?.execute(
+            "INSERT INTO catalog_paths VALUES('lib','/photos/current.jpg',?,'new','jpeg_original')",
+            [&id],
+        )?;
+        assert!(!store.cache_failed(&lib, &id, &old, "old generation failed")?);
+        let row: (String, String, i64, Option<String>) = store.lock()?.query_row(
+            "SELECT source_hash,status,attempts,last_error FROM media_cache",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        assert_eq!(row, ("new".into(), "pending".into(), 0, None));
+        store.claim_cache()?.unwrap();
+        assert!(!store.cache_failed(&lib, &id, &old, "late old failure")?);
+        assert!(store.cache_failed(&lib, &id, "new", "permission denied: full cause chain")?);
+        assert_eq!(
+            store.cache_status(&lib)?["errors"][0]["error"],
+            "permission denied: full cause chain"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn idle_recheck_inspects_only_one_old_failure_without_retrying_encoder() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("db"), true)?;
+        seed(&store, 2)?;
+        store.reconcile_cache()?;
+        store.lock()?.execute(
+            "UPDATE media_cache SET status='failed',attempts=4,last_error='old failure'",
+            [],
+        )?;
+        store.recheck_failed_cache()?;
+        let status = store.cache_status("lib")?;
+        assert_eq!(status["counts"]["cancelled"], 1);
+        assert_eq!(status["counts"]["failed"], 1);
+        assert_eq!(status["counts"]["pending"], 0);
+        store.recheck_failed_cache()?;
+        assert_eq!(store.cache_status("lib")?["counts"]["cancelled"], 2);
+        Ok(())
+    }
+
+    #[test]
     fn scan_gate_defers_without_attempts_and_keeps_other_directories_claimable() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let store = Store::open(&dir.path().join("db"), true)?;
@@ -812,7 +971,11 @@ mod tests {
         let store = Store::open(&db, true)?;
         seed(&store, 1)?;
         store.reconcile_cache()?;
-        let (lib, id, _) = store.claim_cache()?.unwrap();
+        let (lib, id, hash) = store.claim_cache()?.unwrap();
+        store.lock()?.execute(
+            "INSERT INTO catalog_paths VALUES('lib','/photos/live.jpg',?,?,'jpeg_original')",
+            params![id, hash],
+        )?;
         drop(store);
         let store = Store::open(&db, false)?;
         store.recover_cache()?;
@@ -822,7 +985,7 @@ mod tests {
                 .lock()?
                 .execute("UPDATE media_cache SET available_at=0", [])?;
             store.claim_cache()?.unwrap();
-            store.cache_failed(&lib, &id, "full error chain")?;
+            store.cache_failed(&lib, &id, &hash, "full error chain")?;
         }
         assert_eq!(store.cache_status("lib")?["counts"]["failed"], 1);
         assert!(store.claim_cache()?.is_none());
