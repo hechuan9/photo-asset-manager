@@ -71,6 +71,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .merge(crate::remote_worker::router())
         .merge(crate::imports::router())
+        .merge(crate::offline_rebuild::router(state.clone()))
         .route("/libraries/{library}/assets", get(assets))
         .route(
             "/libraries/{library}/assets/{asset}",
@@ -99,6 +100,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/libraries/{library}/revision", get(revision))
         .route("/libraries/{library}/counts", get(counts))
         .route("/libraries/{library}/cache-status", get(cache_status))
+        .route("/libraries/{library}/task-status", get(task_status))
         .route("/libraries/{library}/cache-retry", post(cache_retry))
         .route("/libraries/{library}/cache-rebuild", post(cache_rebuild))
         .route(
@@ -108,6 +110,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/libraries/{library}/directories",
             get(directories).post(create_directory),
+        )
+        .route(
+            "/libraries/{library}/directories/trash",
+            post(trash_directory),
+        )
+        .route(
+            "/libraries/{library}/directories/trash/{request_id}",
+            get(directory_trash_status),
         )
         .route("/libraries/{library}/navigation", get(navigation))
         .route(
@@ -178,9 +188,10 @@ fn require_library(state: &AppState, library: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn blocking<F>(operation: F) -> Result<Value, ApiError>
+async fn blocking<F, T>(operation: F) -> Result<T, ApiError>
 where
-    F: FnOnce() -> anyhow::Result<Value> + Send + 'static,
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
 {
     tokio::task::spawn_blocking(operation)
         .await
@@ -335,6 +346,7 @@ async fn create_directory(
     Json(body): Json<CreateDirectoryRequest>,
 ) -> ApiResult {
     let result = blocking(move || {
+        let _directory_guard = state.jobs.directory_mutation.read().unwrap();
         let name = &body.name;
         if name.trim().is_empty()
             || name.starts_with('.')
@@ -373,6 +385,45 @@ async fn create_directory(
     })
     .await?;
     Ok((StatusCode::CREATED, Json(result)).into_response())
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrashDirectoryRequest {
+    #[serde(default, rename = "requestID")]
+    request_id: String,
+    path: String,
+    confirmation_name: String,
+}
+async fn trash_directory(
+    State(state): State<Arc<AppState>>,
+    Path(library): Path<String>,
+    Json(body): Json<TrashDirectoryRequest>,
+) -> ApiResult {
+    let result = blocking(move || {
+        Ok(serde_json::to_value(crate::directory_trash::submit(
+            &state.jobs,
+            &library,
+            &body.path,
+            &body.confirmation_name,
+            &body.request_id,
+        )?)?)
+    })
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(result)).into_response())
+}
+async fn directory_trash_status(
+    State(state): State<Arc<AppState>>,
+    Path((library, request_id)): Path<(String, String)>,
+) -> ApiResult {
+    let result = blocking(move || {
+        Ok(serde_json::to_value(crate::directory_trash::get(
+            &state.jobs,
+            &library,
+            &request_id,
+        )?)?)
+    })
+    .await?;
+    Ok(Json(result).into_response())
 }
 #[derive(Deserialize)]
 struct NavigationQuery {
@@ -445,6 +496,7 @@ async fn add_folder(
         StatusCode::CREATED,
         Json(
             blocking(move || {
+                let _directory_guard = state.jobs.directory_mutation.read().unwrap();
                 state
                     .jobs
                     .validate_path(std::path::Path::new(&body.path))
@@ -705,7 +757,7 @@ async fn default_version(
     .into_response())
 }
 
-fn standard_descriptor(
+pub(crate) fn standard_descriptor(
     state: &AppState,
     library: &str,
     asset: &str,
@@ -824,7 +876,7 @@ async fn cache_status(
 async fn cache_retry(State(state): State<Arc<AppState>>, Path(library): Path<String>) -> ApiResult {
     require_library(&state, &library)?;
     Ok(
-        Json(blocking(move || Ok(json!({"requeued":state.store.retry_cache(&library)?,"gcRequeued":state.store.retry_cache_garbage(&library)?}))).await?)
+        Json(blocking(move || Ok(json!({"requeued":crate::cache_pipeline::queue_manual(&state.store,&state.jobs,&library,false)?,"gcRequeued":state.store.retry_cache_garbage(&library)?}))).await?)
             .into_response(),
     )
 }
@@ -835,7 +887,15 @@ async fn cache_rebuild(
 ) -> ApiResult {
     require_library(&state, &library)?;
     Ok(
-        Json(blocking(move || Ok(json!({"requeued":state.store.rebuild_cache(&library)?}))).await?)
+        Json(blocking(move || Ok(json!({"requeued":crate::cache_pipeline::queue_manual(&state.store,&state.jobs,&library,true)?}))).await?)
+            .into_response(),
+    )
+}
+
+async fn task_status(State(state): State<Arc<AppState>>, Path(library): Path<String>) -> ApiResult {
+    require_library(&state, &library)?;
+    Ok(
+        Json(blocking(move || crate::tasks::status(&state.store, &state.jobs, &library)).await?)
             .into_response(),
     )
 }

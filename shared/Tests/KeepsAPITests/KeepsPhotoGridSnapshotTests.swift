@@ -63,4 +63,35 @@ struct KeepsPhotoGridSnapshotTests {
         #expect(!snapshot.rows.flatMap(\.slots).contains { $0.id == ids[0] })
         #expect(snapshot.rows != original)
     }
+    @Test func evictedRowsCanBeLoadedAgainWithoutDuplicateSlots() {
+        var snapshot = KeepsPhotoGrid.Snapshot()
+        for start in stride(from: 1, through: 5001, by: 200) {
+            update(&snapshot, Array(start..<(start + 1000)))
+            #expect(snapshot.rows.flatMap(\.slots).count <= 1016)
+        }
+        for start in stride(from: 4801, through: 1, by: -200) {
+            update(&snapshot, Array(start..<(start + 1000)))
+            let slots = snapshot.rows.flatMap(\.slots).map(\.id)
+            #expect(Set(slots).count == slots.count)
+            #expect(Set((start..<(start + 1000)).map(id)).isSubset(of: Set(slots)))
+            #expect(slots.count <= 1016)
+        }
+    }
+
+    @Test func aspectRatioRefreshPreservesExistingRowsUntilStyleReset() {
+        var snapshot = KeepsPhotoGrid.Snapshot()
+        let originalIDs = [10, 20, 30].map(id)
+        snapshot.update(ids: originalIDs, aspectRatios: [0.5, 1, 2], width: 390,
+                        density: .large, style: .aspectRatio)
+        let original = snapshot.rows[0]
+        snapshot.update(ids: [1, 10, 20, 30, 40].map(id), aspectRatios: [1, 0.5, 1, 2, 1.5],
+                        width: 390, density: .large, style: .aspectRatio)
+        #expect(snapshot.rows[1] == original)
+        #expect(snapshot.rows.allSatisfy { row in row.slots.allSatisfy { $0.size.height == row.height } })
+        snapshot.update(ids: [1, 10, 20, 30, 40].map(id), aspectRatios: [1, 0.5, 1, 2, 1.5],
+                        width: 390, density: .single, style: .square, reset: true)
+        #expect(snapshot.rows.count == 5)
+        #expect(snapshot.rows.flatMap(\.slots).allSatisfy { $0.size == CGSize(width: 390, height: 390) })
+    }
+
 }

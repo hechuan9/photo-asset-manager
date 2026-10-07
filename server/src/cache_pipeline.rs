@@ -46,7 +46,6 @@ pub fn local_encoding_enabled() -> Result<bool> {
         .map_err(anyhow::Error::msg)
 }
 pub const BATCH: usize = 20;
-pub const REST_SECONDS: u64 = 60;
 const MAX_ATTEMPTS: i64 = 4;
 
 pub fn migrate(db: &Connection) -> Result<()> {
@@ -126,7 +125,7 @@ impl Store {
         )?;
         let runtime=db.query_row("SELECT next_batch_at,last_batch_count,last_batch_at,last_error,free_bytes FROM cache_runtime WHERE id=1",[],|r| Ok(json!({"nextBatchAt":r.get::<_,i64>(0)?,"lastBatchCount":r.get::<_,i64>(1)?,"lastBatchAt":r.get::<_,Option<i64>>(2)?,"lastError":r.get::<_,Option<String>>(3)?,"freeBytes":r.get::<_,Option<i64>>(4)?})))?;
         Ok(
-            json!({"enabled":true,"localEncodingEnabled":local_encoding_enabled()?,"gc":crate::cache_gc::status(&db,library)?,"runtime":runtime,"totalAssets":inventory,"eligibleAssets":eligible,"pendingInventory":inventory-eligible,"counts":counts,"spec":spec()?,"batchLimit":BATCH,"concurrency":1,"encoderThreads":1,"restSeconds":REST_SECONDS,"maxAttempts":MAX_ATTEMPTS,"lastSuccessAt":last,"errors":errors}),
+            json!({"enabled":true,"localEncodingEnabled":local_encoding_enabled()?,"gc":crate::cache_gc::status(&db,library)?,"runtime":runtime,"totalAssets":inventory,"eligibleAssets":eligible,"pendingInventory":inventory-eligible,"counts":counts,"spec":spec()?,"batchLimit":1,"concurrency":1,"encoderThreads":1,"restSeconds":0,"maxAttempts":MAX_ATTEMPTS,"lastSuccessAt":last,"errors":errors}),
         )
     }
     pub fn rebuild_cache(&self, library: &str) -> Result<usize> {
@@ -150,6 +149,19 @@ impl Store {
         }
         tx.commit()?;
         Ok(row)
+    }
+    pub(crate) fn defer_cache_for_scan(&self, jobs: &Jobs, lib: &str, id: &str) -> Result<bool> {
+        let path: Option<String> = self.lock()?.query_row(
+            "SELECT p.path FROM catalog_assets a LEFT JOIN catalog_defaults d ON d.library_id=a.library_id AND d.asset_id=a.id LEFT JOIN catalog_paths p ON p.library_id=a.library_id AND p.asset_id=a.id AND p.content_hash=COALESCE(d.content_hash,a.content_hash) WHERE a.library_id=? AND a.id=? AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path) ORDER BY p.path LIMIT 1",
+            params![lib,id], |row| row.get(0),
+        ).optional()?.flatten();
+        if let Some(path) = path
+            && jobs.directory_scan_pending(lib, Path::new(&path))?
+        {
+            self.defer_cache_for_path_sync(lib, id)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
     pub(crate) fn defer_cache_for_path_sync(&self, lib: &str, id: &str) -> Result<()> {
         let mut db = self.lock()?;
@@ -241,59 +253,157 @@ impl Store {
     }
 }
 
-pub fn process_batch(
-    store: &Store,
-    jobs: &Jobs,
-    previews: &PreviewStorage,
-    stop: &AtomicBool,
-) -> Result<usize> {
-    process_batch_with_local_encoding(store, jobs, previews, stop, local_encoding_enabled()?)
+/// Explicit cache operations are finite manual jobs, never background priority changes.
+pub fn queue_manual(store: &Store, jobs: &Jobs, library: &str, rebuild: bool) -> Result<usize> {
+    let paths = {
+        let db = store.lock()?;
+        let mut q=db.prepare("SELECT (SELECT p.path FROM catalog_paths p WHERE p.library_id=c.library_id AND p.asset_id=c.asset_id AND p.content_hash=c.source_hash ORDER BY p.path LIMIT 1) FROM media_cache c WHERE c.library_id=?1 AND ((?2=1 AND c.status='ready') OR (?2=0 AND c.status IN ('pending','failed') AND c.last_error IS NOT NULL)) ORDER BY c.updated_at LIMIT 20")?;
+        q.query_map(params![library, rebuild], |r| r.get::<_, Option<String>>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let folders = jobs.folders()?;
+    let targets = paths
+        .into_iter()
+        .map(|p| {
+            let path = p.context("cannot retry a photo without an indexed source path")?;
+            let folder = folders
+                .iter()
+                .filter(|f| {
+                    f.active && f.library_id == library && Path::new(&path).starts_with(&f.path)
+                })
+                .max_by_key(|f| f.path.len())
+                .context("photo has no active source folder")?;
+            Ok((folder.id.clone(), path))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut queued = std::collections::HashSet::new();
+    for (folder, path) in targets {
+        let job = jobs.enqueue_manual_file(&folder, Path::new(&path))?;
+        store.note_revision_activity(library, &job.id, &job.path)?;
+        queued.insert(job.id);
+    }
+    Ok(queued.len())
 }
 
-fn process_batch_with_local_encoding(
+/// Missing media joins the photo queue so indexing and encoding share the same restart boundary.
+pub fn process_next(
+    store: &Store,
+    jobs: &Jobs,
+    _previews: &PreviewStorage,
+    stop: &AtomicBool,
+) -> Result<bool> {
+    if stop.load(Ordering::Relaxed) || !local_encoding_enabled()? {
+        return Ok(false);
+    }
+    let Some((lib, id, hash)) = store.claim_cache()? else {
+        return Ok(false);
+    };
+    let result: Result<()> = (|| {
+        let path: String=store.lock()?.query_row("SELECT path FROM catalog_paths WHERE library_id=? AND asset_id=? AND content_hash=? ORDER BY path LIMIT 1",params![lib,id,hash],|r|r.get(0)).optional()?.context("no indexed source path available")?;
+        let folder = jobs
+            .folders()?
+            .into_iter()
+            .filter(|f| f.active && f.library_id == lib && Path::new(&path).starts_with(&f.path))
+            .max_by_key(|f| f.path.len())
+            .context("photo has no active source folder")?;
+        let job = jobs.enqueue_file_change(&folder.id, Path::new(&path), 0)?;
+        store.note_revision_activity(&lib, &job.id, &job.path)?;
+        store.lock()?.execute("UPDATE media_cache SET status='pending',attempts=MAX(attempts-1,0),available_at=unixepoch()+30 WHERE library_id=? AND asset_id=?",params![lib,id])?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::error!(asset_id=%id,error=%format!("{error:#}"),"could not schedule photo update");
+        store.cache_failed(&lib, &id, &format!("{error:#}"))?;
+    }
+    Ok(true)
+}
+
+/// Finish media preparation inside the same non-preemptible indexed photo unit.
+pub fn process_asset(
+    store: &Store,
+    jobs: &Jobs,
+    previews: &PreviewStorage,
+    lib: &str,
+    id: &str,
+) -> Result<()> {
+    let selected: Option<(String, String)> = {
+        let mut db = store.lock()?;
+        let tx = db.transaction()?;
+        tx.execute("INSERT INTO media_cache(library_id,asset_id,source_hash,spec) SELECT a.library_id,a.id,coalesce(d.content_hash,a.content_hash),?3 FROM catalog_assets a LEFT JOIN catalog_defaults d ON d.library_id=a.library_id AND d.asset_id=a.id WHERE a.library_id=?1 AND a.id=?2 AND a.trashed=0 ON CONFLICT(library_id,asset_id) DO UPDATE SET source_hash=excluded.source_hash,spec=excluded.spec,status='pending',attempts=0,available_at=0,last_error=NULL WHERE media_cache.source_hash!=excluded.source_hash OR media_cache.spec!=excluded.spec",params![lib,id,spec()?])?;
+        let row: Option<(String, String)> = tx
+            .query_row(
+                "SELECT source_hash,status FROM media_cache WHERE library_id=? AND asset_id=?",
+                params![lib, id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if row.as_ref().is_some_and(|r| r.1 == "pending") {
+            tx.execute("UPDATE media_cache SET status='processing',attempts=attempts+1,updated_at=unixepoch() WHERE library_id=? AND asset_id=?",params![lib,id])?;
+        }
+        tx.commit()?;
+        row
+    };
+    let Some((hash, status)) = selected else {
+        return Ok(());
+    };
+    if status == "ready" {
+        return Ok(());
+    }
+    ensure!(
+        status == "pending",
+        "photo media is {status}; retry pending processing before completing the photo"
+    );
+    let result = (|| {
+        ensure!(
+            local_encoding_enabled()?,
+            "local photo encoding is disabled"
+        );
+        ensure!(
+            previews.free_bytes()? >= 2 * 1024 * 1024 * 1024,
+            "cache disk has less than 2 GiB free"
+        );
+        generate(store, jobs, previews, lib, id, &hash)
+    })();
+    if let Err(error) = &result {
+        store.cache_failed(lib, id, &format!("{error:#}"))?;
+    }
+    store.lock()?.execute("UPDATE cache_runtime SET last_batch_count=1,last_batch_at=unixepoch(),next_batch_at=0 WHERE id=1",[])?;
+    result
+}
+
+pub fn maintain(
     store: &Store,
     jobs: &Jobs,
     previews: &PreviewStorage,
     stop: &AtomicBool,
-    local_encoding: bool,
-) -> Result<usize> {
-    let next: i64 = store.lock()?.query_row(
-        "SELECT next_batch_at FROM cache_runtime WHERE id=1",
-        [],
-        |r| r.get(0),
-    )?;
-    if chrono::Utc::now().timestamp() < next {
-        return Ok(0);
+) -> Result<()> {
+    if stop.load(Ordering::Relaxed) {
+        return Ok(());
     }
-    if crate::cache_gc::enabled()? {
-        store.switch_ready_previews(previews)?;
-        store.collect_cache_garbage(previews, chrono::Utc::now().timestamp())?;
+    if let Some(folder) = jobs.folders()?.into_iter().find(|f| f.active) {
+        crate::tasks::begin(jobs, &folder.library_id, "maintenance", None)?;
     }
-    let free = previews.free_bytes()?;
+    let result: Result<()> = (|| {
+        store.lock()?.execute(
+            "UPDATE cache_runtime SET free_bytes=?,next_batch_at=0 WHERE id=1",
+            [previews.free_bytes()?],
+        )?;
+        store.reconcile_cache()?;
+        store.audit_cache(previews)?;
+        if crate::cache_gc::enabled()? {
+            store.switch_ready_previews(previews)?;
+            store.collect_cache_garbage(previews, chrono::Utc::now().timestamp())?;
+        }
+        Ok(())
+    })();
+    let error = result.as_ref().err().map(|e| format!("{e:#}"));
     store
         .lock()?
-        .execute("UPDATE cache_runtime SET free_bytes=? WHERE id=1", [free])?;
-    if free < 2 * 1024 * 1024 * 1024 {
-        store.lock()?.execute("UPDATE cache_runtime SET last_error='cache disk has less than 2 GiB free',next_batch_at=unixepoch()+60 WHERE id=1",[])?;
-        return Ok(0);
-    }
+        .execute("UPDATE cache_runtime SET last_error=? WHERE id=1", [&error])?;
+    crate::tasks::finish(jobs, error.as_deref())?;
+    result?;
     crate::worker::process_identity_batch(store, jobs, previews, stop)?;
-    store.reconcile_cache()?;
-    store.audit_cache(previews)?;
-    let mut count = 0;
-    while local_encoding && count < BATCH && !stop.load(Ordering::Relaxed) {
-        let Some((lib, id, hash)) = store.claim_cache()? else {
-            break;
-        };
-        count += 1;
-        if let Err(error) = generate(store, jobs, previews, &lib, &id, &hash) {
-            let trace = format!("{error:#}");
-            tracing::error!(asset_id=%id,error=%trace,"NAS cache generation failed");
-            store.cache_failed(&lib, &id, &trace)?;
-        }
-    }
-    store.lock()?.execute("UPDATE cache_runtime SET next_batch_at=unixepoch()+?,last_batch_at=unixepoch(),last_batch_count=?,last_error=NULL WHERE id=1",params![REST_SECONDS as i64,count as i64])?;
-    Ok(count)
+    Ok(())
 }
 
 fn generate(
@@ -307,7 +417,7 @@ fn generate(
     let selected = if let Some(selected) = store.default_version(lib, id)? {
         selected
     } else {
-        store.lock()?.query_row("SELECT content_hash,path FROM catalog_paths WHERE library_id=? AND asset_id=? AND content_hash=? ORDER BY path LIMIT 1",params![lib,id,hash],|r| Ok(crate::versions::DefaultVersion {content_hash:r.get(0)?,path:r.get(1)?})).optional()?.context("no indexed source path available")?
+        store.lock()?.query_row("SELECT content_hash,path FROM catalog_paths p WHERE library_id=? AND asset_id=? AND content_hash=? AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path) ORDER BY path LIMIT 1",params![lib,id,hash],|r| Ok(crate::versions::DefaultVersion {content_hash:r.get(0)?,path:r.get(1)?})).optional()?.context("no indexed source path available")?
     };
     ensure!(
         selected.content_hash == hash,
@@ -489,7 +599,7 @@ pub(crate) fn select_standard_source(
         return Ok(selected.clone());
     }
     let db = store.lock()?;
-    let mut q=db.prepare("SELECT content_hash,path FROM catalog_paths WHERE library_id=? AND asset_id=? AND role='jpeg_original' ORDER BY path")?;
+    let mut q=db.prepare("SELECT content_hash,path FROM catalog_paths p WHERE library_id=? AND asset_id=? AND role='jpeg_original' AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path) ORDER BY path")?;
     let rows = q.query_map(params![library, asset], |r| {
         Ok(crate::versions::DefaultVersion {
             content_hash: r.get(0)?,
@@ -522,6 +632,44 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn scan_gate_defers_without_attempts_and_keeps_other_directories_claimable() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(&dir.path().join("db"), true)?;
+        let originals = dir.path().join("photos");
+        fs::create_dir_all(originals.join("other"))?;
+        let jobs = Jobs::open(&dir.path().join("jobs"), &originals)?;
+        let folder = jobs.add_folder("lib", ".")?;
+        let originals = jobs.root().to_path_buf();
+        seed(&store, 2)?;
+        for (index, path) in [originals.join("a.3fr"), originals.join("other/b.heic")]
+            .iter()
+            .enumerate()
+        {
+            store.lock()?.execute(
+                "INSERT INTO catalog_paths VALUES('lib',?,?,?,'jpeg_original')",
+                params![
+                    path.to_str().unwrap(),
+                    format!("00000000-0000-0000-0000-{index:012}"),
+                    format!("hash{index}")
+                ],
+            )?;
+        }
+        jobs.enqueue_file_change(&folder.id, &originals.join("a.heic"), 0)?;
+        store.reconcile_cache()?;
+        let (lib, id, _) = store.claim_cache()?.unwrap();
+        assert!(store.defer_cache_for_scan(&jobs, &lib, &id)?);
+        let state: (String, i64, bool) = store.lock()?.query_row(
+            "SELECT status,attempts,available_at>unixepoch() FROM media_cache WHERE asset_id=?",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        assert_eq!(state, ("pending".into(), 0, true));
+        let (lib, other, _) = store.claim_cache()?.unwrap();
+        assert_ne!(id, other);
+        assert!(!store.defer_cache_for_scan(&jobs, &lib, &other)?);
+        Ok(())
+    }
+    #[test]
     fn legacy_assets_without_versions_are_queued_and_identity_is_preserved() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let store = Store::open(&dir.path().join("db"), true)?;
@@ -549,7 +697,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn coordinator_only_batch_reconciles_and_audits_without_claiming() -> Result<()> {
+    fn maintenance_reconciles_and_audits_without_encoding() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let originals = dir.path().join("originals");
         fs::create_dir(&originals)?;
@@ -575,10 +723,7 @@ mod tests {
         )?;
         store.lock()?.execute("INSERT INTO catalog_assets VALUES('lib','new','{}','newhash','fingerprint','2024-01-01','photo.jpg',0,'picked',NULL,0)", [])?;
         let stop = AtomicBool::new(false);
-        assert_eq!(
-            process_batch_with_local_encoding(&store, &jobs, &previews, &stop, false)?,
-            0
-        );
+        maintain(&store, &jobs, &previews, &stop)?;
         let status = store.cache_status("lib")?;
         assert_eq!(status["pendingInventory"], 0);
         assert_eq!(status["counts"]["pending"], 2);
@@ -592,9 +737,7 @@ mod tests {
             0
         );
         assert!(status["runtime"]["freeBytes"].as_u64().unwrap() > 0);
-        assert!(
-            status["runtime"]["nextBatchAt"].as_i64().unwrap() > chrono::Utc::now().timestamp()
-        );
+        assert_eq!(status["runtime"]["nextBatchAt"], 0);
         Ok(())
     }
     #[test]
@@ -630,7 +773,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn bounded_batches_pause_and_missing_sources_do_not_delete_any_file() -> Result<()> {
+    fn missing_media_processes_one_item_per_turn_without_deleting_sources() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let originals = dir.path().join("originals");
         fs::create_dir(&originals)?;
@@ -646,10 +789,17 @@ mod tests {
         )?;
         seed(&store, 23)?;
         let stop = AtomicBool::new(false);
-        assert_eq!(process_batch(&store, &jobs, &previews, &stop)?, 20);
-        assert_eq!(process_batch(&store, &jobs, &previews, &stop)?, 0);
+        store.reconcile_cache()?;
+        assert!(process_next(&store, &jobs, &previews, &stop)?);
+        assert_eq!(
+            store
+                .lock()?
+                .query_row("SELECT sum(attempts) FROM media_cache", [], |r| r
+                    .get::<_, i64>(0))?,
+            1
+        );
         let status = store.cache_status("lib")?;
-        assert_eq!(status["runtime"]["lastBatchCount"], 20);
+
         assert_eq!(status["counts"]["ready"], 0);
         assert!(status["lastSuccessAt"].is_null());
         assert_eq!(fs::read(&untouched)?, b"original");
@@ -778,6 +928,11 @@ mod tests {
         assert_eq!(
             select_standard_source(&store, "lib", id, &selected)?.content_hash,
             "jpeghash"
+        );
+        store.lock()?.execute("INSERT INTO catalog_deprecated_files VALUES('lib',?,'retained.jpg','content_hash','duplicate')", [jpeg.to_str()])?;
+        assert_eq!(
+            select_standard_source(&store, "lib", id, &selected)?.content_hash,
+            "rawhash"
         );
         Ok(())
     }

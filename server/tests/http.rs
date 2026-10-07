@@ -100,6 +100,13 @@ async fn nas_catalog_commands_queries_authentication_and_restart() {
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(page["total"], 2);
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        page["items"][0]["paths"],
+        json!([dir
+            .path()
+            .join("originals")
+            .join(page["items"][0]["originalFilename"].as_str().unwrap())])
+    );
     let cursor = page["nextCursor"].as_str().unwrap();
     assert!(cursor.starts_with("cd1."));
     let (status, next) = call(
@@ -1829,4 +1836,147 @@ async fn imports_deduplicate_skips_existing_group_and_rechecks_before_finish() {
         );
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
     }
+}
+
+#[tokio::test]
+async fn task_summary_is_scoped_and_cache_rebuild_queues_manual_photo_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let folder = state.jobs.add_folder("photos", ".").unwrap();
+    let id = seed(&state, &dir.path().canonicalize().unwrap(), "photo.jpg");
+    state.store.reconcile_cache().unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("keeps/db/control_plane.sqlite")).unwrap();
+    db.execute(
+        "UPDATE media_cache SET status='ready',thumbnail='{}',standard='{}'",
+        [],
+    )
+    .unwrap();
+    let app = router(state.clone());
+    let (status, body) = call(
+        app.clone(),
+        "GET",
+        "/libraries/photos/task-status",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_object().unwrap().len(), 2);
+    assert_eq!(body["automatic"]["remainingPhotos"], 0);
+    assert_eq!(
+        call(
+            app.clone(),
+            "GET",
+            "/libraries/other/task-status",
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, body) = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/cache-rebuild",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["requeued"], 1);
+    let job = state.jobs.claim_class("manual").unwrap().unwrap();
+    assert_eq!(job.folder_id, folder.id);
+    assert!(job.refresh_metadata);
+    assert_eq!(
+        db.query_row(
+            "SELECT status FROM media_cache WHERE asset_id=?",
+            [id],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "ready"
+    );
+    let (_, summary) = call(app, "GET", "/libraries/photos/task-status", Value::Null).await;
+    assert_eq!(summary["longTask"]["kind"], "manual");
+    assert_eq!(summary["automatic"]["remainingPhotos"], 0);
+}
+
+#[tokio::test]
+async fn directory_trash_requires_exact_confirmation_and_protects_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    state
+        .jobs
+        .add_folder("photos", state.jobs.root().to_str().unwrap())
+        .unwrap();
+    let source = state.jobs.root().join("folder");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("photo.raw"), b"unchanged").unwrap();
+    let app = router(state.clone());
+    for body in [
+        json!({"path":source, "confirmationName":"folder ","requestID":uuid::Uuid::new_v4()}),
+        json!({"path":state.jobs.root(), "confirmationName":"originals","requestID":uuid::Uuid::new_v4()}),
+    ] {
+        let (status, _) = call(
+            app.clone(),
+            "POST",
+            "/libraries/photos/directories/trash",
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    assert_eq!(
+        std::fs::read(source.join("photo.raw")).unwrap(),
+        b"unchanged"
+    );
+}
+
+#[tokio::test]
+async fn directory_trash_returns_durable_task_and_status_without_running_native_program() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    state
+        .jobs
+        .add_folder("photos", state.jobs.root().to_str().unwrap())
+        .unwrap();
+    let source = state.jobs.root().join("folder");
+    std::fs::create_dir(&source).unwrap();
+    let app = router(state);
+    let id = uuid::Uuid::new_v4().to_string();
+    let route = "/libraries/photos/directories/trash";
+    let body = json!({"path":source,"confirmationName":"folder","requestID":id});
+    let (status, task) = call(app.clone(), "POST", route, body.clone()).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(task["status"], "pending");
+    assert_eq!(task["phase"], "waiting");
+    let (status, duplicate) = call(app.clone(), "POST", route, body).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(duplicate, task);
+    let (status, read) = call(app.clone(), "GET", &format!("{route}/{id}"), json!(null)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read, task);
+    let (status, _) = call(
+        app.clone(),
+        "POST",
+        route,
+        json!({"path":source,"confirmationName":"folder"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = call(
+        app.clone(),
+        "POST",
+        route,
+        json!({"path":source,"confirmationName":"folder","requestID":uuid::Uuid::new_v4()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = call(
+        app,
+        "GET",
+        &format!("{route}/{}", uuid::Uuid::new_v4()),
+        json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(source.exists());
 }

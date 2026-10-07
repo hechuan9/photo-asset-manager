@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import OSLog
 import KeepsAPI
 
 @MainActor
@@ -7,45 +8,78 @@ final class IOSLibraryStore: ObservableObject {
     @Published private(set) var assets: [KeepsAsset] = []
     @Published private(set) var total = 0
     @Published private(set) var layoutRevision = 0
-    @Published private(set) var isLoading = false
+    @Published private(set) var databaseRevision = 0
+    @Published private(set) var isSyncing = false
+    @Published private(set) var isLoadingLocal = false
+    private(set) var syncError: String?
     @Published private(set) var configuration: KeepsConfiguration?
     @Published var lastError: String?
     @Published var search = ""
     @Published var showingTrash = false
     @Published var showingPicked = false
     @Published var directory: String?
+    private(set) var database: KeepsLibraryDatabase?
     let sort = "capture_desc"
     var chronologicalAssets: [KeepsAsset] { assets.reversed() }
     private var nextCursor: String?
-    private var generation = 0
     private var displayedQuery: KeepsAssetQuery?
-    private var displayedPage: KeepsAssetPage?
-    private let cache = KeepsAssetCache()
+    private var loadedCount = 200
+    private(set) var canLoadNewer = false
+    private var readSequence = 0
+    private var paging = false
+    private let reader = IOSCatalogReader()
+    private let windowLimit = 1000
+    private var generation = 0
+    private var syncTask: Task<Void, Never>?
+    private var syncObservers: [UUID: IOSOfflineProgress.Reporter] = [:]
+    private var initialReadTask: Task<Void, Never>?
     private let session: URLSession
-    private var requestTask: Task<Void, Never>?
+    private let databaseDirectory: URL?
+    private let synchronizer = IOSCatalogSynchronizer()
 
     init(configuration: KeepsConfiguration? = nil, session: URLSession = KeepsClient.apiSession,
-         loadSettings: Bool = true) {
+         loadSettings: Bool = true, databaseDirectory: URL? = nil) {
         self.session = session
-        if let configuration { self.configuration = configuration }
+        self.databaseDirectory = databaseDirectory
+        if let configuration { configure(configuration) }
         else if loadSettings { reloadConfiguration() }
     }
 
     func configure(_ configuration: KeepsConfiguration?) {
         guard self.configuration != configuration else { return }
         generation += 1
-        layoutRevision += 1
-        requestTask?.cancel()
-        requestTask = nil
-        cache.removeAll()
-        displayedQuery = nil
-        displayedPage = nil
+        readSequence += 1
+        paging = false
+        syncTask?.cancel()
+        syncTask = nil
+        initialReadTask?.cancel()
+        initialReadTask = nil
+        isLoadingLocal = false
+        database = nil
         assets = []
         total = 0
         nextCursor = nil
-        isLoading = false
+        displayedQuery = nil
+        loadedCount = 200
+        canLoadNewer = false
+        layoutRevision += 1
+        isSyncing = false
+        syncError = nil
         lastError = nil
         self.configuration = configuration
+        guard let configuration else { return }
+        do {
+            database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: databaseDirectory)
+            isLoadingLocal = true
+            let currentGeneration = generation
+            initialReadTask = Task { [weak self] in
+                guard let self, generation == currentGeneration, !Task.isCancelled else { return }
+                await readLocal()
+                guard generation == currentGeneration else { return }
+                isLoadingLocal = false
+                initialReadTask = nil
+            }
+        } catch { lastError = String(reflecting: error) }
     }
 
     func reloadConfiguration() {
@@ -59,163 +93,281 @@ final class IOSLibraryStore: ObservableObject {
         query.trashed = showingTrash
         query.flagState = showingPicked ? "picked" : nil
         query.directory = directory
-        query.sort = sort
         query.limit = 200
         return query
     }
 
+    func waitForLocalLoad() async { await initialReadTask?.value }
+
     func refresh() async {
-        await load(validateRevision: false)
+        await waitForLocalLoad()
+        await readLocal()
     }
 
-    func refreshFromBottom() async {
+    func loadMore() async { await loadPage(newer: false) }
+    func loadNewer() async { await loadPage(newer: true) }
+
+    @discardableResult
+    func restoreWindow(around asset: KeepsAsset) async -> Bool {
+        await waitForLocalLoad()
+        let request = query
+        if displayedQuery == request, assets.contains(where: { $0.id == asset.id }) { return true }
+        guard let configuration, database != nil else { return false }
+        readSequence += 1
+        paging = false
+        let sequence = readSequence
         let currentGeneration = generation
-        await load(validateRevision: true)
-        if generation == currentGeneration { layoutRevision += 1 }
+        do {
+            let window = try await reader.window(configuration: configuration, root: databaseDirectory,
+                                                 query: request, around: asset)
+            guard generation == currentGeneration, sequence == readSequence, request == query,
+                  let window else { return false }
+            if displayedQuery != request { layoutRevision += 1 }
+            displayedQuery = request
+            assets = window.page.items
+            loadedCount = max(200, assets.count)
+            total = window.page.total
+            nextCursor = window.page.nextCursor
+            canLoadNewer = window.hasNewer
+            lastError = nil
+            return true
+        } catch {
+            guard generation == currentGeneration, sequence == readSequence, request == query else { return false }
+            lastError = String(reflecting: error)
+            return false
+        }
     }
 
-    private func load(validateRevision: Bool) async {
-        guard let configuration else { return }
-        let query = query
-        if displayedQuery != query {
-            generation += 1
-            requestTask?.cancel()
-            requestTask = nil
-            layoutRevision += 1
-            displayedQuery = query
-            displayedPage = cache.page(for: query)
-            assets = displayedPage?.items ?? []
-            total = displayedPage?.total ?? 0
-            nextCursor = displayedPage?.nextCursor
+    private func loadPage(newer: Bool) async {
+        await waitForLocalLoad()
+        guard displayedQuery == query else { await readLocal(); return }
+        guard !paging, newer ? canLoadNewer : nextCursor != nil,
+              let configuration, let boundary = newer ? assets.first : assets.last else { return }
+        paging = true
+        readSequence += 1
+        let sequence = readSequence
+        let request = query
+        let currentGeneration = generation
+        defer { if sequence == readSequence { paging = false } }
+        do {
+            let page = try await reader.page(configuration: configuration, root: databaseDirectory,
+                query: request, older: newer ? nil : boundary, newer: newer ? boundary : nil, knownTotal: total)
+            guard generation == currentGeneration, sequence == readSequence, request == query else { return }
+            if newer {
+                assets.insert(contentsOf: page.items, at: 0)
+                canLoadNewer = page.nextCursor != nil
+                if assets.count > windowLimit {
+                    assets.removeLast(assets.count - windowLimit)
+                    nextCursor = "more"
+                }
+            } else {
+                assets.append(contentsOf: page.items)
+                nextCursor = page.nextCursor
+                if assets.count > windowLimit {
+                    assets.removeFirst(assets.count - windowLimit)
+                    canLoadNewer = true
+                }
+            }
+            loadedCount = assets.count
+            total = page.total
             lastError = nil
-            isLoading = false
-        } else if let requestTask {
-            await requestTask.value
-            return
+        } catch {
+            guard generation == currentGeneration, sequence == readSequence, request == query else { return }
+            lastError = String(reflecting: error)
         }
-        guard validateRevision || displayedPage == nil else { return }
-        let requestGeneration = generation
-        let client = KeepsClient(configuration: configuration, session: session)
-        isLoading = displayedPage == nil
-        lastError = nil
-        let task = Task {
+    }
+
+    private func readLocal() async {
+        guard let configuration, database != nil else { return }
+        readSequence += 1
+        paging = false
+        let sequence = readSequence
+        let currentGeneration = generation
+        let currentQuery = query
+        let sameQuery = displayedQuery == currentQuery
+        var request = currentQuery
+        request.limit = sameQuery ? max(200, loadedCount) : 200
+        do {
+            let page = try await reader.page(configuration: configuration, root: databaseDirectory,
+                query: request, through: sameQuery && !canLoadNewer ? assets.last : nil,
+                first: sameQuery && canLoadNewer ? assets.first : nil, maximumLimit: windowLimit)
+            guard generation == currentGeneration, sequence == readSequence, currentQuery == query else { return }
+            if !sameQuery {
+                layoutRevision += 1
+                canLoadNewer = false
+            }
+            displayedQuery = currentQuery
+            loadedCount = max(200, page.items.count)
+            assets = page.items
+            total = page.total
+            nextCursor = page.nextCursor
+            lastError = nil
+        } catch {
+            guard generation == currentGeneration, sequence == readSequence, currentQuery == query else { return }
+            lastError = String(reflecting: error)
+        }
+    }
+
+    func synchronize(forceRebuild: Bool = false, progress: IOSOfflineProgress.Reporter? = nil) async {
+        let observerID = UUID()
+        if let progress { syncObservers[observerID] = progress }
+        defer { syncObservers.removeValue(forKey: observerID) }
+        await waitForLocalLoad()
+        if let syncTask { await syncTask.value; return }
+        guard let configuration, database != nil else { return }
+        let currentGeneration = generation
+        isSyncing = true
+        syncError = nil
+        let task = Task(priority: .utility) { @MainActor in
             defer {
-                if generation == requestGeneration {
-                    isLoading = false
-                    requestTask = nil
+                if generation == currentGeneration {
+                    isSyncing = false
+                    syncTask = nil
+                    databaseRevision += 1
                 }
             }
             do {
-                if validateRevision, let displayedPage {
-                    let revision = try await client.revision(path: query.directory)
-                    try Task.checkCancellation()
-                    guard generation == requestGeneration else { return }
-                    if displayedPage.isCurrent(at: revision) { return }
-                }
-                isLoading = true
-                try await fetchPages(client: client, query: query, cursor: nil, generation: requestGeneration)
+                try await synchronizer.run(configuration: configuration, root: databaseDirectory,
+                    session: session, forceRebuild: forceRebuild) { stage, completed, total in
+                        guard self.generation == currentGeneration else { return }
+                        for observer in Array(self.syncObservers.values) { await observer(stage, completed, total) }
+                    }
             } catch {
-                guard generation == requestGeneration, !Task.isCancelled else { return }
-                lastError = String(reflecting: error)
+                guard generation == currentGeneration, !Task.isCancelled else { return }
+                syncError = String(reflecting: error)
+                Logger(subsystem: "com.hechuan.Keeps", category: "catalog-sync")
+                    .error("Catalog sync failed: \(String(reflecting: error), privacy: .public)")
             }
+            if generation == currentGeneration { await readLocal() }
         }
-        requestTask = task
-        await task.value
+        syncTask = task
+        await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
     }
 
-    func loadMore() async {
-        guard requestTask == nil, let nextCursor, let configuration, displayedQuery == query else { return }
-        let requestGeneration = generation
-        let query = query
-        let client = KeepsClient(configuration: configuration, session: session)
-        isLoading = true
-        lastError = nil
-        let task = Task {
-            defer {
-                if generation == requestGeneration { isLoading = false; requestTask = nil }
-            }
-            do { try await fetchPages(client: client, query: query, cursor: nextCursor, generation: requestGeneration) }
-            catch {
-                guard generation == requestGeneration, !Task.isCancelled else { return }
-                lastError = String(reflecting: error)
-            }
-        }
-        requestTask = task
-        await task.value
+    func synchronizeChecked(forceRebuild: Bool = false, progress: IOSOfflineProgress.Reporter? = nil) async throws {
+        await synchronize(forceRebuild: forceRebuild, progress: progress)
+        try Task.checkCancellation()
+        if let syncError { throw NSError(domain: "KeepsOfflineRebuild", code: 1, userInfo: [NSLocalizedDescriptionKey: syncError]) }
     }
 
-    private func fetchPages(client: KeepsClient, query: KeepsAssetQuery, cursor: String?, generation requestGeneration: Int) async throws {
-        var request = query
-        request.cursor = cursor
-        var loaded = cursor == nil ? [] : assets
-        var countToReload = cursor == nil ? assets.count : 0
-        var previous = cursor == nil ? nil : displayedPage
-        var isUpdating = previous?.isUpdating ?? false
-        var rebuilding = cursor == nil
-        var page: KeepsAssetPage
-        while true {
-            page = try await client.assets(query: request)
-            try Task.checkCancellation()
-            guard generation == requestGeneration else { return }
-            if let prior = previous, prior.revision != page.revision || prior.isUpdating || page.isUpdating {
-                if !rebuilding {
-                    // Re-read the loaded window before using a cursor from the new catalog.
-                    countToReload = assets.count + query.limit + max(0, page.total - total)
-                    rebuilding = true
-                    loaded = []
-                    request.cursor = nil
-                    previous = nil
-                    isUpdating = false
-                    continue
-                }
-                // A changing catalog remains browsable but must not become a stable cache.
-                isUpdating = true
-            }
-            var positions = Dictionary(uniqueKeysWithValues: loaded.enumerated().map { ($0.element.id, $0.offset) })
-            for asset in page.items {
-                if let index = positions[asset.id] { loaded[index] = asset }
-                else {
-                    positions[asset.id] = loaded.count
-                    loaded.append(asset)
-                }
-            }
-            isUpdating = isUpdating || page.isUpdating
-            previous = page
-            request.cursor = page.nextCursor
-            if !rebuilding || loaded.count >= countToReload || request.cursor == nil { break }
-        }
-        publish(KeepsAssetPage(items: loaded, total: page.total, nextCursor: page.nextCursor,
-                               revision: page.revision, isUpdating: isUpdating), query: query)
-    }
-
-    private func publish(_ page: KeepsAssetPage, query: KeepsAssetQuery) {
-        displayedPage = page
-        assets = page.items
-        total = page.total
-        nextCursor = page.nextCursor
-        cache.store(page, for: query)
-    }
-
-    func update(_ asset: KeepsAsset) {
-        // An asset can appear under several directory aliases and filter combinations.
-        cache.removeAll()
+    func update(_ asset: KeepsAsset) async {
+        guard let configuration else { return }
         generation += 1
-        requestTask?.cancel()
-        requestTask = nil
-        isLoading = false
-        if let index = assets.firstIndex(where: { $0.id == asset.id }) {
-            if asset.trashed != showingTrash || (showingPicked && asset.flagState != "picked") {
-                assets.remove(at: index); total = max(0, total - 1)
-            } else { assets[index] = asset }
-        }
-        if let displayedQuery, let page = displayedPage {
-            let updated = KeepsAssetPage(items: assets, total: total, nextCursor: nextCursor,
-                                         revision: page.revision, isUpdating: true)
-            displayedPage = updated
-            cache.store(updated, for: displayedQuery)
-        }
+        readSequence += 1
+        paging = false
+        syncTask?.cancel()
+        syncTask = nil
+        isSyncing = false
+        let currentGeneration = generation
+        do {
+            try await synchronizer.update(asset, configuration: configuration, root: databaseDirectory)
+            guard currentGeneration == generation else { return }
+            databaseRevision += 1
+            await readLocal()
+        } catch { lastError = String(reflecting: error) }
     }
 
     var canLoadMore: Bool { nextCursor != nil }
-    var hasLoadedResults: Bool { displayedPage != nil }
+    var hasLoadedResults: Bool { !assets.isEmpty || (!isLoadingLocal && !isSyncing) }
+
+}
+
+// The writer owns a separate SQLite connection; page commits never publish gallery state.
+private actor IOSCatalogSynchronizer {
+    func update(_ asset: KeepsAsset, configuration: KeepsConfiguration, root: URL?) throws {
+        let database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: root)
+        try database.update(asset)
+    }
+
+    func run(configuration: KeepsConfiguration, root: URL?, session: URLSession,
+             forceRebuild: Bool, progress: IOSOfflineProgress.Reporter?) async throws {
+        try Task.checkCancellation()
+        let database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: root)
+        let remote = try await KeepsClient(configuration: configuration, session: session).revision()
+        if !forceRebuild, try database.syncCheckpoint == nil, try database.revision == remote.revision { return }
+        let rebuild = KeepsOfflineRebuild(session: session)
+        _ = try await rebuild.run(configuration: configuration, databaseRoot: root,
+                                  includeThumbnails: forceRebuild || (try database.revision) == nil) { update in
+            let stage: IOSOfflineProgress.Stage
+            switch update.phase {
+            case .building:
+                switch update.step {
+                case "snapshot": stage = .snapshot
+                case "catalog": stage = .catalog
+                case "navigation": stage = .navigation
+                case "verifying": stage = .verifying
+                default: stage = .archive
+                }
+            case .downloading: stage = .download
+            case .verifying: stage = .verifyDownload
+            case .importing: stage = .importing
+            }
+            await progress?(stage, update.completed, update.total)
+        }
+    }
+
+}
+
+// A separate connection keeps SQLite work and snapshot decoding off the UI executor.
+private actor IOSCatalogReader {
+    private var configuration: KeepsConfiguration?
+    private var database: KeepsLibraryDatabase?
+
+    func window(configuration: KeepsConfiguration, root: URL?, query: KeepsAssetQuery,
+                around asset: KeepsAsset) throws -> (page: KeepsAssetPage, hasNewer: Bool)? {
+        var request = query
+        request.limit = 200
+        let older = try page(configuration: configuration, root: root, query: request, first: asset)
+        guard older.items.first?.id == asset.id else { return nil }
+        let newer = try page(configuration: configuration, root: root, query: request,
+                             newer: asset, knownTotal: older.total)
+        return (KeepsAssetPage(items: newer.items + older.items, total: older.total,
+                               nextCursor: older.nextCursor, revision: older.revision,
+                               isUpdating: older.isUpdating), newer.nextCursor != nil)
+    }
+
+    func page(configuration: KeepsConfiguration, root: URL?, query: KeepsAssetQuery,
+              older: KeepsAsset? = nil, newer: KeepsAsset? = nil, through: KeepsAsset? = nil,
+              first: KeepsAsset? = nil, maximumLimit: Int? = nil, knownTotal: Int? = nil) throws -> KeepsAssetPage {
+        if self.configuration != configuration {
+            database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: root)
+            self.configuration = configuration
+        }
+        return try database!.assets(query: query, includingThrough: through, olderThan: older,
+                                    newerThan: newer, startingAt: first, maximumLimit: maximumLimit, knownTotal: knownTotal)
+    }
+}
+
+// Fixed stage budgets keep later phases from resetting the system progress to zero.
+struct IOSOfflineProgress {
+    enum Stage: Int, CaseIterable, Sendable {
+        case restore, check, snapshot, catalog, navigation, archive, verifying, download, verifyDownload, importing, thumbnails, backup
+    }
+    typealias Reporter = @MainActor @Sendable (Stage, Int64, Int64) async -> Void
+    static let stageUnits: Int64 = 1_000_000_000
+    let totalUnitCount = Int64(Stage.allCases.count) * stageUnits
+    private(set) var completedUnitCount: Int64 = 0
+    private var reportedStage: Stage?
+    private var reportedCompleted: Int64 = 0
+    var fractionCompleted: Double { Double(completedUnitCount) / Double(totalUnitCount) }
+    var percentage: Int { Int(completedUnitCount * 100 / totalUnitCount) }
+
+    mutating func complete() { completedUnitCount = totalUnitCount }
+
+    mutating func record(_ stage: Stage, completed: Int64, total: Int64) {
+        guard completed >= 0, total > 0 else { return }
+        guard reportedStage.map({ stage.rawValue >= $0.rawValue }) ?? true else { return }
+        let denominator = stage == .navigation ? Double(max(total, completed)) + 1 : Double(total)
+        let fraction = min(1, Double(completed) / denominator)
+        let base = Int64(stage.rawValue) * Self.stageUnits
+        var units = base + Int64(fraction * Double(Self.stageUnits))
+        // Directory discovery may increase the denominator while actual completed work increases.
+        if stage == reportedStage, completed > reportedCompleted, units <= completedUnitCount {
+            units = min(base + Self.stageUnits - 1, completedUnitCount + 1)
+        }
+        if stage != reportedStage { reportedCompleted = 0 }
+        reportedStage = stage
+        reportedCompleted = max(reportedCompleted, completed)
+        completedUnitCount = min(totalUnitCount - 1, max(completedUnitCount, units))
+    }
 }

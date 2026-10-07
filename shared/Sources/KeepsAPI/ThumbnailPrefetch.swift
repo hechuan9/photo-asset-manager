@@ -5,64 +5,258 @@ import SwiftUI
 
 /// Downloads only small derivatives; pagination never mutates the visible catalog.
 public actor ThumbnailPrefetch {
+    public struct Progress: Codable, Equatable, Sendable {
+        public var processed = 0
+        public var total = 0
+        public var cached = 0
+        public var failed = 0
+        public var unavailable = 0
+        public var isComplete = false
+        public var lastError: String?
+    }
+
+    private struct Checkpoint: Codable {
+        var cursor: String?
+        var trashed = false
+        var pageCompleted: Set<UUID> = []
+        var progress = Progress()
+    }
+
     public static let shared = ThumbnailPrefetch()
     private var running: Set<String> = []
+    private let defaults: UserDefaults
+    private let fetchPage: @Sendable (KeepsConfiguration, KeepsAssetQuery) async throws -> KeepsAssetPage
+    private let fetchCounts: @Sendable (KeepsConfiguration) async throws -> KeepsCounts
+    private let prefetch: @Sendable (KeepsAsset, KeepsConfiguration) async throws -> Bool
+    private let localCache: PreviewCache
+    private let delay: Duration
+
+    public init(cache: PreviewCache = .thumbnails) {
+        localCache = cache
+        defaults = .standard
+        fetchPage = { try await KeepsClient(configuration: $0).assets(query: $1) }
+        fetchCounts = { try await KeepsClient(configuration: $0).counts(showHidden: true) }
+        prefetch = { asset, configuration in
+            guard let thumbnail = asset.thumbnail else { return false }
+            while await PreviewCache.standards.isDownloading {
+                try await Task.sleep(for: .seconds(1))
+            }
+            return try await PreviewCache.thumbnails.prefetch(assetID: asset.id, preview: thumbnail, configuration: configuration)
+        }
+        delay = .milliseconds(250)
+    }
+
+    init(defaultsSuite: String,
+         fetchPage: @escaping @Sendable (KeepsConfiguration, KeepsAssetQuery) async throws -> KeepsAssetPage,
+         fetchCounts: @escaping @Sendable (KeepsConfiguration) async throws -> KeepsCounts,
+         prefetch: @escaping @Sendable (KeepsAsset, KeepsConfiguration) async throws -> Bool) {
+        localCache = .thumbnails
+        defaults = UserDefaults(suiteName: defaultsSuite)!
+        self.fetchPage = fetchPage
+        self.fetchCounts = fetchCounts
+        self.prefetch = prefetch
+        delay = .zero
+    }
 
     @discardableResult
-    public func run(configuration: KeepsConfiguration, singlePass: Bool = false) async -> Bool {
+    public func run(configuration: KeepsConfiguration, singlePass: Bool = false,
+                    progress: (@Sendable (Progress) async -> Void)? = nil) async -> Bool {
         let identity = [configuration.baseURL.absoluteString, configuration.libraryID].map { "\($0.utf8.count):\($0)" }.joined()
-        let checkpoint = "thumbnail-prefetch-v1-" + SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
-        while running.contains(checkpoint) {
+        let key = "thumbnail-prefetch-v2-" + SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+        while running.contains(key) {
             do { try await Task.sleep(for: .milliseconds(250)) } catch { return false }
         }
         guard !Task.isCancelled else { return false }
-        running.insert(checkpoint)
-        defer { running.remove(checkpoint) }
-        var hadFailures = false
-        let client = KeepsClient(configuration: configuration)
+        running.insert(key)
+        defer { running.remove(key) }
+        var state = defaults.data(forKey: key).flatMap { try? JSONDecoder().decode(Checkpoint.self, from: $0) } ?? Checkpoint()
+        if state.progress.isComplete { state = Checkpoint() }
         while !Task.isCancelled {
             do {
-                var query = KeepsAssetQuery()
-                query.showHidden = true
-                query.limit = 100
-                query.cursor = UserDefaults.standard.string(forKey: checkpoint + "-cursor")
-                query.trashed = UserDefaults.standard.bool(forKey: checkpoint + "-trash")
-                let page = try await client.assets(query: query)
-                for asset in page.items {
-                    try Task.checkCancellation()
-                    guard let thumbnail = asset.thumbnail else { continue }
-                    do {
-                        while await PreviewCache.standards.isDownloading {
-                            try await Task.sleep(for: .seconds(1))
-                        }
-                        while !(try await PreviewCache.thumbnails.prefetch(assetID: asset.id, preview: thumbnail, configuration: configuration)) {
-                            try await Task.sleep(for: .seconds(5))
-                        }
-                    } catch {
-                        try Task.checkCancellation()
-                        hadFailures = true
-                        Logger(subsystem: "local.keeps", category: "thumbnail-prefetch").error("Thumbnail \(asset.id) failed: \(String(reflecting: error), privacy: .public)")
+                let counts = try await fetchCounts(configuration)
+                state.progress.total = counts.all + counts.trashed
+                if state.progress.failed == 0 { state.progress.lastError = nil }
+                await progress?(state.progress)
+                repeat {
+                    var query = KeepsAssetQuery()
+                    query.showHidden = true
+                    query.limit = 100
+                    query.cursor = state.cursor
+                    query.trashed = state.trashed
+                    let page = try await fetchPage(configuration, query)
+                    try await process(page, state: &state, key: key, configuration: configuration,
+                                      singlePass: singlePass, progress: progress)
+                    state.pageCompleted.removeAll()
+                    state.cursor = page.nextCursor
+                    if page.nextCursor == nil {
+                        if state.trashed { state.progress.isComplete = true }
+                        else { state.trashed = true }
                     }
-                    try await Task.sleep(for: .milliseconds(250))
-                }
-                // A failed asset is retried on the next pass without blocking the rest of the library.
-                UserDefaults.standard.set(page.nextCursor, forKey: checkpoint + "-cursor")
-                if page.nextCursor == nil {
-                    UserDefaults.standard.set(!query.trashed, forKey: checkpoint + "-trash")
-                    if query.trashed {
-                        if singlePass { return !hadFailures }
-                        try await Task.sleep(for: .seconds(300))
-                    }
-                }
-                try await Task.sleep(for: .seconds(2))
+                    try save(state, key: key)
+                } while !state.progress.isComplete
+                let result = state.progress.failed == 0 && state.progress.unavailable == 0
+                defaults.removeObject(forKey: key)
+                await progress?(state.progress)
+                if singlePass { return result }
+                state = Checkpoint()
+                try await Task.sleep(for: .seconds(300))
             } catch {
                 if Task.isCancelled { return false }
+                state.progress.lastError = (error as? CacheUnavailable)?.errorDescription ?? String(reflecting: error)
+                await progress?(state.progress)
                 Logger(subsystem: "local.keeps", category: "thumbnail-prefetch").error("Thumbnail prefetch failed: \(String(reflecting: error), privacy: .public)")
                 if singlePass { return false }
                 do { try await Task.sleep(for: .seconds(60)) } catch { return false }
             }
         }
         return false
+    }
+
+    /// Reads the complete local replica without involving the visible gallery window.
+    @discardableResult
+    public func runLocal(configuration: KeepsConfiguration, downloadMissing: Bool,
+                         databaseRoot: URL? = nil,
+                         progress: (@Sendable (Progress) async -> Void)? = nil) async -> Bool {
+        var state = Progress()
+        do {
+            try Task.checkCancellation()
+            let database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: databaseRoot)
+            guard let revision = try database.revision, try database.syncCheckpoint == nil else {
+                throw LocalCatalogUnavailable()
+            }
+            var cachedKeys = try await localCache.cachedKeys()
+            var requiredKeys: Set<String> = []
+            var downloaded = false
+            var pages: [(KeepsAssetQuery, KeepsAssetPage)] = []
+            for trashed in [false, true] {
+                var query = KeepsAssetQuery()
+                query.showHidden = true
+                query.trashed = trashed
+                query.limit = 100
+                let page = try database.assets(query: query)
+                state.total += page.total
+                pages.append((query, page))
+            }
+            await progress?(state)
+            let clock = ContinuousClock()
+            var lastProgress = clock.now
+            for (query, firstPage) in pages {
+                var page = firstPage
+                while true {
+                    try Task.checkCancellation()
+                    guard try database.revision == revision, try database.syncCheckpoint == nil else {
+                        throw LocalCatalogUnavailable()
+                    }
+                    for asset in page.items {
+                        try Task.checkCancellation()
+                        if let thumbnail = asset.thumbnail {
+                            let key = PreviewCache.key(assetID: asset.id, preview: thumbnail,
+                                                       configuration: configuration, role: .thumbnail)
+                            requiredKeys.insert(key)
+                            if !cachedKeys.contains(key), downloadMissing {
+                                do {
+                                    downloaded = true
+                                    guard try await localCache.prefetch(assetID: asset.id, preview: thumbnail,
+                                                                         configuration: configuration),
+                                          try await localCache.containsCachedKey(key) else { throw CacheUnavailable() }
+                                    cachedKeys.insert(key)
+                                } catch {
+                                    try Task.checkCancellation()
+                                    state.lastError = String(reflecting: error)
+                                    Logger(subsystem: "local.keeps", category: "thumbnail-prefetch")
+                                        .error("Local thumbnail \(asset.id) failed: \(String(reflecting: error), privacy: .public)")
+                                }
+                            }
+                            if cachedKeys.contains(key) { state.cached += 1 }
+                            else { state.failed += 1 }
+                        } else { state.unavailable += 1 }
+                        state.processed += 1
+                        if lastProgress.duration(to: clock.now) >= .seconds(1) {
+                            await progress?(state)
+                            lastProgress = clock.now
+                        }
+                    }
+                    await progress?(state)
+                    lastProgress = clock.now
+                    guard page.nextCursor != nil, let boundary = page.items.last else { break }
+                    page = try database.assets(query: query, olderThan: boundary, knownTotal: firstPage.total)
+                }
+            }
+            try Task.checkCancellation()
+            guard try database.revision == revision, try database.syncCheckpoint == nil else {
+                throw LocalCatalogUnavailable()
+            }
+            if downloaded {
+                let persisted = try await localCache.cachedKeys()
+                state.cached = requiredKeys.intersection(persisted).count
+                state.failed = requiredKeys.count - state.cached
+            }
+            try Task.checkCancellation()
+            guard try database.revision == revision, try database.syncCheckpoint == nil else {
+                throw LocalCatalogUnavailable()
+            }
+            // Assets without a server thumbnail are valid catalog records, not failed downloads.
+            state.isComplete = state.processed == state.total && state.failed == 0
+            if !state.isComplete, state.lastError == nil {
+                state.lastError = "已有缩略图尚未全部缓存：缺失 \(state.failed)。"
+            }
+            await progress?(state)
+            return state.isComplete
+        } catch {
+            state.lastError = (error as? LocalCatalogUnavailable)?.errorDescription ?? String(reflecting: error)
+            await progress?(state)
+            return false
+        }
+    }
+
+    private struct LocalCatalogUnavailable: Error, LocalizedError {
+        var errorDescription: String? { "本地图库尚未完成稳定同步，请先完成照片记录同步。" }
+    }
+
+    private struct CacheUnavailable: Error, LocalizedError {
+        var errorDescription: String? { "缩略图缓存暂不可用（空间不足或其他下载正在进行），进度已保留，请稍后重试。" }
+    }
+
+    private func cache(_ asset: KeepsAsset, configuration: KeepsConfiguration, singlePass: Bool) async throws {
+        var attempts = 0
+        while !(try await prefetch(asset, configuration)) {
+            attempts += 1
+            if singlePass && attempts >= 3 { throw CacheUnavailable() }
+            try await Task.sleep(for: delay == .zero ? .zero : .seconds(2))
+        }
+        try Task.checkCancellation()
+    }
+
+    private func process(_ page: KeepsAssetPage, state: inout Checkpoint, key: String,
+                         configuration: KeepsConfiguration, singlePass: Bool,
+                         progress: (@Sendable (Progress) async -> Void)?) async throws {
+        for asset in page.items where !state.pageCompleted.contains(asset.id) {
+            try Task.checkCancellation()
+            if asset.thumbnail == nil {
+                state.progress.unavailable += 1
+            } else {
+                do {
+                    try await cache(asset, configuration: configuration, singlePass: singlePass)
+                    state.progress.cached += 1
+                } catch is CacheUnavailable {
+                    throw CacheUnavailable()
+                } catch {
+                    try Task.checkCancellation()
+                    state.progress.failed += 1
+                    state.progress.lastError = String(reflecting: error)
+                    Logger(subsystem: "local.keeps", category: "thumbnail-prefetch").error("Thumbnail \(asset.id) failed: \(String(reflecting: error), privacy: .public)")
+                }
+            }
+            state.progress.processed += 1
+            state.pageCompleted.insert(asset.id)
+            try save(state, key: key)
+            await progress?(state.progress)
+            try await Task.sleep(for: delay)
+        }
+    }
+
+    private func save(_ state: Checkpoint, key: String) throws {
+        defaults.set(try JSONEncoder().encode(state), forKey: key)
     }
 }
 

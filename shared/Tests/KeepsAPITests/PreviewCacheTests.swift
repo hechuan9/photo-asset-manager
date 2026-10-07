@@ -26,6 +26,42 @@ struct PreviewCacheTests {
         return data as Data
     }
 
+    @Test func importedImageIsValidatedAndRetryReusesPersistedCopy() async throws {
+        let (cache, directory, session) = try fixture()
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory); try? FileManager.default.removeItem(at: source); session.invalidateAndCancel() }
+        let key = PreviewCache.key(assetID: id, preview: preview, configuration: configuration)
+        try Data("not an image".utf8).write(to: source)
+        await #expect(throws: URLError.self) { try await cache.importCachedFile(from: source, key: key) }
+        #expect(try await cache.cachedFileURL(forKey: key) == nil)
+        await #expect(throws: CocoaError.self) { try await cache.importCachedFile(from: source, key: "../outside") }
+        let data = try png()
+        try data.write(to: source)
+        try await cache.importCachedFile(from: source, key: key)
+        let file = try #require(try await cache.cachedFileURL(forKey: key))
+        #expect(try Data(contentsOf: file) == data)
+        try FileManager.default.removeItem(at: source)
+        try await cache.importCachedFile(from: source, key: key)
+        #expect(try Data(contentsOf: file) == data)
+    }
+
+    @Test func cacheInventoryReadsFreshRegularNonemptyFilesOnly() async throws {
+        let (cache, directory, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory); session.invalidateAndCancel() }
+        let key = PreviewCache.key(assetID: id, preview: preview, configuration: configuration)
+        try await cache.store(png(), key: key)
+        let emptyKey = String(repeating: "e", count: 64)
+        let directoryKey = String(repeating: "d", count: 64)
+        try Data().write(to: directory.appendingPathComponent(emptyKey))
+        try FileManager.default.createDirectory(at: directory.appendingPathComponent(directoryKey), withIntermediateDirectories: true)
+        try Data([1]).write(to: directory.appendingPathComponent("unfinished"))
+        #expect(try await cache.cachedKeys() == [key])
+        #expect(try await cache.containsCachedKey(key))
+        try FileManager.default.removeItem(at: directory.appendingPathComponent(key))
+        #expect(try await cache.cachedKeys().isEmpty)
+        #expect(try await cache.containsCachedKey(key) == false)
+    }
+
     @Test func mediaRolesHaveIndependentIdentityAndBudgets() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -115,7 +151,7 @@ struct PreviewCacheTests {
             }
             return (200, data)
         }
-        _ = try await cache.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 8)
+        #expect(try await cache.prefetch(assetID: id, preview: preview, configuration: configuration))
         #expect(CacheProtocol.count == 3)
         var fresh = preview; fresh.version = "v2"
         let oldKey = PreviewCache.key(assetID: id, preview: preview, configuration: configuration)
@@ -146,6 +182,16 @@ struct PreviewCacheTests {
         #expect(CacheProtocol.count == 3)
     }
 
+    @Test func prefetchOnlySucceedsWhenDownloadedBytesRemainOnDisk() async throws {
+        let (cache, directory, session) = try fixture(limit: 1)
+        defer { try? FileManager.default.removeItem(at: directory); session.invalidateAndCancel() }
+        let data = try png()
+        CacheProtocol.reset { _ in (200, data) }
+        #expect(try await cache.prefetch(assetID: id, preview: preview, configuration: configuration) == false)
+        #expect(CacheProtocol.count == 1)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
+    }
+
     @Test func retriesNeitherInvalidTokenNorEndlessExpiry() async throws {
         let (cache, directory, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory); session.invalidateAndCancel() }
@@ -164,6 +210,30 @@ struct PreviewCacheTests {
             _ = try await cache.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 8)
         }
         #expect(CacheProtocol.count == 3)
+    }
+
+    @Test func startupDiskHitDefersEvictionAndPreservesReadRecency() async throws {
+        let data = try png()
+        let (_, directory, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory); session.invalidateAndCancel() }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let ids = (0..<4).map { _ in UUID() }
+        let keys = ids.map { PreviewCache.key(assetID: $0, preview: preview, configuration: configuration) }
+        for (index, key) in keys.prefix(3).enumerated() {
+            let file = directory.appendingPathComponent(key)
+            try data.write(to: file)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: Double(index))], ofItemAtPath: file.path)
+        }
+        CacheProtocol.reset { _ in (200, data) }
+        let restarted = PreviewCache(directory: directory, diskLimit: data.count * 2, session: session)
+        _ = try await restarted.image(assetID: ids[0], preview: preview, configuration: configuration, maxPixelSize: 8)
+        #expect(CacheProtocol.count == 0)
+        // An over-budget cache must still render the first requested image before maintenance.
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).count == 3)
+        _ = try await restarted.image(assetID: ids[3], preview: preview, configuration: configuration, maxPixelSize: 8)
+        let remaining = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        #expect(Set(remaining) == Set([keys[0], keys[3]]))
+        #expect(CacheProtocol.count == 1)
     }
 
     @Test func lruUsesReadsAndSurvivesRestart() async throws {

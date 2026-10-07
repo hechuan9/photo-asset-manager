@@ -22,10 +22,13 @@ struct ContentView: View {
             HStack(spacing: 0) {
                 HSplitView {
                     if showsSidebar {
-                        sidebar.frame(minWidth: 200, idealWidth: 268, maxWidth: 480)
+                        sidebar
+                            .frame(minWidth: 200, idealWidth: 268, maxWidth: 480)
+                            .background(SidebarLayoutAutosave())
                     }
                     workspace.frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
                 }
+                .id(showsSidebar)
                 if showsInspector {
                     Divider()
                     inspector.frame(width: 292)
@@ -39,8 +42,13 @@ struct ContentView: View {
         .foregroundStyle(WorkspaceStyle.text)
         .preferredColorScheme(.dark)
         .tint(WorkspaceStyle.accent)
+        .disabled(library.isDirectoryTrashBlocking)
+        .overlay { if library.isDirectoryTrashBlocking { Color.clear.contentShape(Rectangle()).onTapGesture {} } }
         .sheet(isPresented: $showsImport, onDismiss: { library.refreshNavigation(); library.refresh(force: true) }) {
-            if let importStore { ImportView(store: importStore, initialTarget: library.query.directory) }
+            if let importStore { ImportView(store: importStore, initialTarget: library.query.directory).disabled(library.isDirectoryTrashBlocking) }
+        }
+        .sheet(item: $library.directoryToTrash) { directory in
+            DirectoryTrashSheet(library: library, directory: directory)
         }
         .task { library.refresh() }
         .prefetchKeepsThumbnails(configuration: library.configuration)
@@ -192,7 +200,9 @@ struct ContentView: View {
                 }
             }
         }
-        .focusable().focused($galleryFocused)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($galleryFocused)
         .onKeyPress(.leftArrow) { library.selectAdjacent(-1); return .handled }
         .onKeyPress(.rightArrow) { library.selectAdjacent(1); return .handled }
     }
@@ -379,9 +389,6 @@ struct AssetDetailView: View {
                     Divider()
                 }
                 if asset.trashed { Button("从回收站恢复") { library.restoreSelected() } }
-                else { Button("移入回收站") { library.trashSelected() } }
-                Text("回收站只改变资产状态，磁盘原片始终保留。")
-                    .font(.caption).foregroundStyle(.secondary)
             }.padding(18).disabled(library.isMutating)
                 .background(OverlayScrollerConfiguration())
         }
@@ -443,5 +450,33 @@ struct ServerSettingsView: View {
 
     private func check(save: Bool) {
         Task { await library.checkConnection(baseURL: baseURL, libraryID: libraryID, accessCredential: credential, save: save) }
+    }
+}
+
+private struct SidebarLayoutAutosave: NSViewRepresentable {
+    func makeNSView(context: Context) -> PersistenceView { PersistenceView() }
+    func updateNSView(_ nsView: PersistenceView, context: Context) {}
+
+    final class PersistenceView: NSView {
+        private weak var splitView: NSSplitView?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil else {
+                // 隐藏侧边栏后只剩一个分栏，不应覆盖用户保存的双栏布局。
+                splitView?.autosaveName = nil
+                splitView = nil
+                return
+            }
+            var ancestor = superview
+            while let view = ancestor {
+                if let splitView = view as? NSSplitView {
+                    self.splitView = splitView
+                    splitView.autosaveName = "Keeps.Library.Sidebar"
+                    return
+                }
+                ancestor = view.superview
+            }
+        }
     }
 }

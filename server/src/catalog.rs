@@ -20,9 +20,11 @@ fn missing_paths_query(scope: &str) -> Result<String> {
     ))
 }
 
-const VERSION: i64 = 9;
+const VERSION: i64 = 10;
 const DIRECTORY_ASSET_SET: &str =
     " AND a.id IN (SELECT f.asset_id FROM catalog_paths f WHERE f.library_id=? AND ";
+// Ordering by path must not make SQLite scan the whole library for every asset.
+const ASSET_PATHS: &str = "SELECT path FROM catalog_paths INDEXED BY catalog_paths_asset WHERE library_id=? AND asset_id=? ORDER BY path";
 const SCHEMA: &str = r#"
 CREATE TABLE catalog_assets(library_id TEXT NOT NULL,id TEXT NOT NULL,snapshot TEXT NOT NULL,content_hash TEXT NOT NULL,fingerprint TEXT NOT NULL,sort_time TEXT NOT NULL,filename TEXT NOT NULL,rating INTEGER NOT NULL,flag TEXT NOT NULL,color TEXT,trashed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(library_id,id));
 CREATE INDEX catalog_hash ON catalog_assets(library_id,content_hash);
@@ -41,6 +43,7 @@ pub fn ensure_schema(db: &mut Connection, allow_migrate: bool) -> Result<()> {
         "database schema {version} is newer than this server supports ({VERSION})"
     );
     if version == VERSION {
+        db.prepare("SELECT library_id,path,retained_path,basis,reason FROM catalog_deprecated_files LIMIT 0")?;
         db.prepare("SELECT library_id,asset_id,root_id FROM catalog_identity_roots LIMIT 0")?;
         db.prepare("SELECT library_id,root_id,asset_id FROM catalog_identity_aliases LIMIT 0")?;
         db.prepare("SELECT id,expires_at,completed FROM remote_cache_tasks LIMIT 0")?;
@@ -131,6 +134,9 @@ pub fn ensure_schema(db: &mut Connection, allow_migrate: bool) -> Result<()> {
             INSERT INTO catalog_identity_roots SELECT library_id,id,id FROM catalog_assets;
             INSERT INTO catalog_identity_aliases SELECT library_id,id,id FROM catalog_assets;")?;
     }
+    if version < 10 {
+        crate::photo_relations::migrate(&tx)?;
+    }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
     Ok(())
@@ -214,7 +220,13 @@ fn not_found() -> anyhow::Error {
     .into()
 }
 fn decorate(db: &Connection, lib: &str, mut a: Value) -> Result<Value> {
-    let id = text(&a, "id")?;
+    let id = text(&a, "id")?.to_owned();
+    let mut paths = db.prepare_cached(ASSET_PATHS)?;
+    a["paths"] = json!(
+        paths
+            .query_map(params![lib, id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    );
     let preview:Option<String>=db.query_row("SELECT json_object('objectRef',json_object('bucket',object_bucket,'key',object_key),'width',pixel_width,'height',pixel_height,'version',json_extract(file_object,'$.contentHash')) FROM derivative_objects WHERE library_id=? AND asset_id=? AND role='preview'",params![lib,id],|r|r.get(0)).optional()?;
     a["_preview"] = preview
         .map(|s| serde_json::from_str(&s))
@@ -308,7 +320,7 @@ impl Store {
                 }
             }
         }
-        let mut filter = "a.library_id=? AND a.trashed=?".to_string();
+        let mut filter = "a.library_id=? AND a.trashed=? AND EXISTS(SELECT 1 FROM catalog_paths live WHERE live.library_id=a.library_id AND live.asset_id=a.id)".to_string();
         let mut values: Vec<rusqlite::types::Value> = vec![
             lib.to_string().into(),
             (q.trashed.unwrap_or(false) as i64).into(),
@@ -411,7 +423,7 @@ impl Store {
     }
     pub fn counts(&self, lib: &str, show_hidden: bool) -> Result<Value> {
         let db = self.lock()?;
-        let mut filter = "a.library_id=?".to_string();
+        let mut filter = "a.library_id=? AND EXISTS(SELECT 1 FROM catalog_paths live WHERE live.library_id=a.library_id AND live.asset_id=a.id)".to_string();
         let mut values: Vec<rusqlite::types::Value> = vec![lib.to_string().into()];
         if !show_hidden {
             hidden_filter(&mut filter, &mut values, lib, None);
@@ -572,7 +584,12 @@ fn moved_original(db: &Connection, lib: &str, hash: &str) -> Result<Option<(Stri
     Ok(Some((id.clone(), paths)))
 }
 
-fn merge_unlocated_identity(db: &Connection, lib: &str, old: &str, target: &str) -> Result<()> {
+pub(crate) fn merge_unlocated_identity(
+    db: &Connection,
+    lib: &str,
+    old: &str,
+    target: &str,
+) -> Result<()> {
     let located: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM catalog_paths WHERE library_id=? AND asset_id=?)",
         params![lib, old],
@@ -815,8 +832,11 @@ impl Store {
         } else {
             None
         };
+        let capture_match = crate::photo_relations::capture_match(&tx, lib, path, snapshot)?;
         let matched = if identity_match.is_some() {
             identity_match
+        } else if previous_path_asset.is_none() && capture_match.is_some() {
+            capture_match
         } else if root.is_some() {
             None
         } else if by_path.is_some() {
@@ -887,6 +907,12 @@ impl Store {
         if let Some(previous) = previous_path_asset.filter(|previous| previous != &id) {
             merge_unlocated_identity(&tx, lib, &previous, &id)?;
         }
+        crate::photo_relations::reconcile_directory(&tx, lib, directory)?;
+        let id = tx.query_row(
+            "SELECT asset_id FROM catalog_paths WHERE library_id=? AND path=?",
+            params![lib, path],
+            |r| r.get::<_, String>(0),
+        )?;
         crate::revisions::flush_for_batch(&tx, batch_id)?;
         tx.commit()?;
         Ok(id)
@@ -985,6 +1011,7 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let mut missing = 0;
+        let mut changed_directories = BTreeSet::new();
         for (id, path, hash, size, role) in files {
             match std::fs::symlink_metadata(&path) {
                 Ok(_) => continue,
@@ -995,6 +1022,9 @@ impl Store {
                 "DELETE FROM catalog_paths WHERE library_id=? AND path=?",
                 params![lib, path],
             )?;
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                changed_directories.insert(parent.to_string_lossy().into_owned());
+            }
             crate::versions::missing_path(&tx, lib, &id, &path)?;
             let other:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM catalog_paths WHERE library_id=? AND asset_id=? AND content_hash=? AND role=?)",params![lib,id,hash,role],|r|r.get(0))?;
             if other {
@@ -1003,6 +1033,9 @@ impl Store {
             let file = json!({"contentHash":hash,"sizeBytes":size,"role":role});
             register_file(&tx, lib, &id, &file, "missing")?;
             missing += 1;
+        }
+        for directory in changed_directories {
+            crate::photo_relations::reconcile_directory(&tx, lib, &directory)?;
         }
         crate::revisions::flush_for_batch(&tx, batch_id)?;
         tx.commit()?;
@@ -1027,6 +1060,10 @@ mod tests {
             store.lock()?.execute(
                 "INSERT INTO catalog_assets VALUES ('lib',?,?, 'hash','fingerprint',?,'photo.jpg',1,'unflagged',NULL,0)",
                 params![id, asset.to_string(), time],
+            )?;
+            store.lock()?.execute(
+                "INSERT INTO catalog_paths VALUES('lib',?,?,'hash','jpeg_original')",
+                params![format!("/photos/{id}.jpg"), id],
             )?;
             Ok(())
         };
@@ -1347,6 +1384,18 @@ mod tests {
             id
         );
         store.set_hidden_directory("lib", "/private", true)?;
+        let all = store.query_assets(
+            "lib",
+            &AssetQuery {
+                show_hidden: Some(true),
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(
+            all["items"][0]["paths"],
+            json!(["/private/photo.jpg", "/public/photo.jpg"])
+        );
+        assert_eq!(store.asset("lib", &id)?["paths"], all["items"][0]["paths"]);
         assert_eq!(
             store.query_assets(
                 "lib",
@@ -1573,6 +1622,12 @@ mod tests {
             store.mark_missing_under("lib", photos.to_str().unwrap())?,
             1
         );
+        assert_eq!(store.asset("lib", &id)?["paths"], json!([]));
+        assert_eq!(
+            store.query_assets("lib", &AssetQuery::default())?["items"],
+            json!([])
+        );
+        assert_eq!(store.counts("lib", false)?["all"], 0);
         std::fs::write(&a, b"same")?;
         assert_eq!(
             store.ingest_original("lib", a.to_str().unwrap(), &file, &snapshot())?,
@@ -1622,6 +1677,22 @@ mod directory_plan_tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn ordered_asset_paths_use_asset_lookup() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(SCHEMA)?;
+        let plan = db
+            .prepare(&format!("EXPLAIN QUERY PLAN {ASSET_PATHS}"))?
+            .query_map(params!["photos", "asset"], |row| row.get::<_, String>(3))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert!(
+            plan.iter().any(|step| step.contains("catalog_paths_asset")
+                && step.contains("library_id=? AND asset_id=?")),
+            "{plan:?}"
+        );
         Ok(())
     }
 

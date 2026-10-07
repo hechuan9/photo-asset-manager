@@ -319,8 +319,14 @@ impl MediaProcessor {
         } else {
             format!("{}[0]", input.display())
         };
+        let mut convert = Command::new("convert");
+        if jpeg_input {
+            // Decode near thumbnail size instead of allocating the full JPEG pixel cache.
+            let decode_edge = edge.saturating_mul(2);
+            convert.args(["-define", &format!("jpeg:size={decode_edge}x{decode_edge}")]);
+        }
         run_with_timeout(
-            Command::new("convert")
+            convert
                 .args([
                     "-limit",
                     "thread",

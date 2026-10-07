@@ -39,10 +39,11 @@ public struct KeepsAsset: Codable, Identifiable, Equatable, Sendable {
     public var preview: KeepsPreview?
     public var thumbnail: KeepsPreview? = nil
     public var standard: KeepsPreview? = nil
+    public var paths: [String]? = nil
     public var gridPreview: KeepsPreview? { thumbnail ?? preview }
 }
 
-public struct KeepsAssetPage: Decodable, Sendable {
+public struct KeepsAssetPage: Codable, Sendable {
     public var items: [KeepsAsset]
     public var total: Int
     public var nextCursor: String?
@@ -98,17 +99,51 @@ public struct KeepsDirectory: Decodable, Identifiable, Equatable, Sendable {
     public var id: String { path }
 }
 
-public struct KeepsNavigationDirectory: Decodable, Identifiable, Equatable, Sendable {
+public struct KeepsNavigationDirectory: Codable, Identifiable, Equatable, Sendable {
     public var path: String
     public var name: String
     public var photoCount: Int
     public var hasChildren: Bool
     public var id: String { path }
+
+    public init(path: String, name: String, photoCount: Int, hasChildren: Bool) {
+        self.path = path
+        self.name = name
+        self.photoCount = photoCount
+        self.hasChildren = hasChildren
+    }
 }
 
-public struct KeepsNavigation: Decodable, Sendable {
+public struct KeepsDirectoryTrashTask: Codable, Equatable, Identifiable, Sendable {
+    public var id: UUID
+    public var path: String
+    public var status: String
+    public var phase: String
+    public var error: String?
+    public var createdAt: Double
+    public var updatedAt: Double
+    public var finishedAt: Double?
+    public var isTerminal: Bool { status == "completed" || status == "failed" }
+
+    public init(id: UUID, path: String, status: String, phase: String, error: String? = nil, createdAt: Double, updatedAt: Double, finishedAt: Double? = nil) {
+        self.id = id
+        self.path = path
+        self.status = status
+        self.phase = phase
+        self.error = error
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.finishedAt = finishedAt
+    }
+}
+
+public struct KeepsNavigation: Codable, Sendable {
     public var path: String?
     public var directories: [KeepsNavigationDirectory]
+    public init(path: String?, directories: [KeepsNavigationDirectory]) {
+        self.path = path
+        self.directories = directories
+    }
 }
 
 public struct KeepsFolder: Decodable, Identifiable, Equatable, Sendable {
@@ -140,6 +175,25 @@ public struct KeepsJob: Decodable, Identifiable, Equatable, Sendable {
 
 public struct KeepsJobsResponse: Decodable, Sendable {
     public var jobs: [KeepsJob]
+}
+
+public struct KeepsTaskStatus: Decodable, Equatable, Sendable {
+    public var automatic: KeepsAutomaticTaskStatus
+    public var longTask: KeepsLongTaskStatus
+}
+
+public struct KeepsAutomaticTaskStatus: Decodable, Equatable, Sendable {
+    public var status: String
+    public var currentPhoto: String?
+    public var remainingPhotos: Int
+    public var failedPhotos: Int
+    public var error: String?
+}
+
+public struct KeepsLongTaskStatus: Decodable, Equatable, Sendable {
+    public var status: String
+    public var kind: String?
+    public var error: String?
 }
 
 public struct KeepsAssetQuery: Hashable, Sendable {
@@ -185,6 +239,18 @@ public struct KeepsAssetPatch: Encodable, Sendable {
         if clearColorLabel { try values.encodeNil(forKey: .colorLabel) }
         else { try values.encodeIfPresent(colorLabel, forKey: .colorLabel) }
         try values.encodeIfPresent(tags, forKey: .tags)
+    }
+}
+
+public struct KeepsAssetVersions: Decodable, Sendable {
+    public var items: [KeepsAssetVersion]
+    public var deprecatedFiles: [DeprecatedFile]?
+
+    public struct DeprecatedFile: Decodable, Sendable {
+        public var path: String
+        public var retainedPath: String
+        public var basis: String
+        public var reason: String
     }
 }
 

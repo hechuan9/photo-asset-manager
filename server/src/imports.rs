@@ -631,6 +631,7 @@ async fn finish(
     Path((library, id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let _directory_guard = state.jobs.directory_mutation.read().unwrap();
         let batch = load(&state.jobs.db.lock().unwrap(), &library, &id)?;
         if let Some(job_id) = batch.job_id {
             return Ok(json!({"job":state.jobs.job(&job_id)?}));
@@ -710,7 +711,7 @@ async fn finish(
         }
         let job = state
             .jobs
-            .enqueue_directory_change(&folder.id, &destination, 0)?;
+            .enqueue_manual_directory(&folder.id, &destination)?;
         let db = state.jobs.db.lock().unwrap();
         let mut batch = load(&db, &library, &id)?;
         batch.finished = true;

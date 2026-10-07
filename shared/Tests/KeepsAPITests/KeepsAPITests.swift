@@ -7,6 +7,67 @@ private let assetJSON = """
 """
 
 struct KeepsAPITests {
+    @Test func trashDirectorySendsStableRequestIDAndReturnsAcceptedTask() async throws {
+        let id = UUID()
+        let fixture = Fixture { request in
+            #expect(request.httpMethod == "POST")
+            #expect(request.url!.path == "/api/libraries/library/directories/trash")
+            let body = try JSONSerialization.jsonObject(with: request.bodyData) as! [String: String]
+            #expect(body == ["path": "/volume2/photo/旅行 & RAW", "confirmationName": "旅行 & RAW", "requestID": id.uuidString.lowercased()])
+            return (202, """
+            {"id":"\(id)","path":"/volume2/photo/旅行 & RAW","status":"pending","phase":"waiting","error":null,"createdAt":100,"updatedAt":100,"finishedAt":null}
+            """)
+        }
+        let task = try await fixture.client.trashDirectory(path: "/volume2/photo/旅行 & RAW", confirmationName: "旅行 & RAW", requestID: id)
+        #expect(task.id == id)
+        #expect(task.phase == "waiting")
+        #expect(!task.isTerminal)
+    }
+
+    @Test func directoryTrashStatusIsReadOnlyAndPreservesTerminalError() async throws {
+        let id = UUID()
+        let fixture = Fixture { request in
+            #expect(request.httpMethod == "GET")
+            #expect(request.url!.path == "/api/libraries/library/directories/trash/" + id.uuidString.lowercased())
+            return (200, """
+            {"id":"\(id)","path":"/volume2/photo/旅行","status":"failed","phase":"failed","error":"Interrupted during native recycle; check NAS recycle bin","createdAt":100,"updatedAt":120,"finishedAt":120}
+            """)
+        }
+        let task = try await fixture.client.directoryTrashTask(id: id)
+        #expect(task.isTerminal)
+        #expect(task.error == "Interrupted during native recycle; check NAS recycle bin")
+        #expect(task.finishedAt == 120)
+        let restored = try JSONDecoder().decode(KeepsDirectoryTrashTask.self, from: JSONEncoder().encode(task))
+        #expect(restored == task)
+    }
+
+    @Test func taskStatusUsesServerPhotoCountsAndAggregatedLongTask() async throws {
+        let fixture = Fixture { request in
+            #expect(request.httpMethod == "GET")
+            #expect(request.url!.path == "/api/libraries/library/task-status")
+            return (200, """
+            {"automatic":{"status":"running","currentPhoto":"旅行/IMG.3FR","remainingPhotos":17,"failedPhotos":2,"error":"thumbnail failed"},"longTask":{"status":"pending","kind":"reconcile","error":null}}
+            """)
+        }
+        let status = try await fixture.client.taskStatus()
+        #expect(status.automatic.currentPhoto == "旅行/IMG.3FR")
+        #expect(status.automatic.remainingPhotos == 17)
+        #expect(status.automatic.failedPhotos == 2)
+        #expect(status.automatic.error == "thumbnail failed")
+        #expect(status.longTask.status == "pending")
+        #expect(status.longTask.kind == "reconcile")
+        #expect(status.longTask.error == nil)
+    }
+
+    @Test func idleTaskStatusDecodesNullableFields() throws {
+        let status = try JSONDecoder().decode(KeepsTaskStatus.self, from: Data("""
+        {"automatic":{"status":"idle","currentPhoto":null,"remainingPhotos":0,"failedPhotos":0,"error":null},"longTask":{"status":"idle","kind":null,"error":null}}
+        """.utf8))
+        #expect(status.automatic.currentPhoto == nil)
+        #expect(status.automatic.remainingPhotos == 0)
+        #expect(status.longTask.kind == nil)
+    }
+
     @Test func createDirectoryUsesLibraryAndSeparateParentAndName() async throws {
         let fixture = Fixture { request in
             #expect(request.httpMethod == "POST")

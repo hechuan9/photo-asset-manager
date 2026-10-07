@@ -332,7 +332,7 @@ fn add_watches(
             continue;
         }
         for folder in folders.iter().filter(|f| path.starts_with(&f.path)) {
-            if let Err(error) = jobs.enqueue_removed_directory(&folder.id, path, 0)
+            if let Err(error) = jobs.enqueue_external_reconcile_scope(&folder.id, path)
                 && jobs.is_active(&folder.id)?
             {
                 return Err(error)

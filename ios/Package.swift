@@ -9,7 +9,7 @@ let package = Package(
         .target(name: "KeepsIOSState", dependencies: [.product(name: "KeepsAPI", package: "shared")],
                 path: "Sources/KeepsIOS",
                 exclude: ["IOSCollectionsView.swift", "IOSZoomablePhoto.swift",
-                          "KeepsIOSApp.swift", "WaterfallGalleryView.swift"],
+                          "KeepsIOSApp.swift", "WaterfallGalleryView.swift", "IOSPhotoCollectionView.swift", "IOSThumbnailDownload.swift"],
                 sources: ["IOSDirectoryStore.swift", "IOSLibraryStore.swift"]),
         .testTarget(name: "KeepsIOSStateTests", dependencies: ["KeepsIOSState"], path: "Tests")
     ]
