@@ -27,6 +27,7 @@ pub struct Job {
     pub library_id: String,
     pub path: String,
     pub scope_kind: String,
+    pub work_class: String,
     pub refresh_metadata: bool,
     pub path_sync: bool,
     pub wait_for_quiet: bool,
@@ -50,8 +51,8 @@ pub struct FileState {
 }
 pub struct Jobs {
     pub(crate) directory_mutation: RwLock<()>,
-    pub(crate) trash_db: Mutex<Connection>,
     pub(crate) db: Mutex<Connection>,
+    pub(crate) trash_db: Mutex<Connection>,
     root: std::path::PathBuf,
 }
 
@@ -81,12 +82,13 @@ fn job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
         wait_for_quiet: row.get(13)?,
         path_sync: row.get(14)?,
         scope_kind: row.get(15)?,
+        work_class: row.get(16)?,
     })
 }
-const JOB_SELECT: &str = "SELECT j.id,j.folder_id,f.library_id,COALESCE(j.scope_path,f.path),j.status,j.error,j.processed,j.skipped,j.failed,j.current_path,j.started_at,j.finished_at,j.refresh_metadata,j.wait_for_quiet,j.path_sync,j.scope_kind FROM jobs j JOIN folders f ON f.id=j.folder_id";
+const JOB_SELECT: &str = "SELECT j.id,j.folder_id,f.library_id,COALESCE(j.scope_path,f.path),j.status,j.error,j.processed,j.skipped,j.failed,j.current_path,j.started_at,j.finished_at,j.refresh_metadata,j.wait_for_quiet,j.path_sync,j.scope_kind,j.work_class FROM jobs j JOIN folders f ON f.id=j.folder_id";
 
 fn covers(parent: &Job, child: &Job) -> bool {
-    if parent.folder_id != child.folder_id {
+    if parent.folder_id != child.folder_id || parent.work_class != child.work_class {
         return false;
     }
     let parent_path = Path::new(&parent.path);
@@ -101,6 +103,29 @@ fn covers(parent: &Job, child: &Job) -> bool {
         "file" => child.scope_kind == "file" && child_path == parent_path,
         _ => false,
     }
+}
+
+fn validate_work_class(work_class: &str) -> Result<()> {
+    if !matches!(work_class, "automatic" | "manual" | "reconcile") {
+        bail!("invalid work class");
+    }
+    Ok(())
+}
+fn job_priority(job: &Job) -> (u8, u8, bool, bool) {
+    (
+        match job.work_class.as_str() {
+            "automatic" => 2,
+            "manual" => 1,
+            _ => 0,
+        },
+        match job.scope_kind.as_str() {
+            "file" => 2,
+            "directory" => 1,
+            _ => 0,
+        },
+        job.path_sync,
+        !job.path_sync && job.refresh_metadata,
+    )
 }
 
 impl Jobs {
@@ -130,6 +155,8 @@ impl Jobs {
         let db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(30))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+          CREATE TABLE IF NOT EXISTS worker_activity(id INTEGER PRIMARY KEY CHECK(id=1),library_id TEXT NOT NULL,work_class TEXT NOT NULL,current_photo TEXT,last_error TEXT,active INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS worker_photo_files(path TEXT PRIMARY KEY);
           CREATE TABLE IF NOT EXISTS imports(id TEXT PRIMARY KEY,library_id TEXT NOT NULL,manifest TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS folders(id TEXT PRIMARY KEY,library_id TEXT NOT NULL,path TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,UNIQUE(library_id,path));
           CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,folder_id TEXT NOT NULL REFERENCES folders(id),status TEXT NOT NULL,error TEXT,processed INTEGER NOT NULL DEFAULT 0,skipped INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,current_path TEXT,started_at INTEGER,finished_at INTEGER,created_at INTEGER NOT NULL DEFAULT(unixepoch()),updated_at INTEGER NOT NULL DEFAULT(unixepoch()));
@@ -140,6 +167,7 @@ impl Jobs {
             .query_map([], |row| row.get(1))?
             .collect::<rusqlite::Result<_>>()?;
         for (name, definition) in [
+            ("work_class", "TEXT NOT NULL DEFAULT 'automatic'"),
             ("scope_path", "TEXT"),
             ("scope_kind", "TEXT NOT NULL DEFAULT 'recursive'"),
             ("checkpoint", "TEXT"),
@@ -158,6 +186,9 @@ impl Jobs {
             // Existing scoped discovery jobs are the pending directory moves that
             // metadata refresh used to starve. Root periodic scans stay background.
             db.execute_batch("UPDATE jobs SET path_sync=1 WHERE status='pending' AND refresh_metadata=0 AND scope_path<>(SELECT path FROM folders WHERE id=jobs.folder_id)")?;
+        }
+        if !columns.iter().any(|column| column == "work_class") {
+            db.execute_batch("UPDATE jobs SET work_class=CASE WHEN wait_for_quiet=0 THEN 'manual' WHEN scope_kind='recursive' AND COALESCE(scope_path,(SELECT path FROM folders WHERE id=jobs.folder_id))=(SELECT path FROM folders WHERE id=jobs.folder_id) THEN 'reconcile' ELSE 'automatic' END")?;
         }
         let file_columns: Vec<String> = db
             .prepare("PRAGMA table_info(files)")?
@@ -182,13 +213,13 @@ impl Jobs {
         db.execute_batch("DROP INDEX IF EXISTS jobs_live;
             UPDATE jobs SET scope_path=(SELECT path FROM folders WHERE id=jobs.folder_id) WHERE scope_path IS NULL;
             DROP INDEX IF EXISTS jobs_live_scope;
-            CREATE UNIQUE INDEX jobs_live_scope ON jobs(folder_id,scope_path,scope_kind) WHERE status IN ('pending','running');")?;
+            CREATE UNIQUE INDEX jobs_live_scope ON jobs(folder_id,scope_path,scope_kind,work_class) WHERE status IN ('pending','running');")?;
         let trash_db = Connection::open(path)?;
         trash_db.busy_timeout(std::time::Duration::from_secs(5))?;
         crate::directory_trash::initialize(&trash_db)?;
         let jobs = Self {
-            directory_mutation: RwLock::new(()),
             trash_db: Mutex::new(trash_db),
+            directory_mutation: RwLock::new(()),
             db: Mutex::new(db),
             root,
         };
@@ -279,6 +310,11 @@ impl Jobs {
             wait_for_quiet,
             false,
             "recursive",
+            if wait_for_quiet {
+                "reconcile"
+            } else {
+                "manual"
+            },
         )
     }
     /// A running scan receives another pass instead of swallowing a concurrent event.
@@ -296,13 +332,33 @@ impl Jobs {
             true,
             false,
             "recursive",
+            "automatic",
         )
     }
     pub fn enqueue_reconcile_scope(&self, folder_id: &str, path: &Path) -> Result<Job> {
-        self.enqueue_scope(folder_id, path, 0, false, false, false, "recursive")
+        self.enqueue_scope(
+            folder_id,
+            path,
+            0,
+            false,
+            false,
+            false,
+            "recursive",
+            "manual",
+        )
     }
     pub fn enqueue_external_reconcile_scope(&self, folder_id: &str, path: &Path) -> Result<Job> {
-        self.enqueue_scope(folder_id, path, 0, false, true, true, "recursive")
+        let tracked: String = self.db.lock().unwrap().query_row(
+            "SELECT path FROM folders WHERE id=?1",
+            [folder_id],
+            |row| row.get(0),
+        )?;
+        let class = if self.validate_scan_path(path, "recursive")? == Path::new(&tracked) {
+            "reconcile"
+        } else {
+            "automatic"
+        };
+        self.enqueue_scope(folder_id, path, 0, false, true, true, "recursive", class)
     }
     pub fn enqueue_path_change(
         &self,
@@ -318,10 +374,23 @@ impl Jobs {
             true,
             true,
             "recursive",
+            "automatic",
         )
     }
     pub fn enqueue_file_change(&self, folder_id: &str, path: &Path, delay: i64) -> Result<Job> {
-        self.enqueue_scope(folder_id, path, delay, false, true, true, "file")
+        self.enqueue_scope(
+            folder_id,
+            path,
+            delay,
+            false,
+            true,
+            true,
+            "file",
+            "automatic",
+        )
+    }
+    pub fn enqueue_manual_file(&self, folder_id: &str, path: &Path) -> Result<Job> {
+        self.enqueue_scope(folder_id, path, 0, true, false, true, "file", "manual")
     }
     pub fn ensure_file_retry(&self, folder_id: &str, path: &Path) -> Result<Option<Job>> {
         let path = self.validate_scan_path(path, "file")?;
@@ -354,13 +423,34 @@ impl Jobs {
         tx.commit()?;
         Ok(result)
     }
+    pub fn enqueue_manual_directory(&self, folder_id: &str, path: &Path) -> Result<Job> {
+        self.enqueue_scope(
+            folder_id,
+            path,
+            0,
+            false,
+            false,
+            true,
+            "directory",
+            "manual",
+        )
+    }
     pub fn enqueue_directory_change(
         &self,
         folder_id: &str,
         path: &Path,
         delay: i64,
     ) -> Result<Job> {
-        self.enqueue_scope(folder_id, path, delay, false, true, true, "directory")
+        self.enqueue_scope(
+            folder_id,
+            path,
+            delay,
+            false,
+            true,
+            true,
+            "directory",
+            "automatic",
+        )
     }
     pub fn enqueue_removed_directory(
         &self,
@@ -368,7 +458,16 @@ impl Jobs {
         path: &Path,
         delay: i64,
     ) -> Result<Job> {
-        self.enqueue_scope(folder_id, path, delay, false, true, true, "recursive")
+        self.enqueue_scope(
+            folder_id,
+            path,
+            delay,
+            false,
+            true,
+            true,
+            "recursive",
+            "automatic",
+        )
     }
     pub fn validate_scan_path(&self, path: &Path, scope_kind: &str) -> Result<std::path::PathBuf> {
         if !matches!(scope_kind, "recursive" | "directory" | "file") {
@@ -427,6 +526,7 @@ impl Jobs {
         wait_for_quiet: bool,
         path_sync: bool,
         scope_kind: &str,
+        work_class: &str,
     ) -> Result<Job> {
         let path = self.validate_scan_path(path, scope_kind)?;
         let mut db = self.db.lock().unwrap();
@@ -444,10 +544,10 @@ impl Jobs {
         }
         let scope = path.to_str().context("scan scope must be UTF-8")?;
         let available = chrono::Utc::now().timestamp() + debounce_seconds.max(0);
-        tx.execute("INSERT OR IGNORE INTO jobs(id,folder_id,scope_path,scope_kind,status,available_at,wait_for_quiet) VALUES(?1,?2,?3,?4,'pending',?5,?6)",
-            params![Uuid::new_v4().to_string(), folder_id, scope, scope_kind, available, wait_for_quiet])?;
-        tx.execute("UPDATE jobs SET path_sync=MAX(path_sync,?6),refresh_metadata=MAX(refresh_metadata,?4),wait_for_quiet=MAX(wait_for_quiet,?5),rerun=CASE WHEN status='running' OR checkpoint IS NOT NULL THEN 1 ELSE rerun END,available_at=MAX(available_at,?3),updated_at=unixepoch() WHERE folder_id=?1 AND scope_path=?2 AND scope_kind=?7 AND status IN ('pending','running')", params![folder_id,scope,available,refresh_metadata,wait_for_quiet,path_sync,scope_kind])?;
-        let original = tx.query_row(&format!("{JOB_SELECT} WHERE j.folder_id=?1 AND j.scope_path=?2 AND j.scope_kind=?3 AND j.status IN ('pending','running')"), params![folder_id,scope,scope_kind],job)?;
+        tx.execute("INSERT OR IGNORE INTO jobs(id,folder_id,scope_path,scope_kind,status,available_at,wait_for_quiet,work_class) VALUES(?1,?2,?3,?4,'pending',?5,?6,?7)",
+            params![Uuid::new_v4().to_string(), folder_id, scope, scope_kind, available, wait_for_quiet, work_class])?;
+        tx.execute("UPDATE jobs SET path_sync=MAX(path_sync,?6),refresh_metadata=MAX(refresh_metadata,?4),wait_for_quiet=MAX(wait_for_quiet,?5),rerun=CASE WHEN status='running' OR checkpoint IS NOT NULL THEN 1 ELSE rerun END,available_at=MAX(available_at,?3),updated_at=unixepoch() WHERE folder_id=?1 AND scope_path=?2 AND scope_kind=?7 AND work_class=?8 AND status IN ('pending','running')", params![folder_id,scope,available,refresh_metadata,wait_for_quiet,path_sync,scope_kind,work_class])?;
+        let original = tx.query_row(&format!("{JOB_SELECT} WHERE j.folder_id=?1 AND j.scope_path=?2 AND j.scope_kind=?3 AND j.work_class=?4 AND j.status IN ('pending','running')"), params![folder_id,scope,scope_kind,work_class],job)?;
         Self::coalesce_transaction(&tx)?;
         let result = if tx.query_row("SELECT status FROM jobs WHERE id=?", [&original.id], |r| {
             r.get::<_, String>(0)
@@ -527,15 +627,51 @@ impl Jobs {
             .collect::<rusqlite::Result<_>>()?)
     }
     pub fn retry(&self, id: &str) -> Result<Job> {
-        let db = self.db.lock().unwrap();
-        let changed = db.execute("UPDATE jobs SET status='pending',attempts=0,available_at=0,error=NULL,checkpoint=NULL,processed=0,skipped=0,failed=0,current_path=NULL,started_at=NULL,finished_at=NULL,updated_at=unixepoch() WHERE id=?1 AND status='failed' AND EXISTS(SELECT 1 FROM folders WHERE folders.id=jobs.folder_id AND active=1)",[id])?;
-        if changed == 0 {
-            bail!("only failed jobs of active folders can be retried");
-        }
-        Ok(db.query_row(&format!("{JOB_SELECT} WHERE j.id=?1"), [id], job)?)
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let failed = tx
+            .query_row(
+                &format!("{JOB_SELECT} WHERE j.id=?1 AND j.status='failed' AND f.active=1"),
+                [id],
+                job,
+            )
+            .optional()?
+            .context("only failed jobs of active folders can be retried")?;
+        let existing: Option<String> = tx.query_row("SELECT id FROM jobs WHERE folder_id=?1 AND scope_path=?2 AND scope_kind=?3 AND work_class='manual' AND status IN ('pending','running')", params![failed.folder_id, failed.path, failed.scope_kind], |row| row.get(0)).optional()?;
+        let retry_id = if let Some(existing) = existing {
+            tx.execute("UPDATE jobs SET attempts=0,available_at=0,error=NULL,path_sync=MAX(path_sync,?2),refresh_metadata=MAX(refresh_metadata,?3),rerun=CASE WHEN status='running' OR checkpoint IS NOT NULL THEN 1 ELSE rerun END,updated_at=unixepoch() WHERE id=?1", params![existing,failed.path_sync,failed.refresh_metadata])?;
+            tx.execute("UPDATE jobs SET status='cancelled',finished_at=unixepoch(),updated_at=unixepoch() WHERE id=?1", [id])?;
+            existing
+        } else {
+            tx.execute("UPDATE jobs SET work_class='manual',wait_for_quiet=0,status='pending',attempts=0,available_at=0,error=NULL,checkpoint=NULL,rerun=0,processed=0,skipped=0,failed=0,current_path=NULL,started_at=NULL,finished_at=NULL,updated_at=unixepoch() WHERE id=?1",[id])?;
+            id.to_owned()
+        };
+        let result = tx.query_row(&format!("{JOB_SELECT} WHERE j.id=?1"), [&retry_id], job)?;
+        tx.commit()?;
+        Ok(result)
     }
     pub fn has_pending_changes(&self, excluding_id: &str) -> Result<bool> {
         Ok(self.db.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM jobs j JOIN folders f ON f.id=j.folder_id WHERE j.refresh_metadata=1 AND j.available_at<=unixepoch() AND f.active=1 AND ((j.id<>?1 AND j.status='pending') OR (j.id=?1 AND j.status='running' AND j.rerun=1)))", [excluding_id], |row| row.get(0))?)
+    }
+    pub fn directory_scan_pending(&self, library: &str, source: &Path) -> Result<bool> {
+        let parent = source.parent().context("cache source has no parent")?;
+        let db = self.db.lock().unwrap();
+        let mut query = db.prepare("SELECT COALESCE(j.scope_path,f.path),j.scope_kind FROM jobs j JOIN folders f ON f.id=j.folder_id WHERE f.library_id=? AND f.active=1 AND j.work_class='automatic' AND j.status IN ('pending','running')")?;
+        let scopes = query.query_map([library], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for scope in scopes {
+            let (path, kind) = scope?;
+            let path = Path::new(&path);
+            if match kind.as_str() {
+                "file" => path.parent() == Some(parent),
+                "recursive" => parent.starts_with(path),
+                _ => parent == path,
+            } {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
     pub fn path_sync_pending(&self, library: &str, path: &Path) -> Result<bool> {
         let text = path.to_str().context("asset path must be UTF-8")?;
@@ -543,12 +679,27 @@ impl Jobs {
     }
     pub fn should_yield(&self, current: &Job) -> Result<bool> {
         let db = self.db.lock().unwrap();
-        Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM jobs j JOIN folders f ON f.id=j.folder_id WHERE f.active=1 AND ((j.status='pending' AND j.id<>?1) OR (j.status='running' AND j.id=?1 AND j.rerun=1)) AND j.available_at<=unixepoch() AND (CASE j.scope_kind WHEN 'file' THEN 2 WHEN 'directory' THEN 1 ELSE 0 END > ?4 OR (j.scope_kind=?5 AND (j.path_sync>?2 OR (j.path_sync=0 AND ?2=0 AND j.refresh_metadata>?3)))))", params![current.id,current.path_sync,current.refresh_metadata,match current.scope_kind.as_str() { "file" => 2, "directory" => 1, _ => 0 },current.scope_kind], |r| r.get(0))?)
+        let pending = db.prepare(&format!("{JOB_SELECT} WHERE f.active=1 AND j.status='pending' AND j.id<>?1 AND j.available_at<=unixepoch()"))?
+            .query_map([&current.id], job)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(pending
+            .iter()
+            .any(|candidate| job_priority(candidate) > job_priority(current)))
+    }
+    pub fn has_due_class(&self, work_class: &str) -> Result<bool> {
+        validate_work_class(work_class)?;
+        Ok(self.db.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM jobs j JOIN folders f ON f.id=j.folder_id WHERE j.work_class=?1 AND j.status='pending' AND j.available_at<=unixepoch() AND f.active=1)", [work_class], |row| row.get(0))?)
+    }
+    pub fn claim_class(&self, work_class: &str) -> Result<Option<Job>> {
+        validate_work_class(work_class)?;
+        self.claim(Some(work_class))
     }
     pub fn claim_next(&self) -> Result<Option<Job>> {
+        self.claim(None)
+    }
+    fn claim(&self, work_class: Option<&str>) -> Result<Option<Job>> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
-        let next = tx.query_row(&format!("{JOB_SELECT} WHERE j.status='pending' AND j.available_at<=unixepoch() AND f.active=1 ORDER BY CASE j.scope_kind WHEN 'file' THEN 2 WHEN 'directory' THEN 1 ELSE 0 END DESC,j.path_sync DESC,CASE WHEN j.path_sync=0 THEN j.refresh_metadata ELSE 0 END DESC,j.created_at,j.rowid LIMIT 1"),[],job).optional()?;
+        let next = tx.query_row(&format!("{JOB_SELECT} WHERE j.status='pending' AND j.available_at<=unixepoch() AND f.active=1 AND (?1 IS NULL OR j.work_class=?1) ORDER BY CASE j.work_class WHEN 'automatic' THEN 2 WHEN 'manual' THEN 1 ELSE 0 END DESC,CASE j.scope_kind WHEN 'file' THEN 2 WHEN 'directory' THEN 1 ELSE 0 END DESC,j.path_sync DESC,CASE WHEN j.path_sync=0 THEN j.refresh_metadata ELSE 0 END DESC,j.created_at,j.rowid LIMIT 1"),[work_class],job).optional()?;
         let Some(mut next) = next else {
             return Ok(None);
         };
@@ -628,7 +779,7 @@ impl Jobs {
     }
     pub fn identity_status(&self, library: &str) -> Result<serde_json::Value> {
         let db = self.db.lock().unwrap();
-        let mut counts = serde_json::json!({"pending":0,"ready":0,"failed":0,"batchLimit":20});
+        let mut counts = serde_json::json!({"pending":0,"ready":0,"failed":0,"batchLimit":1});
         for row in db.prepare("SELECT identity_status,count(*) FROM files p JOIN folders f ON f.id=p.folder_id WHERE f.library_id=? AND f.active=1 GROUP BY identity_status")?.query_map([library], |r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))? {
             let (status,count)=row?;counts[status]=serde_json::json!(count);
         }
@@ -674,6 +825,137 @@ mod tests {
         (dir, jobs, folder)
     }
     #[test]
+    fn classes_are_independent_and_reconcile_is_last() {
+        let (_dir, jobs, folder) = setup();
+        let reconcile = jobs.enqueue_external_scan(&folder.id).unwrap();
+        let manual = jobs.enqueue_scan(&folder.id).unwrap();
+        let automatic = jobs
+            .enqueue_directory_change(&folder.id, jobs.root(), 0)
+            .unwrap();
+        assert_ne!(reconcile.id, manual.id);
+        assert!(
+            !jobs
+                .directory_scan_pending("other", &jobs.root().join("a.jpg"))
+                .unwrap()
+        );
+        assert!(jobs.claim_class("invalid").is_err());
+        assert_eq!(jobs.claim_class("manual").unwrap().unwrap().id, manual.id);
+        jobs.yield_job(&manual.id).unwrap();
+        for expected in [&automatic.id, &manual.id, &reconcile.id] {
+            let next = jobs.claim_next().unwrap().unwrap();
+            assert_eq!(&next.id, expected);
+            jobs.finish(&next.id, None).unwrap();
+        }
+        assert!(!jobs.has_due_class("automatic").unwrap());
+    }
+    #[test]
+    fn legacy_class_migration_preserves_checkpoint_and_runs_once() {
+        let (dir, jobs, folder) = setup();
+        let manual = jobs
+            .enqueue_manual_directory(&folder.id, jobs.root())
+            .unwrap();
+        let reconcile = jobs.enqueue_external_scan(&folder.id).unwrap();
+        jobs.claim_class("reconcile").unwrap().unwrap();
+        jobs.save_scan_progress(&reconcile.id, "saved-frontier", 7, 2, 0)
+            .unwrap();
+        let automatic = jobs
+            .enqueue_file_change(&folder.id, &jobs.root().join("a.jpg"), 0)
+            .unwrap();
+        jobs.db
+            .lock()
+            .unwrap()
+            .execute_batch("DROP INDEX jobs_live_scope; ALTER TABLE jobs DROP COLUMN work_class;")
+            .unwrap();
+        drop(jobs);
+        let jobs = Jobs::open(
+            &dir.path().join("jobs.sqlite"),
+            &dir.path().join("originals"),
+        )
+        .unwrap();
+        assert_eq!(jobs.job(&manual.id).unwrap().unwrap().work_class, "manual");
+        assert_eq!(
+            jobs.job(&automatic.id).unwrap().unwrap().work_class,
+            "automatic"
+        );
+        let resumed = jobs.claim_class("reconcile").unwrap().unwrap();
+        assert_eq!(resumed.id, reconcile.id);
+        assert_eq!(resumed.processed, 7);
+        assert_eq!(
+            jobs.load_checkpoint(&reconcile.id).unwrap().as_deref(),
+            Some("saved-frontier")
+        );
+        assert!(
+            !jobs
+                .directory_scan_pending("library", &jobs.root().join("child/a.jpg"))
+                .unwrap()
+        );
+        jobs.db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE jobs SET wait_for_quiet=0 WHERE id=?1",
+                [&reconcile.id],
+            )
+            .unwrap();
+        drop(jobs);
+        let jobs = Jobs::open(
+            &dir.path().join("jobs.sqlite"),
+            &dir.path().join("originals"),
+        )
+        .unwrap();
+        assert_eq!(
+            jobs.job(&reconcile.id).unwrap().unwrap().work_class,
+            "reconcile"
+        );
+    }
+    #[test]
+    fn explicit_retry_becomes_manual_and_reuses_a_live_manual_scope() {
+        let (_dir, jobs, folder) = setup();
+        let path = jobs.root().join("a.jpg");
+        let automatic = jobs.enqueue_file_change(&folder.id, &path, 0).unwrap();
+        jobs.db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE jobs SET status='failed',checkpoint='obsolete',processed=4 WHERE id=?1",
+                [&automatic.id],
+            )
+            .unwrap();
+        let retry = jobs.retry(&automatic.id).unwrap();
+        assert_eq!(retry.work_class, "manual");
+        assert!(!retry.wait_for_quiet);
+        assert_eq!(retry.processed, 0);
+        assert!(jobs.load_checkpoint(&retry.id).unwrap().is_none());
+        assert!(jobs.ensure_file_retry(&folder.id, &path).unwrap().is_none());
+        jobs.claim_class("manual").unwrap().unwrap();
+        let another = jobs.enqueue_file_change(&folder.id, &path, 0).unwrap();
+        jobs.db
+            .lock()
+            .unwrap()
+            .execute("UPDATE jobs SET status='failed' WHERE id=?1", [&another.id])
+            .unwrap();
+        assert_eq!(jobs.retry(&another.id).unwrap().id, retry.id);
+        assert_eq!(jobs.job(&another.id).unwrap().unwrap().status, "cancelled");
+        jobs.finish(&retry.id, None).unwrap();
+        assert_eq!(jobs.claim_class("manual").unwrap().unwrap().id, retry.id);
+        jobs.finish(&retry.id, None).unwrap();
+        assert!(!jobs.has_due_class("manual").unwrap());
+    }
+    #[test]
+    fn manual_file_rebuild_stays_separate_from_automatic_update() {
+        let (_dir, jobs, folder) = setup();
+        let path = jobs.root().join("a.jpg");
+        let automatic = jobs.enqueue_file_change(&folder.id, &path, 0).unwrap();
+        let manual = jobs.enqueue_manual_file(&folder.id, &path).unwrap();
+        assert_ne!(manual.id, automatic.id);
+        assert_eq!(manual.work_class, "manual");
+        assert!(!manual.wait_for_quiet);
+        assert_eq!(
+            jobs.enqueue_manual_file(&folder.id, &path).unwrap().id,
+            manual.id
+        );
+    }
+    #[test]
     fn historical_error_gets_only_one_file_retry_until_completed() {
         let (_dir, jobs, folder) = setup();
         let path = jobs.root().join("bad.jpg");
@@ -695,15 +977,18 @@ mod tests {
         assert!(jobs.ensure_file_retry(&folder.id, &path).unwrap().is_some());
     }
     #[test]
-    fn pending_recursive_scopes_merge_without_losing_priority_or_quiet() {
+    fn manual_scopes_do_not_absorb_automatic_events() {
         let (_dir, jobs, folder) = setup();
         let child = jobs.root().join("child");
         std::fs::create_dir(&child).unwrap();
         let nested = jobs.enqueue_path_change(&folder.id, &child, 30).unwrap();
         let root = jobs.enqueue_scan(&folder.id).unwrap();
-        assert_eq!(jobs.job(&nested.id).unwrap().unwrap().status, "cancelled");
-        assert!(root.path_sync && root.wait_for_quiet);
-        assert!(jobs.claim_next().unwrap().is_none());
+        assert_eq!(jobs.job(&nested.id).unwrap().unwrap().status, "pending");
+        assert_eq!(nested.work_class, "automatic");
+        assert_eq!(root.work_class, "manual");
+        assert!(!root.wait_for_quiet);
+        assert!(!jobs.has_due_class("automatic").unwrap());
+        assert!(jobs.has_due_class("manual").unwrap());
         assert_eq!(
             jobs.enqueue_reconcile_scope(&folder.id, &child).unwrap().id,
             root.id
@@ -759,6 +1044,39 @@ mod tests {
         assert_eq!(
             jobs.load_checkpoint(&root.id).unwrap().as_deref(),
             Some("frontier")
+        );
+    }
+    #[test]
+    fn cache_scan_gate_covers_siblings_and_recursive_ancestors_only() {
+        let (_dir, jobs, folder) = setup();
+        let child = jobs.root().join("child");
+        std::fs::create_dir(&child).unwrap();
+        jobs.enqueue_file_change(&folder.id, &jobs.root().join("a.3fr"), 0)
+            .unwrap();
+        assert!(
+            jobs.directory_scan_pending("library", &jobs.root().join("a.heic"))
+                .unwrap()
+        );
+        assert!(
+            !jobs
+                .directory_scan_pending("library", &child.join("a.heic"))
+                .unwrap()
+        );
+        assert!(
+            !jobs
+                .directory_scan_pending("other", &jobs.root().join("a.heic"))
+                .unwrap()
+        );
+        jobs.claim_next().unwrap().unwrap();
+        assert!(
+            jobs.directory_scan_pending("library", &jobs.root().join("b.heic"))
+                .unwrap()
+        );
+        jobs.enqueue_scan(&folder.id).unwrap();
+        assert!(
+            !jobs
+                .directory_scan_pending("library", &child.join("a.heic"))
+                .unwrap()
         );
     }
     #[test]
@@ -1021,10 +1339,11 @@ mod tests {
         assert!(!manual.wait_for_quiet);
         assert!(!manual.refresh_metadata);
         let external = jobs.enqueue_external_scan(&folder.id).unwrap();
-        assert_eq!(external.id, manual.id);
+        assert_ne!(external.id, manual.id);
+        assert_eq!(external.work_class, "reconcile");
         assert!(external.wait_for_quiet);
         assert!(!external.refresh_metadata);
-        assert!(jobs.enqueue_scan(&folder.id).unwrap().wait_for_quiet);
+        assert!(!jobs.enqueue_scan(&folder.id).unwrap().wait_for_quiet);
         let running = jobs.claim_next().unwrap().unwrap();
         jobs.yield_job(&running.id).unwrap();
         assert_eq!(jobs.job(&running.id).unwrap().unwrap().status, "pending");
@@ -1036,7 +1355,8 @@ mod tests {
         .unwrap();
         let recovered = jobs.claim_next().unwrap().unwrap();
         assert_eq!(recovered.id, manual.id);
-        assert!(recovered.wait_for_quiet);
+        assert!(!recovered.wait_for_quiet);
+        assert_eq!(recovered.work_class, "manual");
         jobs.finish(&recovered.id, None).unwrap();
         let manual = jobs
             .enqueue_reconcile_scope(&folder.id, Path::new(&folder.path))

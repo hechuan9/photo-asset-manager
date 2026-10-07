@@ -12,54 +12,35 @@ final class IOSDirectoryStore: ObservableObject {
 
     @Published private var entries: [String?: Entry] = [:]
     private var configuration: KeepsConfiguration?
-    private var generation = 0
-    private var requests: [String?: Task<KeepsNavigation, Error>] = [:]
-    private let fetch: (KeepsConfiguration, String?) async throws -> KeepsNavigation
+    private var database: KeepsLibraryDatabase?
+    var synchronize: (() async -> Void)?
 
-    init(fetch: @escaping (KeepsConfiguration, String?) async throws -> KeepsNavigation = {
-             try await KeepsClient(configuration: $0).navigation(path: $1)
-         }) {
-        self.fetch = fetch
-    }
-
-    func configure(_ configuration: KeepsConfiguration?) {
-        guard self.configuration != configuration else { return }
+    func configure(_ configuration: KeepsConfiguration?, database: KeepsLibraryDatabase?) {
+        guard self.configuration != configuration || self.database !== database else { return }
         self.configuration = configuration
-        generation += 1
-        for request in requests.values { request.cancel() }
-        requests = [:]
+        self.database = database
         entries = [:]
     }
 
     func state(for path: String?, configuration: KeepsConfiguration?) -> Entry {
-        guard self.configuration == configuration else { return Entry(loading: true) }
-        return entries[path] ?? Entry(loading: true)
+        guard self.configuration == configuration else { return Entry() }
+        if let entry = entries[path] { return entry }
+        return read(path)
     }
 
     func load(configuration: KeepsConfiguration?, path: String?, force: Bool = false) async {
-        configure(configuration)
-        guard let configuration else { return }
-        var entry = entries[path] ?? Entry()
-        guard !entry.loading else { return }
-        if !force, entries[path] != nil { return }
-        let requestGeneration = generation
-        entry.loading = true
-        entry.error = nil
-        entries[path] = entry
-        // Closing the directory panel must not cancel a shared cache fill.
-        let request = Task { try await fetch(configuration, path) }
-        requests[path] = request
-        defer { if generation == requestGeneration { requests[path] = nil } }
-        do {
-            let result = try await request.value
-            guard generation == requestGeneration else { return }
-            entry.directories = result.directories
-        } catch {
-            guard generation == requestGeneration else { return }
-            if !(error is CancellationError) { entry.error = String(reflecting: error) }
-        }
-        entry.loading = false
-        entries[path] = entry
+        guard self.configuration == configuration else { return }
+        if force { await synchronize?() }
+        entries[path] = read(path)
     }
 
+    func reload() {
+        for path in Array(entries.keys) { entries[path] = read(path) }
+        objectWillChange.send()
+    }
+
+    private func read(_ path: String?) -> Entry {
+        do { return Entry(directories: try database?.navigation(path: path)?.directories) }
+        catch { return Entry(error: String(reflecting: error)) }
+    }
 }

@@ -452,7 +452,6 @@ final class LibraryStore: ObservableObject {
         mutateSelected { client, id in try await client.updateAsset(id: id, patch: patch) }
     }
 
-    func trashSelected() { mutateSelected(refreshDirectories: true) { client, id in try await client.trashAsset(id: id) } }
     func restoreSelected() { mutateSelected(refreshDirectories: true) { client, id in try await client.restoreAsset(id: id) } }
 
     private func mutateSelected(refreshDirectories: Bool = false, _ mutation: @escaping @Sendable (KeepsClient, UUID) async throws -> KeepsAsset) {

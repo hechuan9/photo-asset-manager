@@ -3,7 +3,7 @@ import KeepsAPI
 
 struct NASTasksView: View {
     let client: KeepsClient
-    @State private var jobs: [KeepsJob] = []
+    @State private var taskStatus: KeepsTaskStatus?
     @State private var isBusy = false
     @State private var errorMessage: String?
 
@@ -13,103 +13,87 @@ struct NASTasksView: View {
                 Text(errorMessage).foregroundStyle(.red).textSelection(.enabled)
                     .font(.caption).accessibilityIdentifier("nas-task-error")
             }
-            Text("任务状态每 5 秒自动更新。后台优先处理发生变化的文件，关闭窗口不影响任务执行。")
+            Text("任务状态每 5 秒自动更新。关闭窗口不影响后台任务执行。")
                 .font(.caption).foregroundStyle(.secondary)
-            if let running = jobs.first(where: { $0.status == "running" }) {
-                Text("正在扫描：\(running.path)").font(.callout).textSelection(.enabled)
-            }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("扫描任务").font(.headline)
-                    if jobs.isEmpty {
-                        if isBusy { ProgressView("正在读取任务…") }
-                        else { Text("暂无任务").foregroundStyle(.secondary) }
-                    }
-                    ForEach(jobs.sorted { statusOrder($0.status) < statusOrder($1.status) }) { job in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(job.path)
-                                Spacer()
-                                Text(statusLabel(job.status)).foregroundStyle(.secondary)
-                                if job.status == "failed" {
-                                    Button("重试") { perform {
-                                        _ = try await client.retryJob(id: job.id)
-                                        try await refresh()
-                                    } }.disabled(isBusy)
-                                }
-                            }
-                            HStack(spacing: 14) {
-                                if let processed = job.processed { Text("已处理 \(processed)") }
-                                if let skipped = job.skipped { Text("已跳过 \(skipped)") }
-                                if let failed = job.failed { Text("失败 \(failed)") }
-                            }
-                            .font(.caption).monospacedDigit().foregroundStyle(.secondary)
-                            if let path = job.currentPath {
-                                Text("当前文件：\(path)").font(.caption).lineLimit(2)
-                                    .truncationMode(.middle).textSelection(.enabled)
-                                    .help(path)
-                            }
-                            HStack(spacing: 14) {
-                                if let startedAt = job.startedAt {
-                                    Text("开始：\(Date(timeIntervalSince1970: TimeInterval(startedAt)).formatted(date: .abbreviated, time: .standard))")
-                                }
-                                if let finishedAt = job.finishedAt {
-                                    Text("结束：\(Date(timeIntervalSince1970: TimeInterval(finishedAt)).formatted(date: .abbreviated, time: .standard))")
-                                }
-                            }.font(.caption2).foregroundStyle(.secondary)
-                            if let error = job.error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+            if let taskStatus {
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("自动更新").font(.headline)
+                            Spacer()
+                            Text(Self.statusLabel(taskStatus.automatic.status)).foregroundStyle(.secondary)
                         }
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-                    .background(OverlayScrollerConfiguration())
+                        if let photo = taskStatus.automatic.currentPhoto {
+                            Text("当前照片：\(photo)").lineLimit(2).truncationMode(.middle)
+                                .textSelection(.enabled).help(photo)
+                        }
+                        Text("已知待更新 \(taskStatus.automatic.remainingPhotos) 张照片")
+                            .monospacedDigit()
+                        if taskStatus.automatic.failedPhotos > 0 {
+                            Text("更新失败 \(taskStatus.automatic.failedPhotos) 张照片").foregroundStyle(.red)
+                        }
+                        if let error = taskStatus.automatic.error {
+                            Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                }
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("后台长任务").font(.headline)
+                            Spacer()
+                            Text(Self.statusLabel(taskStatus.longTask.status)).foregroundStyle(.secondary)
+                        }
+                        if let kind = taskStatus.longTask.kind {
+                            Text(Self.kindLabel(kind))
+                        }
+                        if let error = taskStatus.longTask.error {
+                            Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                }
+            } else if isBusy {
+                ProgressView("正在读取任务…")
             }
+            Spacer(minLength: 0)
         }
-        .padding(20).frame(width: 680, height: 520)
+        .padding(20).frame(width: 680, height: 420)
         .background(TaskWindowConfiguration())
         .task {
-            await run { try await refresh() }
+            await refresh()
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(5)) } catch { return }
-                if !isBusy { await run { try await refresh() } }
+                await refresh()
             }
         }
     }
 
-    private func statusOrder(_ status: String) -> Int {
+    static func statusLabel(_ status: String) -> String {
         switch status {
-        case "running": 0
-        case "pending", "queued": 1
-        case "failed": 2
-        default: 3
-        }
-    }
-
-    private func statusLabel(_ status: String) -> String {
-        switch status {
-        case "pending", "queued": "排队中"
-        case "running": "扫描中"
+        case "idle": "空闲"
+        case "pending": "等待中"
+        case "running": "处理中"
         case "completed": "已完成"
         case "failed": "失败"
-        case "cancelled": "已停止"
         default: status
         }
     }
 
-    private func refresh() async throws {
-        let tasks = try await client.jobs()
-        jobs = tasks.jobs
+    static func kindLabel(_ kind: String) -> String {
+        switch kind {
+        case "manual": "手动一次性作业"
+        case "maintenance": "自动维护"
+        case "reconcile": "全库补漏"
+        default: kind
+        }
     }
 
-    private func perform(_ action: @escaping @MainActor () async throws -> Void) {
-        Task { await run(action) }
-    }
-
-    @MainActor private func run(_ action: @MainActor () async throws -> Void) async {
+    @MainActor private func refresh() async {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
         do {
-            try await action()
+            taskStatus = try await client.taskStatus()
             errorMessage = nil
         } catch is CancellationError {
         } catch {
@@ -162,7 +146,7 @@ struct NASSourceSettingsView: View {
                             Spacer()
                             Text(folder.active ? "追踪中" : "已停止").foregroundStyle(.secondary)
                             if folder.active {
-                                Button("扫描") { perform {
+                                Button("核对") { perform {
                                     _ = try await client.scanFolder(id: folder.id)
                                     try await refresh()
                                 } }

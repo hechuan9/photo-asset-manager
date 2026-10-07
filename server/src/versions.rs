@@ -35,7 +35,7 @@ fn touch(db: &Connection, lib: &str, id: &str) -> Result<()> {
     db.execute("UPDATE catalog_assets SET snapshot=json_set(snapshot,'$.updatedAt',?) WHERE library_id=? AND id=?",params![chrono::Utc::now().to_rfc3339(),lib,id])?;
     Ok(())
 }
-fn capture_key(snapshot: &Value) -> Option<String> {
+pub(crate) fn capture_key(snapshot: &Value) -> Option<String> {
     let fields = ["captureTime", "cameraMake", "cameraModel", "lensModel"];
     let values: Option<Vec<&str>> = fields
         .iter()
@@ -154,9 +154,9 @@ pub(crate) fn register(
     }
     Ok(())
 }
-fn choose(db: &Connection, lib: &str, id: &str) -> Result<bool> {
-    let current:Option<(String,i64,i64)>=db.query_row("SELECT d.content_hash,d.user_selected,v.priority FROM catalog_defaults d JOIN catalog_versions v USING(library_id,asset_id,content_hash) WHERE d.library_id=? AND d.asset_id=? AND EXISTS(SELECT 1 FROM catalog_version_paths p WHERE p.library_id=d.library_id AND p.asset_id=d.asset_id AND p.content_hash=d.content_hash AND p.available=1)",params![lib,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-    let best:Option<(String,i64)>=db.query_row("SELECT v.content_hash,v.priority FROM catalog_versions v WHERE v.library_id=? AND v.asset_id=? AND EXISTS(SELECT 1 FROM catalog_version_paths p WHERE p.library_id=v.library_id AND p.asset_id=v.asset_id AND p.content_hash=v.content_hash AND p.available=1) ORDER BY v.priority DESC,v.width*v.height DESC,v.content_hash LIMIT 1",params![lib,id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+pub(crate) fn choose(db: &Connection, lib: &str, id: &str) -> Result<bool> {
+    let current:Option<(String,i64,i64)>=db.query_row("SELECT d.content_hash,d.user_selected,v.priority FROM catalog_defaults d JOIN catalog_versions v USING(library_id,asset_id,content_hash) WHERE d.library_id=? AND d.asset_id=? AND EXISTS(SELECT 1 FROM catalog_version_paths p WHERE p.library_id=d.library_id AND p.asset_id=d.asset_id AND p.content_hash=d.content_hash AND p.available=1 AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path))",params![lib,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    let best:Option<(String,i64)>=db.query_row("SELECT v.content_hash,v.priority FROM catalog_versions v WHERE v.library_id=? AND v.asset_id=? AND EXISTS(SELECT 1 FROM catalog_version_paths p WHERE p.library_id=v.library_id AND p.asset_id=v.asset_id AND p.content_hash=v.content_hash AND p.available=1 AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path)) ORDER BY v.priority DESC,v.width*v.height DESC,v.content_hash LIMIT 1",params![lib,id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     if let Some((_, user, priority)) = &current
         && (*user == 1 || best.as_ref().is_some_and(|b| b.1 <= *priority))
     {
@@ -341,7 +341,7 @@ impl Store {
     pub fn defaults_needing_previews(&self, lib: &str, scope: &str) -> Result<Vec<String>> {
         let db = self.lock()?;
         let root = scope.trim_end_matches('/');
-        let mut statement=db.prepare("SELECT d.asset_id FROM catalog_defaults d WHERE d.library_id=? AND d.asset_id IN (SELECT p.asset_id FROM catalog_version_paths p WHERE p.library_id=? AND p.path>=? AND p.path<?) AND EXISTS(SELECT 1 FROM catalog_version_paths p WHERE p.library_id=d.library_id AND p.asset_id=d.asset_id AND p.content_hash=d.content_hash AND p.available=1) AND NOT EXISTS(SELECT 1 FROM derivative_objects o WHERE o.library_id=d.library_id AND o.asset_id=d.asset_id AND o.role='preview') ORDER BY d.asset_id")?;
+        let mut statement=db.prepare("SELECT d.asset_id FROM catalog_defaults d WHERE d.library_id=? AND d.asset_id IN (SELECT p.asset_id FROM catalog_version_paths p WHERE p.library_id=? AND p.path>=? AND p.path<?) AND EXISTS(SELECT 1 FROM catalog_version_paths p WHERE p.library_id=d.library_id AND p.asset_id=d.asset_id AND p.content_hash=d.content_hash AND p.available=1 AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path)) AND NOT EXISTS(SELECT 1 FROM derivative_objects o WHERE o.library_id=d.library_id AND o.asset_id=d.asset_id AND o.role='preview') ORDER BY d.asset_id")?;
         Ok(statement
             .query_map(
                 params![lib, lib, format!("{root}/"), format!("{root}0")],
@@ -350,12 +350,12 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn default_version(&self, lib: &str, id: &str) -> Result<Option<DefaultVersion>> {
-        Ok(self.lock()?.query_row("SELECT d.content_hash,p.path FROM catalog_defaults d JOIN catalog_version_paths p USING(library_id,asset_id,content_hash) WHERE d.library_id=? AND d.asset_id=? AND p.available=1 ORDER BY p.path LIMIT 1",params![lib,id],|r|Ok(DefaultVersion{content_hash:r.get(0)?,path:r.get(1)?})).optional()?)
+        Ok(self.lock()?.query_row("SELECT d.content_hash,p.path FROM catalog_defaults d JOIN catalog_version_paths p USING(library_id,asset_id,content_hash) WHERE d.library_id=? AND d.asset_id=? AND p.available=1 AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path) ORDER BY p.path LIMIT 1",params![lib,id],|r|Ok(DefaultVersion{content_hash:r.get(0)?,path:r.get(1)?})).optional()?)
     }
     pub fn versions(&self, lib: &str, id: &str) -> Result<Value> {
         self.asset(lib, id)?;
         let db = self.lock()?;
-        let mut stmt=db.prepare("SELECT v.content_hash,v.width,v.height,v.priority,v.evidence,coalesce(d.content_hash=v.content_hash,0),coalesce(d.user_selected,0),EXISTS(SELECT 1 FROM catalog_version_paths p WHERE p.library_id=v.library_id AND p.asset_id=v.asset_id AND p.content_hash=v.content_hash AND p.available=1) FROM catalog_versions v LEFT JOIN catalog_defaults d USING(library_id,asset_id) WHERE v.library_id=? AND v.asset_id=? ORDER BY v.priority DESC,v.width*v.height DESC,v.content_hash")?;
+        let mut stmt=db.prepare("SELECT v.content_hash,v.width,v.height,v.priority,v.evidence,coalesce(d.content_hash=v.content_hash,0),coalesce(d.user_selected,0),EXISTS(SELECT 1 FROM catalog_version_paths p WHERE p.library_id=v.library_id AND p.asset_id=v.asset_id AND p.content_hash=v.content_hash AND p.available=1 AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path)) FROM catalog_versions v LEFT JOIN catalog_defaults d USING(library_id,asset_id) WHERE v.library_id=? AND v.asset_id=? ORDER BY v.priority DESC,v.width*v.height DESC,v.content_hash")?;
         let rows = stmt
             .query_map(params![lib, id], |r| {
                 Ok((
@@ -372,15 +372,19 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut items = Vec::new();
         for (hash, width, height, priority, evidence, default, user, available) in rows {
-            let mut paths=db.prepare("SELECT path,available FROM catalog_version_paths WHERE library_id=? AND asset_id=? AND content_hash=? ORDER BY path")?;
+            let mut paths=db.prepare("SELECT p.path,p.available FROM catalog_version_paths p WHERE p.library_id=? AND p.asset_id=? AND p.content_hash=? AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path) ORDER BY p.path")?;
             let paths = paths
                 .query_map(params![lib, id, hash], |r| {
                     Ok(json!({"path":r.get::<_,String>(0)?,"available":r.get::<_,bool>(1)?}))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            if paths.is_empty() {
+                continue;
+            }
             items.push(json!({"contentHash":hash,"width":width,"height":height,"priority":priority,"evidence":serde_json::from_str::<Value>(&evidence)?,"isDefault":default,"userSelected":default&&user,"available":available,"paths":paths}));
         }
-        Ok(json!({"items":items}))
+        let deprecated = crate::photo_relations::deprecated_files(&db, lib, id)?;
+        Ok(json!({"items":items,"deprecatedFiles":deprecated}))
     }
     pub fn version_candidates(&self, lib: &str, id: &str) -> Result<Value> {
         self.asset(lib, id)?;
@@ -393,7 +397,7 @@ impl Store {
         self.asset(lib, id)?;
         let mut db = self.lock()?;
         let tx = db.transaction()?;
-        let available:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM catalog_version_paths WHERE library_id=? AND asset_id=? AND content_hash=? AND available=1)",params![lib,id,hash],|r|r.get(0))?;
+        let available:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM catalog_version_paths p WHERE library_id=? AND asset_id=? AND content_hash=? AND available=1 AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path))",params![lib,id,hash],|r|r.get(0))?;
         if !available {
             return Err(invalid("version is not available for this asset"));
         }
@@ -850,25 +854,27 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn exact_content_groups_and_default_remains_stable_with_user_override() -> Result<()> {
+    fn distinct_versions_default_remains_stable_with_user_override() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let store = Store::open(&dir.path().join("db"), true)?;
-        let mut ev = evidence("same-pixels");
+        let mut ev = evidence("raw-pixels");
+        let metadata = snapshot();
         let id = store.ingest_original_with_evidence(
             "lib",
             "/a.raw",
             &file("a", true),
-            &snapshot(),
+            &metadata,
             &ev,
         )?;
+        ev.visual_hash = Some("jpeg-pixels".into());
         let before = store.library_revision("lib")?["revision"].as_i64().unwrap();
         assert_eq!(
             id,
             store.ingest_original_with_evidence(
                 "lib",
-                "/b.jpg",
+                "/a.jpg",
                 &file("b", false),
-                &snapshot(),
+                &metadata,
                 &ev
             )?
         );
@@ -877,13 +883,8 @@ mod tests {
             "b"
         );
         ev.width = 200;
-        store.ingest_original_with_evidence(
-            "lib",
-            "/c.jpg",
-            &file("c", false),
-            &snapshot(),
-            &ev,
-        )?;
+        ev.visual_hash = Some("larger-pixels".into());
+        store.ingest_original_with_evidence("lib", "/a.heic", &file("c", false), &metadata, &ev)?;
         assert_eq!(
             store.default_version("lib", &id)?.unwrap().content_hash,
             "b"
@@ -896,13 +897,8 @@ mod tests {
         store.set_default_version("lib", &id, "a")?;
         assert!(store.asset("lib", &id)?["_preview"].is_null());
         ev.edited = true;
-        store.ingest_original_with_evidence(
-            "lib",
-            "/d.jpg",
-            &file("d", false),
-            &snapshot(),
-            &ev,
-        )?;
+        ev.visual_hash = Some("edited-pixels".into());
+        store.ingest_original_with_evidence("lib", "/a.png", &file("d", false), &metadata, &ev)?;
         assert_eq!(
             store.default_version("lib", &id)?.unwrap().content_hash,
             "a"

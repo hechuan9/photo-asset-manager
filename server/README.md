@@ -8,6 +8,7 @@ cargo clippy --manifest-path server/Cargo.toml --all-targets -- -D warnings
 docker build -f server/Dockerfile -t keeps-server:nas-core .
 KEEPS_TEST_IMAGE=keeps-server:nas-core python3 server/tests/docker_smoke.py
 KEEPS_TEST_IMAGE=keeps-server:nas-core python3 server/tests/mechanisms_smoke.py
+KEEPS_TEST_IMAGE=keeps-server:nas-core python3 server/tests/task_scheduler_smoke.py
 ```
 
 配置：

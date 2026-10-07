@@ -100,6 +100,13 @@ async fn nas_catalog_commands_queries_authentication_and_restart() {
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(page["total"], 2);
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        page["items"][0]["paths"],
+        json!([dir
+            .path()
+            .join("originals")
+            .join(page["items"][0]["originalFilename"].as_str().unwrap())])
+    );
     let cursor = page["nextCursor"].as_str().unwrap();
     assert!(cursor.starts_with("cd1."));
     let (status, next) = call(
@@ -1829,6 +1836,67 @@ async fn imports_deduplicate_skips_existing_group_and_rechecks_before_finish() {
         );
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
     }
+}
+
+#[tokio::test]
+async fn task_summary_is_scoped_and_cache_rebuild_queues_manual_photo_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let folder = state.jobs.add_folder("photos", ".").unwrap();
+    let id = seed(&state, &dir.path().canonicalize().unwrap(), "photo.jpg");
+    state.store.reconcile_cache().unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("keeps/db/control_plane.sqlite")).unwrap();
+    db.execute(
+        "UPDATE media_cache SET status='ready',thumbnail='{}',standard='{}'",
+        [],
+    )
+    .unwrap();
+    let app = router(state.clone());
+    let (status, body) = call(
+        app.clone(),
+        "GET",
+        "/libraries/photos/task-status",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_object().unwrap().len(), 2);
+    assert_eq!(body["automatic"]["remainingPhotos"], 0);
+    assert_eq!(
+        call(
+            app.clone(),
+            "GET",
+            "/libraries/other/task-status",
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, body) = call(
+        app.clone(),
+        "POST",
+        "/libraries/photos/cache-rebuild",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["requeued"], 1);
+    let job = state.jobs.claim_class("manual").unwrap().unwrap();
+    assert_eq!(job.folder_id, folder.id);
+    assert!(job.refresh_metadata);
+    assert_eq!(
+        db.query_row(
+            "SELECT status FROM media_cache WHERE asset_id=?",
+            [id],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "ready"
+    );
+    let (_, summary) = call(app, "GET", "/libraries/photos/task-status", Value::Null).await;
+    assert_eq!(summary["longTask"]["kind"], "manual");
+    assert_eq!(summary["automatic"]["remainingPhotos"], 0);
 }
 
 #[tokio::test]

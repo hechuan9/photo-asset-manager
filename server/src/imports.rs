@@ -711,7 +711,7 @@ async fn finish(
         }
         let job = state
             .jobs
-            .enqueue_directory_change(&folder.id, &destination, 0)?;
+            .enqueue_manual_directory(&folder.id, &destination)?;
         let db = state.jobs.db.lock().unwrap();
         let mut batch = load(&db, &library, &id)?;
         batch.finished = true;

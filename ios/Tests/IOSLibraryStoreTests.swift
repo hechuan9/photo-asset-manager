@@ -1,321 +1,491 @@
 import Foundation
+import CryptoKit
 import Testing
 import KeepsAPI
 @testable import KeepsIOSState
 
 @MainActor
 struct IOSLibraryStoreTests {
-    @Test func returningToDirectoryUsesCacheWithoutAnyNetwork() async {
-        let fixture = LibraryFixture()
-        let store = fixture.store()
-        store.directory = "/a"
-        await store.refresh()
-        store.directory = "/b"
-        await store.refresh()
-        store.directory = "/a"
-        await store.refresh()
-        await store.refresh()
-        #expect(fixture.assetRequests == 2)
-        #expect(fixture.revisionPaths.isEmpty)
-        #expect(store.assets.first?.originalFilename == "/a")
-        await store.refreshFromBottom()
-        #expect(fixture.assetRequests == 2)
-        #expect(fixture.revisionPaths == ["/a"])
-        store.showingPicked = true
-        await store.refresh()
-        #expect(fixture.assetRequests == 3)
+    @Test func newlyDiscoveredDirectoriesStillReportActualProgress() {
+        var progress = IOSOfflineProgress()
+        progress.record(.navigation, completed: 1, total: 1)
+        let first = progress.completedUnitCount
+        progress.record(.navigation, completed: 2, total: 200)
+        #expect(progress.completedUnitCount > first)
+        let second = progress.completedUnitCount
+        progress.record(.navigation, completed: 2, total: 200)
+        #expect(progress.completedUnitCount == second)
     }
 
-    @Test func onlyBottomRefreshChecksChangesAndUpdatingState() async {
-        let fixture = LibraryFixture()
-        let store = fixture.store()
-        await store.refresh()
-        fixture.set(revision: 2, updating: true)
-        await store.refresh()
-        #expect(fixture.assetRequests == 1)
-        #expect(fixture.revisionPaths.isEmpty)
-        await store.refreshFromBottom()
-        #expect(fixture.assetRequests == 2)
-        await store.refresh()
-        #expect(fixture.assetRequests == 2)
-        await store.refreshFromBottom()
-        #expect(fixture.assetRequests == 3)
-        fixture.set(revision: 2, updating: false)
-        await store.refreshFromBottom()
-        #expect(fixture.assetRequests == 4)
-        await store.refreshFromBottom()
-        #expect(fixture.assetRequests == 4)
+    @Test func systemProgressAdvancesAcrossLargeStagesWithoutResetOrEarlyCompletion() {
+        var progress = IOSOfflineProgress()
+        for stage in IOSOfflineProgress.Stage.allCases {
+            let before = progress.completedUnitCount
+            progress.record(stage, completed: 1, total: 300_000)
+            #expect(progress.completedUnitCount > before)
+            progress.record(stage, completed: 2, total: 300_000)
+            let advanced = progress.completedUnitCount
+            progress.record(stage, completed: 1, total: 600_000)
+            #expect(progress.completedUnitCount == advanced)
+            progress.record(stage, completed: 300_000, total: 300_000)
+        }
+        #expect(progress.completedUnitCount == progress.totalUnitCount - 1)
+        progress.record(.restore, completed: 0, total: 1)
+        #expect(progress.completedUnitCount == progress.totalUnitCount - 1)
+        #expect(progress.percentage == 99)
+        progress.complete()
+        #expect(progress.percentage == 100)
+        #expect(progress.fractionCompleted == 1)
+        #expect(IOSOfflineProgress().completedUnitCount == 0)
     }
 
-    @Test func revisionFailurePreservesVisibleContentUntilBottomRetry() async {
-        let fixture = LibraryFixture()
-        let store = fixture.store()
-        await store.refresh()
-        let original = store.assets
-        fixture.setFailure(true)
-        await store.refreshFromBottom()
-        #expect(store.assets == original)
-        #expect(store.lastError != nil)
-        #expect(!store.isLoading)
-        fixture.setFailure(false)
-        let count = fixture.revisionPaths.count
-        await store.refresh()
-        #expect(fixture.revisionPaths.count == count)
-        await store.refreshFromBottom()
-        #expect(store.lastError == nil)
-        #expect(fixture.assetRequests == 1)
-    }
-
-    @Test func paginationVersionChangeAutomaticallyLoadsNewAndOlderPhotos() async {
-        let fixture = LibraryFixture()
-        fixture.enqueuePage(ids: [1, 2], revision: 1, next: "old")
-        fixture.enqueuePage(ids: [2, 3], revision: 2, next: "stale")
-        fixture.enqueuePage(ids: [4, 1], revision: 2, next: "new")
-        fixture.enqueuePage(ids: [2, 3], revision: 2)
-        let store = fixture.store()
-        await store.refresh()
-        await store.loadMore()
-        #expect(fixture.assetRequests == 4)
-        #expect(store.assets.map(\.originalFilename) == ["4", "1", "2", "3"])
-        #expect(store.assets.allSatisfy { $0.rating == 2 })
-        #expect(store.lastError == nil)
-        #expect(!store.isLoading)
-        #expect(fixture.revisionPaths.isEmpty)
-    }
-
-    @Test func changingCatalogDuringReloadDoesNotDiscardLoadedWindowOrLoop() async {
-        let fixture = LibraryFixture()
-        fixture.enqueuePage(ids: [1, 2], revision: 1, next: "old")
-        fixture.enqueuePage(ids: [2, 3], revision: 2)
-        fixture.enqueuePage(ids: [4, 1], revision: 2, next: "new")
-        fixture.enqueuePage(ids: [1, 2, 3], revision: 3)
-        let store = fixture.store()
-        await store.refresh()
-        await store.loadMore()
-        #expect(fixture.assetRequests == 4)
-        #expect(store.assets.map(\.originalFilename) == ["4", "1", "2", "3"])
-        #expect(store.lastError == nil)
-        #expect(store.assets.first(where: { $0.originalFilename == "1" })?.rating == 3)
-        fixture.set(revision: 3, updating: false)
-        await store.refreshFromBottom()
-        #expect(fixture.assetRequests == 5)
-    }
-
-    @Test func failedAutomaticReloadPreservesPhotosAndCanRetryInPlace() async {
-        let fixture = LibraryFixture()
-        fixture.enqueuePage(ids: [1, 2], revision: 1, next: "old")
-        fixture.enqueuePage(ids: [2, 3], revision: 2)
-        fixture.enqueueFailure()
-        let store = fixture.store()
-        await store.refresh()
-        let original = store.assets
-        await store.loadMore()
-        #expect(store.assets == original)
-        #expect(store.lastError != nil)
-        #expect(store.canLoadMore)
-        fixture.enqueuePage(ids: [2, 3], revision: 2)
-        fixture.enqueuePage(ids: [4, 1, 2, 3], revision: 2)
-        await store.loadMore()
-        #expect(store.assets.map(\.originalFilename) == ["4", "1", "2", "3"])
-        #expect(store.lastError == nil)
-    }
-
-    @Test func updatingPaginationIsVisibleButNeverCachedAsStable() async {
-        let fixture = LibraryFixture()
-        fixture.set(revision: 1, updating: true)
-        fixture.setCursor("next")
-        let store = fixture.store()
-        await store.refresh()
-        await store.loadMore()
-        #expect(store.assets.count == 2)
-        fixture.setCursor(nil)
-        fixture.set(revision: 1, updating: false)
-        await store.refresh()
-        #expect(fixture.assetRequests == 4)
-        #expect(store.assets.count == 2)
-        await store.refreshFromBottom()
-        #expect(fixture.assetRequests == 5)
-        #expect(store.assets.count == 1)
-    }
-
-    @Test func credentialChangeClearsCachesAndOldRequestCannotPublish() async {
-        let fixture = LibraryFixture()
-        fixture.setDelay(0.1)
-        let store = fixture.store()
-        let first = Task { await store.refresh() }
-        while fixture.assetRequests == 0 { await Task.yield() }
-        var configuration = fixture.configuration
-        configuration.accessCredential = "replacement"
-        store.configure(configuration)
+    @Test func initialLocalLoadIsAsynchronousAndConfigurationSwitchDiscardsIt() async throws {
+        let fixture = ReplicaFixture()
+        let seeded = await fixture.store()
+        try seeded.database?.ingest((1...450).map { try fixture.asset($0) })
+        let store = IOSLibraryStore(configuration: fixture.configuration, session: fixture.session, databaseDirectory: fixture.root)
+        #expect(store.isLoadingLocal)
+        #expect(!store.hasLoadedResults)
         #expect(store.assets.isEmpty)
-        fixture.setDelay(0)
-        store.directory = "/new"
-        await store.refresh()
-        await first.value
-        #expect(store.assets.first?.originalFilename == "/new")
-        #expect(!store.isLoading)
-        #expect(fixture.assetRequests == 2)
+        await store.waitForLocalLoad()
+        #expect(!store.isLoadingLocal)
+        #expect(store.assets.count == 200)
+        #expect(store.total == 450)
+        let switched = IOSLibraryStore(configuration: fixture.configuration, session: fixture.session, databaseDirectory: fixture.root)
+        var other = fixture.configuration
+        other.accessCredential = "other"
+        switched.configure(other)
+        await switched.waitForLocalLoad()
+        #expect(switched.assets.isEmpty)
+        #expect(!switched.isLoadingLocal)
     }
 
-    @Test func concurrentLoadingDoesNotDuplicateOrCancelRequest() async {
-        let fixture = LibraryFixture()
-        fixture.setDelay(0.1)
-        let store = fixture.store()
-        let first = Task { await store.refresh() }
-        while fixture.assetRequests == 0 { await Task.yield() }
-        await store.refresh()
-        await first.value
-        #expect(fixture.assetRequests == 1)
-        #expect(!store.isLoading)
-        #expect(store.assets.count == 1)
+    @Test func coldLaunchAndLocalBrowsingNeedNoNetwork() async throws {
+        let fixture = ReplicaFixture()
+        let store = await fixture.store()
+        let database = try #require(store.database)
+        try database.beginSync()
+        try database.ingest((1...450).map { try fixture.asset($0) })
+        try database.completeSync(revision: 1, isStable: true)
+        let restarted = await fixture.store()
+        #expect(restarted.assets.count == 200)
+        #expect(restarted.total == 450)
+        await restarted.loadMore()
+        #expect(restarted.assets.count == 400)
+        restarted.search = "photo-450"
+        await restarted.refresh()
+        #expect(restarted.assets.map(\.originalFilename) == ["photo-450"])
+        restarted.search = ""
+        restarted.directory = "/photos"
+        await restarted.refresh()
+        #expect(restarted.total == 450)
+        #expect(fixture.requests.isEmpty)
     }
 
-    @Test func repeatedPaginationTriggersDoNotQueueMorePages() async {
-        let fixture = LibraryFixture()
-        fixture.setCursor("next")
-        let store = fixture.store()
+    @Test func refreshKeepsLoadedPhotosWhenNewPhotosArrive() async throws {
+        let fixture = ReplicaFixture()
+        let store = await fixture.store()
+        let database = try #require(store.database)
+        try database.beginSync()
+        try database.ingest((1...450).map { try fixture.asset($0) })
         await store.refresh()
-        fixture.setDelay(0.1)
-        let first = Task { await store.loadMore() }
-        while fixture.assetRequests < 2 { await Task.yield() }
-        for _ in 0..<20 { await store.loadMore() }
-        #expect(fixture.assetRequests == 2)
-        #expect(store.isLoading)
-        await first.value
-        #expect(fixture.assetRequests == 2)
-        #expect(!store.isLoading)
-        #expect(store.assets.count == 2)
-    }
-
-    @Test func automaticUpdatesKeepLayoutUntilExplicitRefreshOrScopeChange() async {
-        let fixture = LibraryFixture()
-        fixture.setCursor("next")
-        let store = fixture.store()
-        await store.refresh()
-        let initial = store.layoutRevision
         await store.loadMore()
-        #expect(store.layoutRevision == initial)
-        var changed = store.assets[0]
-        changed.trashed = true
-        store.update(changed)
-        #expect(store.layoutRevision == initial)
-        await store.refreshFromBottom()
-        #expect(store.layoutRevision == initial + 1)
-        store.directory = "/other"
+        let previous = store.assets.map(\.id)
+        let layoutRevision = store.layoutRevision
+        var layout = KeepsPhotoGrid.Snapshot()
+        layout.update(ids: previous, aspectRatios: previous.map { _ in 1 }, width: 390, density: .compact)
+        let originalRows = layout.rows
+        let newest = try (999...1019).map { number in
+            var asset = try fixture.asset(number)
+            asset.captureTime = "2026-02-01"
+            return asset
+        }
+        try database.ingest(newest)
         await store.refresh()
-        #expect(store.layoutRevision == initial + 2)
+        #expect(store.assets.map(\.id) == newest.map(\.id) + previous)
+        #expect(store.layoutRevision == layoutRevision)
+        layout.update(ids: store.assets.map(\.id), aspectRatios: store.assets.map { _ in 1 }, width: 390, density: .compact)
+        // 屏幕按行倒序展示，旧行及高度不变才能保持原来的像素位置。
+        #expect(Array(layout.rows.suffix(originalRows.count)) == originalRows)
+        #expect(store.canLoadMore)
+        await store.refresh()
+        #expect(store.assets.count == 421)
+        store.search = "photo-999"
+        await store.refresh()
+        #expect(store.assets.map(\.id) == [newest[0].id])
     }
 
-    @Test func mutationUpdatesVisibleSnapshotWithoutStartingRefresh() async {
-        let fixture = LibraryFixture()
-        let store = fixture.store()
-        store.directory = "/a"
-        await store.refresh()
-        store.directory = "/b"
-        await store.refresh()
-        var updated = store.assets[0]
-        updated.rating = 5
-        store.update(updated)
-        await store.refresh()
-        #expect(store.assets[0].rating == 5)
-        #expect(fixture.assetRequests == 2)
-        #expect(fixture.revisionPaths.isEmpty)
-        await store.refreshFromBottom()
-        #expect(fixture.assetRequests == 3)
-        store.directory = "/a"
-        await store.refresh()
-        #expect(fixture.assetRequests == 4)
+    @Test func pagingUsesTheDisplayedBoundaryWhileBackgroundAddsNewerRows() async throws {
+        let fixture = ReplicaFixture()
+        let seeded = await fixture.store()
+        try seeded.database?.ingest((1...450).map { try fixture.asset($0) })
+        let browsing = await fixture.store()
+        var new = try fixture.asset(999)
+        new.captureTime = "2026-02-01"
+        try browsing.database?.ingest([new])
+        await browsing.loadMore()
+        #expect(browsing.assets.map(\.id) == (1...400).map { try! fixture.asset($0).id })
+        await browsing.loadMore()
+        #expect(browsing.assets.count == 450)
+        #expect(!browsing.canLoadMore)
     }
 
+    @Test func browsingWindowStaysBoundedAndCanReturnToNewest() async throws {
+        let fixture = ReplicaFixture()
+        let store = await fixture.store()
+        try store.database?.ingest((1...2400).map { try fixture.asset($0) })
+        await store.refresh()
+        for _ in 0..<11 { await store.loadMore() }
+        #expect(store.assets.count == 1000)
+        #expect(store.assets.first?.id == (try fixture.asset(1401)).id)
+        #expect(!store.canLoadMore)
+        #expect(store.canLoadNewer)
+        let window = store.assets.map(\.id)
+        await store.refresh()
+        #expect(store.assets.map(\.id) == window)
+        for _ in 0..<7 { await store.loadNewer() }
+        #expect(store.assets.count == 1000)
+        #expect(store.assets.first?.id == (try fixture.asset(1)).id)
+        #expect(!store.canLoadNewer)
+        #expect(store.canLoadMore)
+    }
+
+    @Test func restoresEvictedAnchorsWithCorrectBidirectionalBoundaries() async throws {
+        let fixture = ReplicaFixture()
+        let store = await fixture.store()
+        try store.database?.ingest((1...2400).map { try fixture.asset($0) })
+        await store.refresh()
+        #expect(await store.restoreWindow(around: try fixture.asset(1200)))
+        #expect(store.assets.map(\.id) == (1000...1399).map { try! fixture.asset($0).id })
+        #expect(store.canLoadNewer)
+        #expect(store.canLoadMore)
+        #expect(await store.restoreWindow(around: try fixture.asset(1)))
+        #expect(store.assets.count == 200)
+        #expect(!store.canLoadNewer)
+        #expect(store.canLoadMore)
+        #expect(await store.restoreWindow(around: try fixture.asset(2400)))
+        #expect(store.assets.count == 201)
+        #expect(store.canLoadNewer)
+        #expect(!store.canLoadMore)
+        let before = store.assets
+        #expect(await store.restoreWindow(around: try fixture.asset(2400)))
+        #expect(store.assets == before)
+    }
+
+    @Test func restorationDoesNotResurrectMissingOrFilteredPhotosOrOverwriteNewScope() async throws {
+        let fixture = ReplicaFixture()
+        let store = await fixture.store()
+        try store.database?.ingest((1...600).map { try fixture.asset($0) })
+        await store.refresh()
+        #expect(!(await store.restoreWindow(around: try fixture.asset(999))))
+        store.search = "photo-600"
+        await store.refresh()
+        #expect(!(await store.restoreWindow(around: try fixture.asset(1))))
+        #expect(store.assets.map(\.originalFilename) == ["photo-600"])
+        store.search = ""
+        await store.refresh()
+        let restoring = Task { await store.restoreWindow(around: try fixture.asset(500)) }
+        await Task.yield()
+        store.search = "photo-1"
+        await store.refresh()
+        _ = try await restoring.value
+        #expect(store.assets.allSatisfy { $0.originalFilename.contains("photo-1") })
+    }
+
+    @Test func overlappingPagingAndFilterChangesDoNotPublishStaleResults() async throws {
+        let fixture = ReplicaFixture()
+        let store = await fixture.store()
+        try store.database?.ingest((1...600).map { try fixture.asset($0) })
+        await store.refresh()
+        async let first: Void = store.loadMore()
+        async let duplicate: Void = store.loadMore()
+        _ = await (first, duplicate)
+        #expect(store.assets.count == 400)
+        #expect(Set(store.assets.map(\.id)).count == 400)
+        let oldRead = Task { await store.loadMore() }
+        await Task.yield()
+        store.search = "photo-600"
+        await store.refresh()
+        await oldRead.value
+        #expect(store.assets.map(\.originalFilename) == ["photo-600"])
+        #expect(!store.canLoadNewer)
+    }
+
+    @Test func startupSynchronizationSkipsUnchangedAssetsAndKeepsOfflineContent() async throws {
+        let fixture = ReplicaFixture()
+        let store = await fixture.store()
+        await store.synchronize()
+        #expect(store.assets.count == 1)
+        #expect(try store.database?.revision == 1)
+        let requests = fixture.requests.count
+        let reopened = await fixture.store()
+        #expect(reopened.assets.count == 1)
+        await reopened.synchronize()
+        #expect(Array(fixture.requests.dropFirst(requests)) == ["GET /libraries/library/revision"])
+        fixture.offline = true
+        await reopened.synchronize()
+        #expect(reopened.assets.count == 1)
+        #expect(reopened.syncError != nil)
+        #expect(!reopened.isSyncing)
+    }
+
+    @Test func singlePackageRebuildReplacesCatalogWhileNASIsUpdating() async throws {
+        let fixture = ReplicaFixture()
+        fixture.updating = true
+        let store = await fixture.store()
+        try store.database?.ingest([fixture.asset(99)])
+        await store.synchronize()
+        #expect(store.syncError == nil)
+        #expect(store.assets.map(\.originalFilename) == ["photo-1"])
+        #expect(try store.database?.revision == 1)
+        #expect(fixture.requests.count == 3)
+        #expect(fixture.requests[0].contains("revision"))
+        #expect(fixture.requests[1] == "POST /libraries/library/offline-rebuild")
+        #expect(fixture.requests[2].hasSuffix("/download"))
+        #expect(try store.database?.hiddenDirectories() == ["/private"])
+        #expect(try store.database?.navigation() != nil)
+        store.showingTrash = true
+        await store.refresh()
+        #expect(store.assets.map(\.originalFilename) == ["photo-2"])
+    }
+
+    @Test func failedDownloadPreservesExistingCatalogAndRevision() async throws {
+        let fixture = ReplicaFixture()
+        let store = await fixture.store()
+        let database = try #require(store.database)
+        try database.beginSync()
+        try database.ingest([fixture.asset(99)])
+        try database.completeSync(revision: 0, isStable: true)
+        fixture.failDownload = true
+        await store.synchronize()
+        #expect(store.syncError != nil)
+        #expect(try database.revision == 0)
+        #expect(store.assets.map(\.originalFilename) == ["photo-99"])
+        fixture.failDownload = false
+        await store.synchronize()
+        #expect(store.syncError == nil)
+        #expect(store.assets.map(\.originalFilename) == ["photo-1"])
+    }
+
+    @Test func cancellationBeforeDownloadCompletesPreservesOldCatalogAndCanRetry() async throws {
+        let fixture = ReplicaFixture()
+        let store = await fixture.store()
+        try store.database?.beginSync()
+        try store.database?.ingest([fixture.asset(99)])
+        try store.database?.completeSync(revision: 0, isStable: true)
+        await store.refresh()
+        ReplicaProtocol.delayDownload(host: fixture.configuration.baseURL.host!)
+        let sync = Task { await store.synchronize() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !fixture.requests.contains(where: { $0.hasSuffix("/download") }), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(fixture.requests.contains(where: { $0.hasSuffix("/download") }))
+        sync.cancel()
+        await sync.value
+        #expect(!store.isSyncing)
+        #expect(store.syncError == nil)
+        #expect(try store.database?.revision == 0)
+        #expect(store.assets.map(\.originalFilename) == ["photo-99"])
+        await store.synchronize()
+        #expect(store.syncError == nil)
+        #expect(store.assets.map(\.originalFilename) == ["photo-1"])
+    }
+
+    @Test func forceRebuildDownloadsEvenWhenRevisionMatches() async throws {
+        let fixture = ReplicaFixture()
+        let store = await fixture.store()
+        await store.synchronize()
+        let before = fixture.requests.count
+        await store.synchronize(forceRebuild: true)
+        #expect(store.syncError == nil)
+        #expect(fixture.requests.dropFirst(before).contains("POST /libraries/library/offline-rebuild"))
+    }
+
+    @Test func completedBackgroundSyncPublishesLocalChanges() async throws {
+        let fixture = ReplicaFixture()
+        let seeded = await fixture.store()
+        try seeded.database?.ingest((1...450).map { try fixture.asset($0) })
+        let browsing = await fixture.store()
+        await browsing.synchronize()
+        #expect(browsing.assets.map(\.originalFilename) == ["photo-1"])
+        #expect(try browsing.database?.assets(query: KeepsAssetQuery()).items.count == 1)
+        await browsing.refresh()
+        #expect(browsing.assets.map(\.originalFilename) == ["photo-1"])
+    }
+
+    @Test func oldServerFailsExplicitlyWithoutPaginationFallback() async throws {
+        let fixture = ReplicaFixture()
+        fixture.unsupported = true
+        let store = await fixture.store()
+        await store.synchronize()
+        #expect(store.syncError != nil)
+        #expect(try store.database?.revision == nil)
+        #expect(fixture.requests.count == 2)
+        #expect(!fixture.requests.contains { $0.contains("/assets") || $0.contains("navigation") })
+    }
+
+    @Test func serverMutationPersistsAndCredentialSwitchCannotShowPreviousLibrary() async throws {
+        let fixture = ReplicaFixture()
+        let store = await fixture.store()
+        await store.synchronize()
+        var asset = try #require(store.assets.first)
+        asset.trashed = true
+        await store.update(asset)
+        let reopened = await fixture.store()
+        #expect(reopened.assets.isEmpty)
+        reopened.showingTrash = true
+        await reopened.refresh()
+        #expect(reopened.assets.first?.id == asset.id)
+        var other = fixture.configuration
+        other.accessCredential = "other"
+        reopened.configure(other)
+        #expect(reopened.assets.isEmpty)
+    }
 }
 
-private final class LibraryFixture: @unchecked Sendable {
+private final class ReplicaFixture: @unchecked Sendable {
     let configuration: KeepsConfiguration
     let session: URLSession
+    let root = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     private let lock = NSLock()
-    private var revision = 1
-    private var updating = false
-    private var failure = false
-    private var cursor: String?
-    private var delay: TimeInterval = 0
-    private var scriptedPages: [(Int, String)] = []
-    private var assetCount = 0
-    private var paths: [String] = []
-    var assetRequests: Int { lock.withLock { assetCount } }
-    var revisionPaths: [String] { lock.withLock { paths } }
+    private var recorded: [String] = []
+    private var isOffline = false
+    private var isUpdating = false
+    private var downloadFails = false
+    private var isUnsupported = false
+    private var archive: Data?
+    private let jobID = UUID()
+    var requests: [String] { lock.withLock { recorded } }
+    var offline: Bool { get { lock.withLock { isOffline } } set { lock.withLock { isOffline = newValue } } }
+    var updating: Bool { get { lock.withLock { isUpdating } } set { lock.withLock { isUpdating = newValue } } }
+    var failDownload: Bool { get { lock.withLock { downloadFails } } set { lock.withLock { downloadFails = newValue } } }
+    var unsupported: Bool { get { lock.withLock { isUnsupported } } set { lock.withLock { isUnsupported = newValue } } }
 
     init() {
         let host = UUID().uuidString.lowercased() + ".invalid"
         configuration = KeepsConfiguration(baseURL: URL(string: "https://\(host)")!, libraryID: "library", accessCredential: "initial")
         let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [LibraryProtocol.self]
+        config.protocolClasses = [ReplicaProtocol.self]
         session = URLSession(configuration: config)
-        LibraryProtocol.register(host: host) { [weak self] request in self!.response(request) }
+        ReplicaProtocol.register(host: host) { [weak self] request in self!.response(request) }
     }
-    deinit { LibraryProtocol.remove(host: configuration.baseURL.host!); session.invalidateAndCancel() }
-    @MainActor func store() -> IOSLibraryStore {
-        IOSLibraryStore(configuration: configuration, session: session)
+    deinit {
+        ReplicaProtocol.remove(host: configuration.baseURL.host!)
+        session.invalidateAndCancel()
+        try? FileManager.default.removeItem(at: root)
     }
-    func set(revision: Int, updating: Bool) { lock.withLock { self.revision = revision; self.updating = updating } }
-    func setFailure(_ failure: Bool) { lock.withLock { self.failure = failure } }
-    func setCursor(_ cursor: String?) { lock.withLock { self.cursor = cursor } }
-    func setDelay(_ delay: TimeInterval) { lock.withLock { self.delay = delay } }
-    func enqueuePage(ids: [Int], revision: Int, next: String? = nil) {
-        let items = ids.map { id in
-            """
-            {"id":"00000000-0000-0000-0000-\(String(format: "%012d", id))","cameraMake":"","cameraModel":"","lensModel":"","originalFilename":"\(id)","contentFingerprint":"hash","metadataFingerprint":"meta","rating":\(revision),"flagState":"unflagged","tags":[],"createdAt":"now","updatedAt":"now","trashed":false}
-            """
-        }.joined(separator: ",")
-        let cursor = next.map { "\"\($0)\"" } ?? "null"
-        let body = """
-        {"items":[\(items)],"total":4,"nextCursor":\(cursor),"revision":\(revision),"isUpdating":false}
+    @MainActor func store() async -> IOSLibraryStore {
+        let store = IOSLibraryStore(configuration: configuration, session: session, databaseDirectory: root)
+        await store.waitForLocalLoad()
+        return store
+    }
+    func asset(_ id: Int) throws -> KeepsAsset {
+        try JSONDecoder().decode(KeepsAsset.self, from: Data(assetJSON(id).utf8))
+    }
+    private func assetJSON(_ id: Int) -> String {
         """
-        lock.withLock { scriptedPages.append((200, body)) }
+        {"id":"00000000-0000-0000-0000-\(String(format: "%012d", id))","cameraMake":"","cameraModel":"","lensModel":"","originalFilename":"photo-\(id)","contentFingerprint":"hash","metadataFingerprint":"meta","rating":0,"flagState":"unflagged","tags":[],"createdAt":"2026-01-01","updatedAt":"2026-01-01","trashed":false,"paths":["/photos/photo-\(id).jpg"]}
+        """
     }
-    func enqueueFailure() { lock.withLock { scriptedPages.append((500, "failed")) } }
-    private func response(_ request: URLRequest) -> (Int, String, TimeInterval) {
+    private func makeArchive() throws -> Data {
+        let database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: root.appendingPathComponent("server"))
+        try database.beginSync()
+        var trash = try asset(2)
+        trash.trashed = true
+        try database.ingest([asset(1), trash])
+        try database.replaceHiddenDirectories(["/private"])
+        try database.saveNavigation(JSONDecoder().decode(KeepsNavigation.self, from: Data("{\"directories\":[]}".utf8)))
+        try database.completeSync(revision: 1, isStable: true)
+        let snapshot = root.appendingPathComponent("server.sqlite")
+        try database.exportSnapshot(to: snapshot)
+        let manifest = Data("{\"formatVersion\":1,\"libraryID\":\"library\",\"revision\":1,\"assetCount\":2,\"thumbnailCount\":0,\"missingThumbnailCount\":2}".utf8)
+        var result = Data()
+        for (name, body) in [("manifest.json", manifest), ("catalog.sqlite", try Data(contentsOf: snapshot))] {
+            var header = Data(repeating: 0, count: 512)
+            func field(_ offset: Int, _ text: String) { header.replaceSubrange(offset..<(offset + text.utf8.count), with: text.utf8) }
+            field(0, name)
+            field(100, "0000644")
+            field(124, String(format: "%011o", body.count))
+            field(148, "        ")
+            field(156, "0")
+            field(257, "ustar")
+            field(263, "00")
+            field(148, String(format: "%06o", header.reduce(0) { $0 + Int($1) }) + "\0 ")
+            result.append(header)
+            result.append(body)
+            result.append(Data(repeating: 0, count: (512 - body.count % 512) % 512))
+        }
+        result.append(Data(repeating: 0, count: 1024))
+        return result
+    }
+    private func response(_ request: URLRequest) -> ReplicaResponse {
         lock.withLock {
-            let parts = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
-            func parameter(_ name: String) -> String? { parts.queryItems?.first { $0.name == name }?.value }
-            if parts.path.hasSuffix("revision") {
-                paths.append(parameter("path") ?? "root")
-                return (failure ? 500 : 200, "{\"revision\":\(revision),\"isUpdating\":\(updating)}", delay)
-            }
-            assetCount += 1
-            if !scriptedPages.isEmpty {
-                let (status, body) = scriptedPages.removeFirst()
-                return (status, body, delay)
-            }
-            let second = parameter("cursor") != nil
-            let name = second ? "second" : (parameter("directory") ?? "root")
-            let id = second ? "00000000-0000-0000-0000-000000000002" : "00000000-0000-0000-0000-000000000001"
-            let next = second ? "null" : cursor.map { "\"\($0)\"" } ?? "null"
-            return (200, """
-            {"items":[{"id":"\(id)","cameraMake":"","cameraModel":"","lensModel":"","originalFilename":"\(name)","contentFingerprint":"hash","metadataFingerprint":"meta","rating":0,"flagState":"unflagged","tags":[],"createdAt":"now","updatedAt":"now","trashed":false}],"total":1,"nextCursor":\(next),"revision":\(revision),"isUpdating":\(updating)}
-            """, delay)
+            let url = request.url!
+            recorded.append((request.httpMethod ?? "GET") + " " + url.path + (url.query.map { "?" + $0 } ?? ""))
+            if isOffline { return .text(503, "offline") }
+            if url.path.hasSuffix("revision") { return .text(200, "{\"revision\":1,\"isUpdating\":\(isUpdating)}") }
+            if isUnsupported { return .text(404, "unsupported") }
+            do {
+                if archive == nil { archive = try makeArchive() }
+                let data = archive!
+                let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                if url.path.hasSuffix("download") {
+                    if downloadFails { return .text(503, "download unavailable") }
+                    if let range = request.value(forHTTPHeaderField: "Range"),
+                       let offset = Int(range.replacingOccurrences(of: "bytes=", with: "").dropLast()),
+                       offset >= 0, offset < data.count {
+                        let body = data.subdata(in: offset..<data.count)
+                        return ReplicaResponse(status: 206, body: body, headers: [
+                            "Content-Length": String(body.count), "ETag": "\"\(digest)\"",
+                            "Content-Range": "bytes \(offset)-\(data.count - 1)/\(data.count)"
+                        ])
+                    }
+                    return ReplicaResponse(status: 200, body: data, headers: ["Content-Length": String(data.count), "ETag": "\"\(digest)\""])
+                }
+                return .text(200, "{\"id\":\"\(jobID.uuidString)\",\"state\":\"ready\",\"phase\":\"archive\",\"completed\":1,\"total\":1,\"revision\":1,\"byteCount\":\(data.count),\"sha256\":\"\(digest)\"}")
+            } catch { return .text(500, String(describing: error)) }
         }
     }
 }
 
-private final class LibraryProtocol: URLProtocol, @unchecked Sendable {
+private struct ReplicaResponse: Sendable {
+    let status: Int
+    let body: Data
+    let headers: [String: String]
+    static func text(_ status: Int, _ text: String) -> Self {
+        Self(status: status, body: Data(text.utf8), headers: ["Content-Length": String(text.utf8.count)])
+    }
+}
+
+private final class ReplicaProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var handlers: [String: (URLRequest) -> (Int, String, TimeInterval)] = [:]
-    private var work: DispatchWorkItem?
-    static func register(host: String, handler: @escaping (URLRequest) -> (Int, String, TimeInterval)) { lock.withLock { handlers[host] = handler } }
+    nonisolated(unsafe) private static var handlers: [String: (URLRequest) -> ReplicaResponse] = [:]
+    static func register(host: String, handler: @escaping (URLRequest) -> ReplicaResponse) { lock.withLock { handlers[host] = handler } }
     static func remove(host: String) { _ = lock.withLock { handlers.removeValue(forKey: host) } }
+    nonisolated(unsafe) private static var delayedHosts: Set<String> = []
+    private let deliveryLock = NSLock()
+    private var stopped = false
+    static func delayDownload(host: String) { _ = lock.withLock { delayedHosts.insert(host) } }
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         let handler = Self.lock.withLock { Self.handlers[request.url!.host!]! }
-        let (status, body, delay) = handler(request)
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: Data(body.utf8))
-            client?.urlProtocolDidFinishLoading(self)
+        let response = handler(request)
+        let delay = Self.lock.withLock {
+            request.url!.path.hasSuffix("download") == true && Self.delayedHosts.remove(request.url!.host!) != nil
         }
-        self.work = work
-        DispatchQueue.global().asyncAfter(deadline: .now() + delay, execute: work)
+        if delay {
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { [self] in deliver(response) }
+        } else { deliver(response) }
     }
-    override func stopLoading() { work?.cancel() }
+    private func deliver(_ response: ReplicaResponse) {
+        deliveryLock.lock()
+        defer { deliveryLock.unlock() }
+        guard !stopped else { return }
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: response.status, httpVersion: nil, headerFields: response.headers)!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: response.body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() { deliveryLock.withLock { stopped = true } }
 }
