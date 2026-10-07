@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import SQLite3
+import OSLog
 
 /// iCloud transports snapshots and immutable thumbnails; SQLite remains the active local catalog.
 public actor KeepsCloudReplica {
@@ -43,22 +44,25 @@ public actor KeepsCloudReplica {
         try await forEachThumbnailPage(database: database, configuration: configuration) { keys, itemCount in
             let missing = keys.filter { !cached.contains($0) && inventory.contains(thumbnailURL($0, root: root)) }
             await work.advance(Int64(itemCount - missing.count))
-            if cloudRoot == nil {
-                for key in missing {
-                    try Task.checkCancellation()
-                    try FileManager.default.startDownloadingUbiquitousItem(at: thumbnailURL(key, root: root))
-                }
-            }
             for key in missing {
                 try Task.checkCancellation()
-                let source = thumbnailURL(key, root: root)
-                try await makeAvailable(source, downloadRequested: true)
-                let localFile = temporary.appendingPathComponent(key)
-                try coordinatedRead(source, to: localFile)
-                try await cache.importCachedFile(from: localFile, key: key)
-                try FileManager.default.removeItem(at: localFile)
-                cached.insert(key)
-                processed += 1
+                do {
+                    let source = thumbnailURL(key, root: root)
+                    if cloudRoot == nil {
+                        try FileManager.default.startDownloadingUbiquitousItem(at: source)
+                    }
+                    try await makeAvailable(source, downloadRequested: true)
+                    let localFile = temporary.appendingPathComponent(key)
+                    try coordinatedRead(source, to: localFile)
+                    try await cache.importCachedFile(from: localFile, key: key)
+                    try FileManager.default.removeItem(at: localFile)
+                    cached.insert(key)
+                    processed += 1
+                } catch {
+                    try Task.checkCancellation()
+                    Logger(subsystem: "local.keeps", category: "cloud-replica")
+                        .error("Optional cloud thumbnail \(key, privacy: .public) failed: \(String(reflecting: error), privacy: .public)")
+                }
                 await work.advance(1)
                 if lastProgress.duration(to: clock.now) >= .seconds(1) {
                     await progress?("已从 iCloud 恢复 \(processed) 张缩略图…")

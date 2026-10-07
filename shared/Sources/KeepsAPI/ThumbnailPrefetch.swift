@@ -195,9 +195,10 @@ public actor ThumbnailPrefetch {
             guard try database.revision == revision, try database.syncCheckpoint == nil else {
                 throw LocalCatalogUnavailable()
             }
-            state.isComplete = state.processed == state.total && state.failed == 0 && state.unavailable == 0
+            // Assets without a server thumbnail are valid catalog records, not failed downloads.
+            state.isComplete = state.processed == state.total && state.failed == 0
             if !state.isComplete, state.lastError == nil {
-                state.lastError = "全库缩略图尚未全部缓存：缺失 \(state.failed)，未生成 \(state.unavailable)。"
+                state.lastError = "已有缩略图尚未全部缓存：缺失 \(state.failed)。"
             }
             await progress?(state)
             return state.isComplete

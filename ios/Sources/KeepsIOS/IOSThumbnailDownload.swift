@@ -10,7 +10,6 @@ final class IOSThumbnailDownload: ObservableObject {
     private static let logger = Logger(subsystem: "local.keeps", category: "thumbnail-download")
     @Published private(set) var isRunning = false
     @Published private(set) var isComplete = false
-    @Published private(set) var progress: ThumbnailPrefetch.Progress?
     @Published private(set) var status = "正在准备离线图库。" {
         didSet { systemTask?.updateTitle("准备离线图库", subtitle: status) }
     }
@@ -28,29 +27,13 @@ final class IOSThumbnailDownload: ObservableObject {
                  synchronize: @escaping @MainActor (@escaping IOSOfflineProgress.Reporter) async throws -> Void) async {
         guard !isRunning else { return }
         configurationChanged(configuration)
-        let checkID = UUID()
-        runID = checkID
-        isRunning = true
-        isComplete = false
-        error = nil
-        systemProgress = IOSOfflineProgress()
-        status = "正在检查本地图库和缩略图…"
-        let complete = await ThumbnailPrefetch.shared.runLocal(configuration: configuration, downloadMissing: false) { update in
-            await self.reportLocalCheck(update, configuration: configuration)
-        }
-        guard !Task.isCancelled, self.configuration == configuration, runID == checkID else {
-            if runID == checkID { runID = nil; isRunning = false; status = "准备已暂停，点击继续。" }
-            return
-        }
-        runID = nil
-        isRunning = false
-        if complete {
-            isComplete = true
-            systemProgress.complete()
-            status = "本地图库已准备完成。"
-        } else {
-            start(configuration: configuration, restoring: true, refreshLocal: refreshLocal, synchronize: synchronize)
-        }
+        start(configuration: configuration, restoring: true, refreshLocal: refreshLocal, synchronize: synchronize)
+    }
+
+    func pause() {
+        guard isRunning else { return }
+        work?.cancel()
+        status = "正在暂停，已完成的数据库和下载进度会保留…"
     }
 
     func update(configuration: KeepsConfiguration, synchronize: @escaping @MainActor (@escaping IOSOfflineProgress.Reporter) async throws -> Void) async {
@@ -58,12 +41,6 @@ final class IOSThumbnailDownload: ObservableObject {
         guard !Task.isCancelled, self.configuration == configuration, !isRunning else { return }
         start(configuration: configuration, restoring: false, refreshLocal: {}, synchronize: synchronize)
         await work?.value
-    }
-
-    private func reportLocalCheck(_ update: ThumbnailPrefetch.Progress, configuration: KeepsConfiguration) {
-        guard self.configuration == configuration else { return }
-        progress = update
-        status = "正在检查本地缩略图：\(update.processed) / \(update.total)"
     }
 
     private func start(configuration: KeepsConfiguration, restoring: Bool,
@@ -74,8 +51,9 @@ final class IOSThumbnailDownload: ObservableObject {
         self.configuration = configuration
         let id = UUID()
         runID = id
-        progress = nil
-        systemProgress = IOSOfflineProgress()
+        if !restoring {
+            systemProgress = IOSOfflineProgress()
+        }
         isRunning = true
         status = "正在准备图库…"
         if restoring && !registered {
@@ -138,47 +116,48 @@ final class IOSThumbnailDownload: ObservableObject {
 
     private func run(configuration: KeepsConfiguration, id: UUID, restoring: Bool,
                      refreshLocal: @MainActor () async -> Void, synchronize: @MainActor (@escaping IOSOfflineProgress.Reporter) async throws -> Void) async {
-        if restoring {
-            do {
+        var completed = false
+        do {
+            let database = try KeepsLibraryDatabase(configuration: configuration)
+            var hasCatalog = try database.revision != nil && database.syncCheckpoint == nil
+            if restoring, hasCatalog {
+                isComplete = true
+                finish(id: id, completed: true)
+                return
+            }
+            if restoring, !hasCatalog {
                 _ = try await KeepsCloudReplica.shared.restore(configuration: configuration, progress: { message in
                     await self.reportCloud(message, id: id)
                 }, workProgress: { completed, total in
                     await self.reportWork(.restore, completed: completed, total: total, id: id)
                 })
-                guard !Task.isCancelled, runID == id else { finish(id: id, completed: false); return }
+                try Task.checkCancellation()
                 await refreshLocal()
-            } catch {
-                reportCloud("iCloud 恢复未完成：" + String(reflecting: error), id: id)
-                Self.logger.error("Cloud restore failed: \(String(reflecting: error), privacy: .public)")
+                hasCatalog = try database.revision != nil && database.syncCheckpoint == nil
             }
-        }
-        guard !Task.isCancelled, runID == id else { finish(id: id, completed: false); return }
-        var completed = false
-        if restoring {
-            completed = await ThumbnailPrefetch.shared.runLocal(configuration: configuration, downloadMissing: false) { update in
-                await self.reportWork(.check, completed: Int64(update.processed), total: Int64(max(1, update.total)), id: id)
-            }
-        }
-        guard !Task.isCancelled, runID == id else { finish(id: id, completed: false); return }
-        if !completed {
-            status = "正在更新照片数据库…"
-            do {
+            try Task.checkCancellation()
+            guard runID == id else { return }
+            if !restoring || !hasCatalog {
+                status = "正在更新照片数据库…"
                 try await synchronize { stage, completed, total in
                     self.reportWork(stage, completed: completed, total: total, id: id)
                 }
-            } catch {
+            }
+            try Task.checkCancellation()
+            guard runID == id else { return }
+            completed = try database.revision != nil && database.syncCheckpoint == nil
+
+        } catch {
+            if !Task.isCancelled {
                 self.error = String(reflecting: error)
-                Self.logger.error("Offline rebuild failed: \(String(reflecting: error), privacy: .public)")
-                finish(id: id, completed: false)
-                return
+                Self.logger.error("Offline preparation paused: \(String(reflecting: error), privacy: .public)")
             }
-            guard !Task.isCancelled, runID == id else { finish(id: id, completed: false); return }
-            completed = await ThumbnailPrefetch.shared.runLocal(configuration: configuration, downloadMissing: !restoring) { update in
-                await self.report(update, id: id)
-            }
+            finish(id: id, completed: false)
+            return
         }
         guard !Task.isCancelled, runID == id else { finish(id: id, completed: false); return }
-        if completed { isComplete = true }
+        guard completed else { finish(id: id, completed: false); return }
+        isComplete = true
         var cloudFailed = false
         do {
             try await KeepsCloudReplica.shared.backup(configuration: configuration, progress: { message in
@@ -197,12 +176,12 @@ final class IOSThumbnailDownload: ObservableObject {
     private func finish(id: UUID, completed: Bool, cloudFailed: Bool = false) {
         guard runID == id else { return }
         let cancelled = Task.isCancelled
-        let succeeded = completed && !cancelled && !cloudFailed
+        let succeeded = completed && !cancelled
         if succeeded { systemProgress.complete() }
         if cancelled { status = "准备已暂停，已缓存的文件会保留；点击继续。" }
         else if cloudFailed { status = "本地检查已结束，iCloud 副本待继续同步。" }
         else if completed { status = "离线图库准备完成。" }
-        else { status = "尚未全部准备完成，已缓存的文件会保留；点击重试。" }
+        else { status = "准备已暂停，已完成的数据库和下载进度会保留；点击继续。" }
         systemTask?.progress.completedUnitCount = systemProgress.completedUnitCount
         systemTask?.setTaskCompleted(success: succeeded)
         endBackgroundTime()
@@ -216,15 +195,6 @@ final class IOSThumbnailDownload: ObservableObject {
         guard runID == id else { return }
         cloudStatus = message
         status = message
-    }
-
-    private func report(_ update: ThumbnailPrefetch.Progress, id: UUID) {
-        guard runID == id else { return }
-        progress = update
-        error = update.lastError
-        reportWork(.thumbnails, completed: Int64(update.processed), total: Int64(max(1, update.total)), id: id)
-        let text = "已缓存 \(update.cached) / \(update.total) 张缩略图"
-        status = text
     }
 
     private func reportWork(_ stage: IOSOfflineProgress.Stage, completed: Int64, total: Int64, id: UUID) {
@@ -263,7 +233,6 @@ final class IOSThumbnailDownload: ObservableObject {
         systemTask = nil
         isRunning = false
         isComplete = false
-        progress = nil
         systemProgress = IOSOfflineProgress()
         error = nil
         status = "正在准备离线图库。"

@@ -298,7 +298,7 @@ iOS 主图库由 SwiftUI 包装 UIKit `UICollectionView`，使用官方 composit
 
 iCloud 仅使用 Keeps 的私有容器 `iCloud.com.hechuan.Keeps`，不接入 PhotoKit。活动 SQLite 和浏览缩略图仍在本机；`KeepsCloudReplica` 把 SQLite backup API 生成的一致性单文件快照及按版本标识的缩略图交给 iCloud Documents 同步，使用 `NSMetadataQuery` 发现云端占位、`NSFileCoordinator` 协调读写。容器 namespace 按 NAS 地址与图库 ID 分隔，不含访问令牌；非敏感连接信息通过 iCloud key-value storage 恢复。仅空白本地数据库可导入云快照，缺失缩略图先从云恢复，再由 NAS 补齐；已有文件复用，不删除原片。相同或更旧的本地 revision 不覆盖现有云快照。系统上传完成状态不能由本地 stage 完成代替。
 
-NAS 离线重建由 `POST /libraries/{library}/offline-rebuild` 创建任务，读取独立 SQLite 一致快照，在 NAS 本地生成客户端数据库、完整相册目录及已有有效缩略图，发布不可变 USTAR 文件。快照包含隐藏和回收站记录，以读取时点的 revision 标识，不依赖全库静止或 `isUpdating=false`。iOS 只查询任务进度并连续下载一个文件；失败后以 Range、ETag 和已落盘字节恢复，SHA256 与清单验证通过后导入本地库，失败保留旧库。不再由 iOS 逐页拉取照片或逐目录重建。首次/强制重建包含缩略图；日常版本检查未变化时跳过，变化时请求只含数据库和目录的包，复用本地缩略图并补齐新增图片。数据库重建成功与全库缩略图齐备分别判断，缺图不伪报完整离线可用。
+NAS 离线重建由 `POST /libraries/{library}/offline-rebuild` 创建任务，读取独立 SQLite 一致快照，在 NAS 本地生成客户端数据库、完整相册目录及已有有效缩略图，发布不可变 USTAR 文件。快照包含隐藏和回收站记录，以读取时点的 revision 标识，不依赖全库静止或 `isUpdating=false`。iOS 只查询任务进度并连续下载一个文件；失败后以 Range、ETag 和已落盘字节恢复，SHA256 与清单验证通过后导入本地库，失败保留旧库。不再由 iOS 逐页拉取照片或逐目录重建。首次/强制重建包含缩略图；日常版本检查未变化时跳过，变化时请求只含数据库和目录的包，复用本地缩略图并补齐新增图片。数据库重建成功与全库缩略图齐备分别判断；NAS 尚无缩略图的记录保留缺图状态，不阻塞已正确建立的离线库。准备完成只以必要数据库正确导入为准，缩略图可选，获得多少保留多少；缺失或单张缓存失败留空并记录，不回退数据库或触发整库重建。准备过程只提供暂停与继续，已有完整本地库直接进入。
 
 前台开始的首次准备使用 `BGContinuedProcessingTask`，常规更新使用短期后台时间及 `BGProcessingTask` 调度，后台流程包括数据库、缺失缩略图和 iCloud 副本。取消会传递到数据库同步任务，前后台接管等待旧任务退出后再写库；中断后沿持久化包任务与已落盘字节继续；首次包导入后只检查缩略图完整性，不退回全库逐图网络下载。系统任务和 App 内显示同一阶段进度。系统决定后台运行时机；手动强制退出不保证继续执行应用代码。
 

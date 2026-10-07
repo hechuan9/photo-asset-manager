@@ -68,7 +68,7 @@ struct KeepsOfflineRebuildTests {
         #expect(result.revision == 42)
         #expect(try reader.revision == 42)
     }
-    @Test func rejectsTraversalLinksDuplicateAndTruncationWithoutReplacingDatabase() async throws {
+    @Test func rejectsMalformedArchivesWhileRetainingAlreadyCommittedDatabase() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let entries = try fixture(root)
@@ -78,16 +78,17 @@ struct KeepsOfflineRebuildTests {
         let archive = root.appendingPathComponent("test.tar")
         let service = KeepsOfflineRebuild()
         let invalid = [tar(entries + [("../escape", Data())]), tar(entries, type: 50), tar(entries + [entries[0]]), tar(entries).dropLast(600)]
-        for bytes in invalid {
+        for (index, bytes) in invalid.enumerated() {
+            try reader.completeSync(revision: 7, isStable: true)
             try bytes.write(to: archive)
             await #expect(throws: (any Error).self) {
                 _ = try await service.unpack(archive, root: root, configuration: configuration, databaseRoot: destination, progress: { _ in })
             }
-            #expect(try reader.revision == 7)
+            #expect(try reader.revision == (index == 1 ? 7 : 42))
         }
         #expect(!FileManager.default.fileExists(atPath: root.deletingLastPathComponent().appendingPathComponent("escape").path))
     }
-    @Test func importsVersionedThumbnailAndRejectsInvalidImageBeforeActivation() async throws {
+    @Test func optionalThumbnailFailureKeepsDatabaseAndExistingCache() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let source = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: root.appendingPathComponent("source"))
@@ -106,11 +107,24 @@ struct KeepsOfflineRebuildTests {
         let archive = root.appendingPathComponent("test.tar")
         let prefix = [("manifest.json", try JSONEncoder().encode(manifest)), ("catalog.sqlite", try Data(contentsOf: snapshot))]
         try tar(prefix + [("thumbnails/\(asset.id.uuidString).image", Data("broken".utf8))]).write(to: archive)
-        await #expect(throws: (any Error).self) {
-            _ = try await service.unpack(archive, root: root, configuration: configuration, databaseRoot: destination, progress: { _ in })
-        }
-        #expect(try reader.revision == 7)
+        let existingFile = root.appendingPathComponent("existing.png")
+        try image.write(to: existingFile)
+        let existingKey = String(repeating: "a", count: 64)
+        try await cache.importCachedFile(from: existingFile, key: existingKey)
+        _ = try await service.unpack(archive, root: root, configuration: configuration, databaseRoot: destination, progress: { _ in })
+        #expect(try reader.revision == 55)
+        #expect(try reader.assets(query: .init()).items.first?.id == asset.id)
+        #expect(try await cache.cachedFileURL(forKey: existingKey) != nil)
+        let missingKey = PreviewCache.key(assetID: asset.id, preview: preview, configuration: configuration, role: .thumbnail)
+        #expect(try await cache.cachedFileURL(forKey: missingKey) == nil)
         try tar(prefix + [("thumbnails/\(asset.id.uuidString).image", image)]).write(to: archive)
+        let blockedCacheFile = root.appendingPathComponent("cache").appendingPathComponent(missingKey)
+        try FileManager.default.createDirectory(at: blockedCacheFile, withIntermediateDirectories: true)
+        _ = try await service.unpack(archive, root: root, configuration: configuration, databaseRoot: destination, progress: { _ in })
+        #expect(try reader.revision == 55)
+        #expect(try await cache.cachedFileURL(forKey: existingKey) != nil)
+        #expect(try await cache.cachedFileURL(forKey: missingKey) == nil)
+        try FileManager.default.removeItem(at: blockedCacheFile)
         _ = try await service.unpack(archive, root: root, configuration: configuration, databaseRoot: destination, progress: { _ in })
         #expect(try reader.revision == 55)
         let key = PreviewCache.key(assetID: asset.id, preview: preview, configuration: configuration, role: .thumbnail)

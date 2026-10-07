@@ -144,7 +144,7 @@ struct LocalThumbnailPrefetchTests {
         #expect(await recorder.progress.map(\.processed) == [0, 100, 200, 205, 305, 310, 310])
     }
 
-    @Test func incompleteCatalogMissingFilesAndUnavailableThumbnailNeverComplete() async throws {
+    @Test func incompleteCatalogAndMissingFilesBlockButUnavailableThumbnailDoesNot() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let db = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: root)
@@ -161,6 +161,14 @@ struct LocalThumbnailPrefetchTests {
         } == false)
         #expect(await recorder.progress.last?.failed == 1)
         #expect(await recorder.progress.last?.unavailable == 1)
+        try await seed([values[1]], cache: cache)
+        #expect(await worker.runLocal(configuration: configuration, downloadMissing: false, databaseRoot: root) {
+            await recorder.record($0)
+        })
+        #expect(await recorder.progress.last?.cached == 2)
+        #expect(await recorder.progress.last?.unavailable == 1)
+        #expect(await recorder.progress.last?.lastError == nil)
+        #expect(await recorder.progress.last?.isComplete == true)
         try db.beginSync(checkpoint: .init(revision: 2, stable: true))
         #expect(await worker.runLocal(configuration: configuration, downloadMissing: false, databaseRoot: root) == false)
     }

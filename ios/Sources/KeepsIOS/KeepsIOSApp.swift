@@ -150,7 +150,7 @@ struct IOSRootView: View {
         guard !Task.isCancelled else { return }
         if let error = library.lastError { startupError = error; return }
         await thumbnailDownload.prepare(configuration: configuration, refreshLocal: { await library.refresh() }) { progress in
-            try await library.synchronizeChecked(forceRebuild: true, progress: progress)
+            try await library.synchronizeChecked(progress: progress)
         }
         guard !Task.isCancelled, library.configuration == configuration else { return }
         if thumbnailDownload.isComplete && library.assets.isEmpty { galleryReady = true }
@@ -162,24 +162,19 @@ struct IOSRootView: View {
             VStack(spacing: 20) {
                 Text("正在准备离线图库").font(.title2.bold())
                 IOSOfflineProgressView(download: thumbnailDownload)
-                if let progress = thumbnailDownload.progress {
-                    Text("已缓存 \(progress.cached.formatted()) / \(progress.total.formatted()) 张缩略图")
-                        .monospacedDigit()
-                    if progress.unavailable > 0 {
-                        Text("\(progress.unavailable.formatted()) 张照片的缩略图尚未生成").font(.caption)
-                    }
-                }
                 if let error = startupError ?? thumbnailDownload.error {
                     Text(error).font(.caption).multilineTextAlignment(.center)
                 }
-                if !thumbnailDownload.isRunning {
-                    Button("继续准备 / 重试") {
+                if thumbnailDownload.isRunning {
+                    Button("暂停") { thumbnailDownload.pause() }
+                } else {
+                    Button("继续") {
                         startupError = nil
                         preparationAttempt += 1
                         Task { await prepareLibrary() }
                     }
                 }
-                Text("全部缩略图就绪后自动进入。可以切换到其他应用，中断后会复用已下载的图片。")
+                Text("数据库准备好后自动进入，缺少的缩略图留空。可以暂停，继续时保留已完成的进度。")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("连接设置") { showingSettings = true }
             }.padding(32)

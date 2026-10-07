@@ -148,6 +148,24 @@ struct KeepsCloudReplicaTests {
         #expect(try await replica.restore(configuration: other, databaseRoot: root.appendingPathComponent("other")) == false)
     }
 
+    @Test func brokenOptionalCloudThumbnailDoesNotBlockDatabaseOrOtherImages() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = root.appendingPathComponent("original"), cloud = root.appendingPathComponent("cloud")
+        try populate(original, assets: [asset(1), asset(2)])
+        let source = cache(root.appendingPathComponent("source-cache"))
+        for value in [asset(1), asset(2)] { try await source.store(image, key: key(value)) }
+        try await KeepsCloudReplica(cloudRoot: cloud, cache: source).backup(configuration: configuration, databaseRoot: original)
+        let namespace = try #require(FileManager.default.contentsOfDirectory(at: cloud, includingPropertiesForKeys: nil).first)
+        let brokenKey = key(asset(1))
+        try Data("invalid image".utf8).write(to: namespace.appendingPathComponent("thumbnails/\(brokenKey.prefix(2))/\(brokenKey)"))
+        let destination = root.appendingPathComponent("destination")
+        let target = cache(root.appendingPathComponent("target-cache"))
+        #expect(try await KeepsCloudReplica(cloudRoot: cloud, cache: target).restore(configuration: configuration, databaseRoot: destination))
+        #expect(try KeepsLibraryDatabase(configuration: configuration, rootDirectory: destination).revision == 42)
+        #expect(try await target.containsCachedKey(key(asset(2))))
+    }
+
     @Test func unstableCatalogIsNeverStaged() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

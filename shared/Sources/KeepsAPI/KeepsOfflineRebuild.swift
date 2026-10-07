@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import OSLog
 
 public struct KeepsOfflineManifest: Codable, Sendable {
     public var formatVersion: Int
@@ -129,6 +130,9 @@ public actor KeepsOfflineRebuild {
         try await reader.copy(second.size, to: catalog) { bytes in
             await progress(Progress(phase: .importing, completed: bytes, total: archiveBytes + 1, message: "导入离线数据库"))
         }
+        try Task.checkCancellation()
+        let database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: databaseRoot)
+        try database.replaceSnapshot(from: catalog, revision: manifest.revision, assetCount: manifest.assetCount)
         let snapshot = try KeepsLibraryDatabase.SnapshotReader(url: catalog)
         var count = 0
         let image = root.appendingPathComponent("image.tmp")
@@ -141,7 +145,13 @@ public actor KeepsOfflineRebuild {
                   name == "thumbnails/\(id.uuidString).image",
                   let asset = try snapshot.asset(id: id), let preview = asset.thumbnail else { throw failure("离线包缩略图与数据库不匹配") }
             try await reader.copy(entry.size, to: image) { _ in }
-            try await cache.importCachedFile(from: image, key: PreviewCache.key(assetID: id, preview: preview, configuration: configuration, role: .thumbnail))
+            do {
+                try await cache.importCachedFile(from: image, key: PreviewCache.key(assetID: id, preview: preview, configuration: configuration, role: .thumbnail))
+            } catch {
+                try Task.checkCancellation()
+                if error is CancellationError { throw error }
+                Logger(subsystem: "local.keeps", category: "offline-rebuild").error("Optional thumbnail \(id) import failed: \(String(reflecting: error), privacy: .public)")
+            }
             count += 1
             if Date().timeIntervalSince(last) >= 1 {
                 last = Date()
@@ -150,8 +160,6 @@ public actor KeepsOfflineRebuild {
         }
         guard count == manifest.thumbnailCount else { throw failure("离线包缩略图数量错误") }
         try Task.checkCancellation()
-        let database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: databaseRoot)
-        try database.replaceSnapshot(from: catalog, revision: manifest.revision, assetCount: manifest.assetCount)
         await progress(Progress(phase: .importing, completed: archiveBytes + 1, total: archiveBytes + 1, message: "离线图库已准备好"))
         return manifest
     }

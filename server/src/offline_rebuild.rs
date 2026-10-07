@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -264,21 +264,20 @@ impl Manager {
         let mut target = Connection::open(work.path().join("catalog.sqlite"))?;
         target.execute_batch(CLIENT_SCHEMA)?;
         let thumbnails = self.catalog(&frozen, &mut target, status)?;
-        let manifest = json!({"formatVersion":1,"libraryID":lib,"revision":revision,"assetCount":total,"thumbnailCount":thumbnails.len(),"missingThumbnailCount":total-thumbnails.len() as i64});
+        let mut manifest = json!({"formatVersion":1,"libraryID":lib,"revision":revision,"assetCount":total,"thumbnailCount":total,"missingThumbnailCount":total});
         drop(target);
         drop(frozen);
         let archive_total = fs::metadata(work.path().join("catalog.sqlite"))?.len()
             + thumbnails
                 .iter()
-                .map(|(_, path)| fs::metadata(path).map(|meta| meta.len()))
-                .collect::<std::io::Result<Vec<_>>>()?
-                .iter()
+                .filter_map(|(_, path)| fs::metadata(path).ok().map(|meta| meta.len()))
                 .sum::<u64>();
         self.progress(status, "archive", 0, archive_total as i64)?;
         let archive = fs::File::create(work.path().join("library.tar"))?;
         let mut tar = tar::Builder::new(archive);
-        let bytes = serde_json::to_vec(&manifest)?;
-        append_bytes(&mut tar, "manifest.json", &bytes)?;
+        // Reserve enough JSON space for either count, then fill in the actual packed count.
+        let manifest_size = serde_json::to_vec(&manifest)?.len();
+        append_bytes(&mut tar, "manifest.json", &vec![b' '; manifest_size])?;
         let mut packed = 0;
         let mut last_report = 0;
         let mut report = |count: usize| -> std::io::Result<()> {
@@ -296,15 +295,23 @@ impl Manager {
             &work.path().join("catalog.sqlite"),
             &mut report,
         )?;
+        let mut thumbnail_count = 0;
         for (id, path) in &thumbnails {
-            append_file(
-                &mut tar,
-                &format!("thumbnails/{id}.image"),
-                path,
-                &mut report,
-            )?;
+            if append_optional_thumbnail(&mut tar, id, path, &mut report)? {
+                thumbnail_count += 1;
+            }
         }
-        let archive = tar.into_inner()?;
+        let mut archive = tar.into_inner()?;
+        manifest["thumbnailCount"] = json!(thumbnail_count);
+        manifest["missingThumbnailCount"] = json!(total - thumbnail_count);
+        let mut bytes = serde_json::to_vec(&manifest)?;
+        ensure!(
+            bytes.len() <= manifest_size,
+            "manifest exceeds reserved space"
+        );
+        bytes.resize(manifest_size, b' ');
+        archive.seek(SeekFrom::Start(512))?;
+        archive.write_all(&bytes)?;
         archive.sync_all()?;
         let mut file = fs::File::open(work.path().join("library.tar"))?;
         let length = file.metadata()?.len();
@@ -371,11 +378,9 @@ impl Manager {
             if let Some(thumbnail) = thumbnail {
                 let thumbnail: Value = serde_json::from_str(&thumbnail)?;
                 let path = self.app.previews.object_path(&thumbnail["objectRef"])?;
-                if !status.include_thumbnails || path.is_file() {
-                    asset["thumbnail"] = json!({"downloadURL":self.app.previews.download_url(&thumbnail["objectRef"])?,"width":thumbnail["width"],"height":thumbnail["height"],"version":thumbnail["version"]});
-                    if status.include_thumbnails {
-                        thumbnails.push((upper.clone(), path));
-                    }
+                asset["thumbnail"] = json!({"downloadURL":self.app.previews.download_url(&thumbnail["objectRef"])?,"width":thumbnail["width"],"height":thumbnail["height"],"version":thumbnail["version"]});
+                if status.include_thumbnails {
+                    thumbnails.push((upper.clone(), path));
                 }
             }
             if let Some(standard) = standard {
@@ -490,6 +495,26 @@ fn append_bytes<W: Write>(tar: &mut tar::Builder<W>, name: &str, bytes: &[u8]) -
     tar.append_data(&mut header, name, bytes)?;
     Ok(())
 }
+fn append_optional_thumbnail<W: Write, F: FnMut(usize) -> std::io::Result<()>>(
+    tar: &mut tar::Builder<W>,
+    id: &str,
+    path: &FsPath,
+    report: &mut F,
+) -> Result<bool> {
+    // Finish reading before writing a tar header: a vanished or unreadable cache
+    // must not leave a partial archive entry or invalidate the required catalog.
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), error = ?error, "Skipping unavailable offline thumbnail");
+            return Ok(false);
+        }
+    };
+    append_bytes(tar, &format!("thumbnails/{id}.image"), &bytes)?;
+    report(bytes.len())?;
+    Ok(true)
+}
+
 struct ProgressReader<'a, F: FnMut(usize) -> std::io::Result<()>> {
     file: fs::File,
     report: &'a mut F,
@@ -707,6 +732,72 @@ mod tests {
         }
     }
     #[test]
+    fn unavailable_optional_thumbnails_do_not_leave_partial_tar_entries() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let good = root.path().join("good.image");
+        fs::write(&good, b"available thumbnail")?;
+        let vanished = root.path().join("vanished.image");
+        fs::write(&vanished, b"removed after catalog selection")?;
+        fs::remove_file(&vanished)?;
+        let unreadable = root.path().join("unreadable.image");
+        fs::create_dir(&unreadable)?;
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut reported = 0;
+        let mut report = |count| {
+            reported += count;
+            Ok(())
+        };
+        assert!(!append_optional_thumbnail(
+            &mut tar,
+            "missing",
+            &vanished,
+            &mut report
+        )?);
+        assert!(!append_optional_thumbnail(
+            &mut tar,
+            "unreadable",
+            &unreadable,
+            &mut report
+        )?);
+        assert!(append_optional_thumbnail(
+            &mut tar,
+            "good",
+            &good,
+            &mut report
+        )?);
+        let bytes = tar.into_inner()?;
+        let mut archive = tar::Archive::new(&bytes[..]);
+        let mut entries = archive.entries()?;
+        let mut entry = entries.next().unwrap()?;
+        assert_eq!(entry.path()?.to_str(), Some("thumbnails/good.image"));
+        let mut content = Vec::new();
+        entry.read_to_end(&mut content)?;
+        assert_eq!(content, b"available thumbnail");
+        assert_eq!(reported, content.len());
+        assert!(entries.next().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn optional_thumbnail_archive_write_errors_still_fail() -> Result<()> {
+        struct BrokenWriter;
+        impl Write for BrokenWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("archive disk full"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir()?;
+        let good = root.path().join("good.image");
+        fs::write(&good, b"available thumbnail")?;
+        let mut tar = tar::Builder::new(BrokenWriter);
+        assert!(append_optional_thumbnail(&mut tar, "good", &good, &mut |_| Ok(())).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn bundle_has_client_schema_hidden_trash_and_only_current_available_thumbnail() -> Result<()> {
         let root = tempfile::tempdir()?;
         let app = fixture(root.path());
@@ -751,6 +842,22 @@ mod tests {
                 ],
             )?;
             db.execute("UPDATE media_cache SET status='ready',source_hash='obsolete',thumbnail=?,standard=? WHERE asset_id=?",params![descriptor.to_string(),json!({"deferred":true}).to_string(),third])?;
+            let missing = app.previews.put_generated_role(
+                "photos",
+                &second,
+                "missing-v1",
+                &image,
+                "thumbnail",
+            )?;
+            fs::remove_file(app.previews.object_path(&missing)?)?;
+            db.execute(
+                "UPDATE media_cache SET status='ready',thumbnail=? WHERE asset_id=?",
+                params![
+                    json!({"objectRef":missing,"width":512,"height":400,"version":"missing-v1"})
+                        .to_string(),
+                    second
+                ],
+            )?;
         }
         let expected = app.store.library_revision("photos")?["revision"]
             .as_i64()
