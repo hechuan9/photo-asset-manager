@@ -292,6 +292,19 @@ struct IOSLibraryStoreTests {
         #expect(store.assets.map(\.originalFilename) == ["photo-1"])
     }
 
+    @Test func onlyInitializationRequestsBundledThumbnails() async throws {
+        let fixture = ReplicaFixture()
+        let store = await fixture.store()
+        await store.synchronize()
+        #expect(fixture.thumbnailModes == [true])
+        try store.database?.completeSync(revision: 0, isStable: true)
+        await store.synchronize()
+        #expect(fixture.thumbnailModes == [true, false])
+        try store.database?.beginSync(checkpoint: .init(revision: 1, stable: true))
+        await store.synchronize()
+        #expect(fixture.thumbnailModes == [true, false, true])
+    }
+
     @Test func forceRebuildDownloadsEvenWhenRevisionMatches() async throws {
         let fixture = ReplicaFixture()
         let store = await fixture.store()
@@ -352,6 +365,8 @@ private final class ReplicaFixture: @unchecked Sendable {
     private var recorded: [String] = []
     private var isOffline = false
     private var isUpdating = false
+    private var modes: [Bool] = []
+    var thumbnailModes: [Bool] { lock.withLock { modes } }
     private var downloadFails = false
     private var isUnsupported = false
     private var archive: Data?
@@ -423,6 +438,19 @@ private final class ReplicaFixture: @unchecked Sendable {
         lock.withLock {
             let url = request.url!
             recorded.append((request.httpMethod ?? "GET") + " " + url.path + (url.query.map { "?" + $0 } ?? ""))
+            if request.httpMethod == "POST" {
+                var body = request.httpBody ?? Data()
+                if body.isEmpty, let stream = request.httpBodyStream {
+                    stream.open(); defer { stream.close() }
+                    var bytes = [UInt8](repeating: 0, count: 1024)
+                    while true {
+                        let count = stream.read(&bytes, maxLength: bytes.count)
+                        guard count > 0 else { break }
+                        body.append(contentsOf: bytes.prefix(count))
+                    }
+                }
+                if let json = try? JSONSerialization.jsonObject(with: body) as? [String: Bool], let mode = json["includeThumbnails"] { modes.append(mode) }
+            }
             if isOffline { return .text(503, "offline") }
             if url.path.hasSuffix("revision") { return .text(200, "{\"revision\":1,\"isUpdating\":\(isUpdating)}") }
             if isUnsupported { return .text(404, "unsupported") }

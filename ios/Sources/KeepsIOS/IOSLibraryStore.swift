@@ -287,7 +287,7 @@ private actor IOSCatalogSynchronizer {
         if !forceRebuild, try database.syncCheckpoint == nil, try database.revision == remote.revision { return }
         let rebuild = KeepsOfflineRebuild(session: session)
         _ = try await rebuild.run(configuration: configuration, databaseRoot: root,
-                                  includeThumbnails: forceRebuild || (try database.revision) == nil) { update in
+                                  includeThumbnails: forceRebuild || (try database.revision) == nil || (try database.syncCheckpoint) != nil) { update in
             let stage: IOSOfflineProgress.Stage
             switch update.phase {
             case .building:

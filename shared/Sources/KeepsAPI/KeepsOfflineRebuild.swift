@@ -131,8 +131,6 @@ public actor KeepsOfflineRebuild {
             await progress(Progress(phase: .importing, completed: bytes, total: archiveBytes + 1, message: "导入离线数据库"))
         }
         try Task.checkCancellation()
-        let database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: databaseRoot)
-        try database.replaceSnapshot(from: catalog, revision: manifest.revision, assetCount: manifest.assetCount)
         let snapshot = try KeepsLibraryDatabase.SnapshotReader(url: catalog)
         var count = 0
         let image = root.appendingPathComponent("image.tmp")
@@ -160,6 +158,8 @@ public actor KeepsOfflineRebuild {
         }
         guard count == manifest.thumbnailCount else { throw failure("离线包缩略图数量错误") }
         try Task.checkCancellation()
+        let database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: databaseRoot)
+        try database.replaceSnapshot(from: catalog, revision: manifest.revision, assetCount: manifest.assetCount)
         await progress(Progress(phase: .importing, completed: archiveBytes + 1, total: archiveBytes + 1, message: "离线图库已准备好"))
         return manifest
     }

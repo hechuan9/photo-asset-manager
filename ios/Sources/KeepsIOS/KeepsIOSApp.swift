@@ -47,7 +47,7 @@ struct IOSRootView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            if library.configuration != nil && !galleryReady && !thumbnailDownload.isComplete {
+            if library.configuration != nil && !galleryReady {
                 Color.black
             } else if collections {
                 NavigationStack(path: $collectionPath) {
@@ -97,11 +97,11 @@ struct IOSRootView: View {
         }
         .task(id: galleryReady && scenePhase == .active) {
             if galleryReady, scenePhase == .active, let configuration = library.configuration {
-                await thumbnailDownload.update(configuration: configuration) { progress in try await library.synchronizeChecked(progress: progress) }
+                await updateLibrarySilently(configuration: configuration)
             }
         }
         .onChange(of: thumbnailDownload.isComplete) { _, complete in
-            if complete && library.assets.isEmpty { galleryReady = true }
+            if complete { galleryReady = true }
         }
         .onChange(of: library.configuration, initial: true) { _, configuration in
             collections = false
@@ -153,7 +153,23 @@ struct IOSRootView: View {
             try await library.synchronizeChecked(progress: progress)
         }
         guard !Task.isCancelled, library.configuration == configuration else { return }
-        if thumbnailDownload.isComplete && library.assets.isEmpty { galleryReady = true }
+        if thumbnailDownload.isComplete { galleryReady = true }
+    }
+
+    private func updateLibrarySilently(configuration: KeepsConfiguration) async {
+        await ThumbnailBackgroundDelegate.activeWork?.value
+        guard !Task.isCancelled, library.configuration == configuration else { return }
+        do {
+            try await library.synchronizeChecked()
+            try Task.checkCancellation()
+            _ = await ThumbnailPrefetch.shared.runLocal(configuration: configuration, downloadMissing: true)
+            try Task.checkCancellation()
+            try await KeepsCloudReplica.shared.backup(configuration: configuration)
+        } catch {
+            guard !Task.isCancelled else { return }
+            Logger(subsystem: "com.hechuan.Keeps", category: "library-maintenance")
+                .error("Silent library update failed: \(String(reflecting: error), privacy: .public)")
+        }
     }
 
     private var startupScreen: some View {
@@ -197,11 +213,7 @@ struct IOSRootView: View {
                     }
                 } else {
                     IOSWaterfallGallery(selecting: $selecting, selectedIDs: $selectedIDs, density: $density, visibleDates: $visibleDates,
-                                        style: galleryStyle, preparationFinished: { error in
-                            guard library.configuration == configuration else { return }
-                            startupError = error
-                            if error == nil { galleryReady = true }
-                        })
+                                        style: galleryStyle, preparationFinished: { _ in })
                         .id("\(library.configuration?.baseURL.absoluteString ?? "")|\(library.configuration?.libraryID ?? "")|\(preparationAttempt)|\(library.showingTrash)|\(library.showingPicked)|\(library.search)|\(library.directory ?? "")")
                         .allowsHitTesting(!changing)
                 }
@@ -226,15 +238,6 @@ struct IOSRootView: View {
             header(route: route).disabled(changing)
         }
         .background { Color.black.ignoresSafeArea() }
-        .overlay(alignment: .bottom) {
-            if thumbnailDownload.isRunning {
-                IOSOfflineProgressView(download: thumbnailDownload)
-                    .padding(12)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                    .padding()
-                    .allowsHitTesting(false)
-            }
-        }
     }
 
     @ViewBuilder
@@ -500,6 +503,11 @@ final class ThumbnailBackgroundDelegate: NSObject, UIApplicationDelegate {
                 }
                 do {
                     guard let configuration = try KeepsSettings.load() else {
+                        task.setTaskCompleted(success: true)
+                        return
+                    }
+                    let database = try KeepsLibraryDatabase(configuration: configuration)
+                    guard try database.revision != nil, try database.syncCheckpoint == nil else {
                         task.setTaskCompleted(success: true)
                         return
                     }

@@ -25,16 +25,17 @@ public actor KeepsCloudReplica {
         try Task.checkCancellation()
         await progress?("正在查找 iCloud 图库副本…")
         let inventory = try await inventory(root)
-        let snapshot = root.appendingPathComponent("catalog.snapshot")
+        let snapshot = root.appendingPathComponent("catalog.snapshot", isDirectory: false)
         guard inventory.contains(snapshot) else { return false }
         let temporary = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: temporary) }
         await progress?("正在从 iCloud 恢复图库数据库…")
         try await makeAvailable(snapshot)
-        let localSnapshot = temporary.appendingPathComponent("catalog.snapshot")
+        let localSnapshot = temporary.appendingPathComponent("catalog.snapshot", isDirectory: false)
         try coordinatedRead(snapshot, to: localSnapshot)
-        let database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: databaseRoot)
-        let restored = try database.restoreSnapshot(from: localSnapshot)
+        let database = try KeepsLibraryDatabase(configuration: configuration,
+                                                rootDirectory: temporary.appendingPathComponent("catalog", isDirectory: true))
+        guard try database.restoreSnapshot(from: localSnapshot) else { return false }
         let work = ReplicaWorkProgress(total: try thumbnailWorkTotal(database), callback: workProgress)
         await work.advance(1, force: true)
         var processed = 0
@@ -52,7 +53,7 @@ public actor KeepsCloudReplica {
                         try FileManager.default.startDownloadingUbiquitousItem(at: source)
                     }
                     try await makeAvailable(source, downloadRequested: true)
-                    let localFile = temporary.appendingPathComponent(key)
+                    let localFile = temporary.appendingPathComponent(key, isDirectory: false)
                     try coordinatedRead(source, to: localFile)
                     try await cache.importCachedFile(from: localFile, key: key)
                     try FileManager.default.removeItem(at: localFile)
@@ -71,7 +72,9 @@ public actor KeepsCloudReplica {
             }
         }
         await work.report()
-        return restored
+        try Task.checkCancellation()
+        let local = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: databaseRoot)
+        return try local.restoreSnapshot(from: localSnapshot)
     }
 
     public func backup(configuration: KeepsConfiguration, databaseRoot: URL? = nil,
@@ -85,15 +88,15 @@ public actor KeepsCloudReplica {
         let database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: databaseRoot)
         let temporary = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: temporary) }
-        let snapshot = temporary.appendingPathComponent("catalog.snapshot")
+        let snapshot = temporary.appendingPathComponent("catalog.snapshot", isDirectory: false)
         try database.exportSnapshot(to: snapshot)
         let stable = try KeepsLibraryDatabase(configuration: configuration,
-                                             rootDirectory: temporary.appendingPathComponent("catalog"))
+                                             rootDirectory: temporary.appendingPathComponent("catalog", isDirectory: true))
         guard try stable.restoreSnapshot(from: snapshot) else { return }
         await progress?("正在把图库数据库交给 iCloud 同步…")
         var existing = try await inventory(root)
         try Task.checkCancellation()
-        let remoteSnapshot = root.appendingPathComponent("catalog.snapshot")
+        let remoteSnapshot = root.appendingPathComponent("catalog.snapshot", isDirectory: false)
         let revision = try Self.snapshotRevision(snapshot)
         var stageCatalog = true
         if existing.contains(remoteSnapshot) {
@@ -143,7 +146,7 @@ public actor KeepsCloudReplica {
     }
 
     private func thumbnailURL(_ key: String, root: URL) -> URL {
-        root.appendingPathComponent("thumbnails/\(key.prefix(2))/\(key)")
+        root.appendingPathComponent("thumbnails/\(key.prefix(2))/\(key)", isDirectory: false)
     }
 
     private func inventory(_ root: URL) async throws -> Set<URL> {
@@ -218,51 +221,57 @@ public actor KeepsCloudReplica {
     }
 
     private func temporaryDirectory() throws -> URL {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("keeps-cloud-" + UUID().uuidString)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("keeps-cloud-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
     }
 
     private func coordinatedRead(_ source: URL, to destination: URL) throws {
-        var coordinationError: NSError?
-        var copyError: Error?
-        NSFileCoordinator().coordinate(readingItemAt: source, options: .withoutChanges, error: &coordinationError) { url in
-            do { try FileManager.default.copyItem(at: url, to: destination) }
-            catch { copyError = error }
+        try autoreleasepool {
+            var coordinationError: NSError?
+            var copyError: Error?
+            NSFileCoordinator().coordinate(readingItemAt: source, options: .withoutChanges, error: &coordinationError) { url in
+                do { try FileManager.default.copyItem(at: url, to: destination) }
+                catch { copyError = error }
+            }
+            if let error = coordinationError ?? copyError { throw error }
         }
-        if let error = coordinationError ?? copyError { throw error }
     }
 
     private func coordinatedWrite(_ source: URL, to destination: URL, replacingWithRevision revision: Int64? = nil) throws {
-        var coordinationError: NSError?
-        var copyError: Error?
-        NSFileCoordinator().coordinate(writingItemAt: destination, options: .forReplacing, error: &coordinationError) { url in
-            do {
-                let exists = FileManager.default.fileExists(atPath: url.path)
-                if exists {
-                    guard let revision else { return }
-                    // Recheck under the write coordination in case another device advanced the snapshot.
-                    if try Self.snapshotRevision(url) >= revision { return }
-                }
-                let staged = url.deletingLastPathComponent().appendingPathComponent("." + UUID().uuidString + ".stage")
-                defer { try? FileManager.default.removeItem(at: staged) }
-                try FileManager.default.copyItem(at: source, to: staged)
-                if exists { _ = try FileManager.default.replaceItemAt(url, withItemAt: staged) }
-                else { try FileManager.default.moveItem(at: staged, to: url) }
-            } catch { copyError = error }
+        try autoreleasepool {
+            var coordinationError: NSError?
+            var copyError: Error?
+            NSFileCoordinator().coordinate(writingItemAt: destination, options: .forReplacing, error: &coordinationError) { url in
+                do {
+                    let exists = FileManager.default.fileExists(atPath: url.path)
+                    if exists {
+                        guard let revision else { return }
+                        // Recheck under the write coordination in case another device advanced the snapshot.
+                        if try Self.snapshotRevision(url) >= revision { return }
+                    }
+                    let staged = url.deletingLastPathComponent().appendingPathComponent("." + UUID().uuidString + ".stage", isDirectory: false)
+                    defer { try? FileManager.default.removeItem(at: staged) }
+                    try FileManager.default.copyItem(at: source, to: staged)
+                    if exists { _ = try FileManager.default.replaceItemAt(url, withItemAt: staged) }
+                    else { try FileManager.default.moveItem(at: staged, to: url) }
+                } catch { copyError = error }
+            }
+            if let error = coordinationError ?? copyError { throw error }
         }
-        if let error = coordinationError ?? copyError { throw error }
     }
 
     private func coordinatedRevision(_ source: URL) throws -> Int64 {
-        var coordinationError: NSError?
-        var result: Result<Int64, Error>?
-        NSFileCoordinator().coordinate(readingItemAt: source, options: .withoutChanges, error: &coordinationError) { url in
-            result = Result { try Self.snapshotRevision(url) }
+        return try autoreleasepool {
+            var coordinationError: NSError?
+            var result: Result<Int64, Error>?
+            NSFileCoordinator().coordinate(readingItemAt: source, options: .withoutChanges, error: &coordinationError) { url in
+                result = Result { try Self.snapshotRevision(url) }
+            }
+            if let coordinationError { throw coordinationError }
+            guard let result else { throw ReplicaError.snapshotUnreadable(source) }
+            return try result.get()
         }
-        if let coordinationError { throw coordinationError }
-        guard let result else { throw ReplicaError.snapshotUnreadable(source) }
-        return try result.get()
     }
 
     private static func snapshotRevision(_ file: URL) throws -> Int64 {
@@ -294,46 +303,92 @@ public actor KeepsCloudReplica {
     }
 }
 
-/// Metadata queries need a running main run loop, but database and file work stay on the replica actor.
-@MainActor
-private final class CloudReplicaMetadata: NSObject {
-    private let query = NSMetadataQuery()
+/// NSMetadataQuery supports starting on its operation queue; keep its results off the UI thread.
+private final class CloudReplicaMetadata: @unchecked Sendable {
+    private let queue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "local.keeps.cloud-metadata"
+        queue.qualityOfService = .utility
+        queue.maxConcurrentOperationCount = 1
+        return queue
+    }()
+    // All mutable state, including query creation and destruction, belongs to queue.
+    private var query: NSMetadataQuery?
+    private var observer: NSObjectProtocol?
     private var gathered = false
 
     static func urls(in root: URL) async throws -> Set<URL> {
         try await CloudReplicaMetadata().gather(root)
     }
 
-    private func gather(_ root: URL) async throws -> Set<URL> {
-        query.searchScopes = [NSMetadataQueryUbiquitousDataScope]
-        query.predicate = NSPredicate(format: "%K CONTAINS %@", NSMetadataItemPathKey, "/" + root.lastPathComponent + "/")
-        query.operationQueue = .main
-        NotificationCenter.default.addObserver(self, selector: #selector(finished),
-                                               name: .NSMetadataQueryDidFinishGathering, object: query)
-        defer {
-            query.stop()
-            NotificationCenter.default.removeObserver(self)
+    private func perform<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.addOperation {
+                continuation.resume(with: Result { try autoreleasepool(invoking: body) })
+            }
         }
-        guard query.start() else { throw MetadataError.unavailable }
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(30))
-        while !gathered {
-            try Task.checkCancellation()
-            guard clock.now < deadline else { throw MetadataError.timedOut }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        query.disableUpdates()
-        var result: Set<URL> = []
-        for index in 0..<query.resultCount {
-            try Task.checkCancellation()
-            if let item = query.result(at: index) as? NSMetadataItem,
-               let url = item.value(forAttribute: NSMetadataItemURLKey) as? URL { result.insert(url) }
-            if index.isMultiple(of: 256) { await Task.yield() }
-        }
-        return result
     }
 
-    @objc private func finished() { gathered = true }
+    private func gather(_ root: URL) async throws -> Set<URL> {
+        do {
+            try Task.checkCancellation()
+            try await perform { [self] in
+                let query = NSMetadataQuery()
+                self.query = query
+                query.searchScopes = [NSMetadataQueryUbiquitousDataScope]
+                query.predicate = NSPredicate(format: "%K CONTAINS %@", NSMetadataItemPathKey, "/" + root.lastPathComponent + "/")
+                query.operationQueue = queue
+                observer = NotificationCenter.default.addObserver(forName: .NSMetadataQueryDidFinishGathering,
+                                                                   object: query, queue: queue) { [weak self] _ in
+                    self?.gathered = true
+                }
+                guard query.start() else { throw MetadataError.unavailable }
+            }
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(30))
+            while try await perform({ [self] in !gathered }) {
+                try Task.checkCancellation()
+                guard clock.now < deadline else { throw MetadataError.timedOut }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            let count = try await perform { [self] in
+                query!.disableUpdates()
+                return query!.resultCount
+            }
+            var result: Set<URL> = []
+            for start in stride(from: 0, to: count, by: 256) {
+                try Task.checkCancellation()
+                let paths = try await perform { [self] in
+                    (start..<min(start + 256, count)).compactMap { index in
+                        (query!.result(at: index) as? NSMetadataItem)?.value(forAttribute: NSMetadataItemPathKey) as? String
+                    }
+                }
+                // Do not retain provider-backed URLs for the entire cloud inventory.
+                for path in paths { result.insert(URL(fileURLWithPath: path, isDirectory: false)) }
+            }
+            await cleanup()
+            try Task.checkCancellation()
+            return result
+        } catch {
+            await cleanup()
+            throw error
+        }
+    }
+
+    private func cleanup() async {
+        await withCheckedContinuation { continuation in
+            queue.addOperation { [self] in
+                autoreleasepool {
+                    query?.stop()
+                    if let observer { NotificationCenter.default.removeObserver(observer) }
+                    observer = nil
+                    query = nil
+                }
+                continuation.resume()
+            }
+        }
+    }
+
     private enum MetadataError: Error { case unavailable, timedOut }
 }
 

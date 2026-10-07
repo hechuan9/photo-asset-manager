@@ -161,7 +161,19 @@ struct KeepsCloudReplicaTests {
         try Data("invalid image".utf8).write(to: namespace.appendingPathComponent("thumbnails/\(brokenKey.prefix(2))/\(brokenKey)"))
         let destination = root.appendingPathComponent("destination")
         let target = cache(root.appendingPathComponent("target-cache"))
-        #expect(try await KeepsCloudReplica(cloudRoot: cloud, cache: target).restore(configuration: configuration, databaseRoot: destination))
+        let replica = KeepsCloudReplica(cloudRoot: cloud, cache: target)
+        let paused = Task {
+            try await replica.restore(configuration: configuration, databaseRoot: destination,
+                workProgress: { done, total in
+                    if done == total { withUnsafeCurrentTask { $0?.cancel() } }
+                })
+        }
+        await #expect(throws: CancellationError.self) { _ = try await paused.value }
+        #expect(try KeepsLibraryDatabase(configuration: configuration, rootDirectory: destination).revision == nil)
+        let keptImage = try #require(try await target.cachedFileURL(forKey: key(asset(2))))
+        let keptDate = try keptImage.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        #expect(try await replica.restore(configuration: configuration, databaseRoot: destination))
+        #expect(try keptImage.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate == keptDate)
         #expect(try KeepsLibraryDatabase(configuration: configuration, rootDirectory: destination).revision == 42)
         #expect(try await target.containsCachedKey(key(asset(2))))
     }

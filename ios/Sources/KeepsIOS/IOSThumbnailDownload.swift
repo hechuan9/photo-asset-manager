@@ -27,7 +27,18 @@ final class IOSThumbnailDownload: ObservableObject {
                  synchronize: @escaping @MainActor (@escaping IOSOfflineProgress.Reporter) async throws -> Void) async {
         guard !isRunning else { return }
         configurationChanged(configuration)
-        start(configuration: configuration, restoring: true, refreshLocal: refreshLocal, synchronize: synchronize)
+        do {
+            let database = try KeepsLibraryDatabase(configuration: configuration)
+            if try database.revision != nil && database.syncCheckpoint == nil {
+                isComplete = true
+                return
+            }
+        } catch {
+            self.error = String(reflecting: error)
+            Self.logger.error("Local catalog check failed: \(String(reflecting: error), privacy: .public)")
+            return
+        }
+        start(configuration: configuration, refreshLocal: refreshLocal, synchronize: synchronize)
     }
 
     func pause() {
@@ -36,14 +47,7 @@ final class IOSThumbnailDownload: ObservableObject {
         status = "正在暂停，已完成的数据库和下载进度会保留…"
     }
 
-    func update(configuration: KeepsConfiguration, synchronize: @escaping @MainActor (@escaping IOSOfflineProgress.Reporter) async throws -> Void) async {
-        await work?.value
-        guard !Task.isCancelled, self.configuration == configuration, !isRunning else { return }
-        start(configuration: configuration, restoring: false, refreshLocal: {}, synchronize: synchronize)
-        await work?.value
-    }
-
-    private func start(configuration: KeepsConfiguration, restoring: Bool,
+    private func start(configuration: KeepsConfiguration,
                        refreshLocal: @escaping @MainActor () async -> Void,
                        synchronize: @escaping @MainActor (@escaping IOSOfflineProgress.Reporter) async throws -> Void) {
         guard !isRunning else { return }
@@ -51,12 +55,9 @@ final class IOSThumbnailDownload: ObservableObject {
         self.configuration = configuration
         let id = UUID()
         runID = id
-        if !restoring {
-            systemProgress = IOSOfflineProgress()
-        }
         isRunning = true
         status = "正在准备图库…"
-        if restoring && !registered {
+        if !registered {
             registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.identifier, using: .main) { task in
                 MainActor.assumeIsolated {
                     guard let continued = task as? BGContinuedProcessingTask else {
@@ -74,23 +75,21 @@ final class IOSThumbnailDownload: ObservableObject {
                 self.endBackgroundTime()
             }
         }
-        if restoring {
-            let request = BGContinuedProcessingTaskRequest(identifier: Self.identifier,
-                title: "准备离线图库", subtitle: "数据库、缩略图与 iCloud 副本")
-            request.strategy = .fail
-            do {
-                if registered { try BGTaskScheduler.shared.submit(request) }
-                else { Self.logger.error("Continued task registration failed") }
-            } catch {
-                Self.logger.error("Continued task submission failed: \(String(reflecting: error), privacy: .public)")
-            }
+        let request = BGContinuedProcessingTaskRequest(identifier: Self.identifier,
+            title: "准备离线图库", subtitle: "数据库与可用缩略图")
+        request.strategy = .fail
+        do {
+            if registered { try BGTaskScheduler.shared.submit(request) }
+            else { Self.logger.error("Continued task registration failed") }
+        } catch {
+            Self.logger.error("Continued task submission failed: \(String(reflecting: error), privacy: .public)")
         }
         let previous = ThumbnailBackgroundDelegate.activeWork
         previous?.cancel()
         work = Task { @MainActor in
             await previous?.value
             guard !Task.isCancelled, self.runID == id else { self.finish(id: id, completed: false); return }
-            await self.run(configuration: configuration, id: id, restoring: restoring,
+            await self.run(configuration: configuration, id: id,
                            refreshLocal: refreshLocal, synchronize: synchronize)
         }
     }
@@ -114,30 +113,27 @@ final class IOSThumbnailDownload: ObservableObject {
         }
     }
 
-    private func run(configuration: KeepsConfiguration, id: UUID, restoring: Bool,
+    private func run(configuration: KeepsConfiguration, id: UUID,
                      refreshLocal: @MainActor () async -> Void, synchronize: @MainActor (@escaping IOSOfflineProgress.Reporter) async throws -> Void) async {
         var completed = false
         do {
             let database = try KeepsLibraryDatabase(configuration: configuration)
             var hasCatalog = try database.revision != nil && database.syncCheckpoint == nil
-            if restoring, hasCatalog {
-                isComplete = true
+            if hasCatalog {
                 finish(id: id, completed: true)
                 return
             }
-            if restoring, !hasCatalog {
-                _ = try await KeepsCloudReplica.shared.restore(configuration: configuration, progress: { message in
-                    await self.reportCloud(message, id: id)
-                }, workProgress: { completed, total in
-                    await self.reportWork(.restore, completed: completed, total: total, id: id)
-                })
-                try Task.checkCancellation()
-                await refreshLocal()
-                hasCatalog = try database.revision != nil && database.syncCheckpoint == nil
-            }
+            _ = try await KeepsCloudReplica.shared.restore(configuration: configuration, progress: { message in
+                await self.reportCloud(message, id: id)
+            }, workProgress: { completed, total in
+                await self.reportWork(.restore, completed: completed, total: total, id: id)
+            })
+            try Task.checkCancellation()
+            await refreshLocal()
+            hasCatalog = try database.revision != nil && database.syncCheckpoint == nil
             try Task.checkCancellation()
             guard runID == id else { return }
-            if !restoring || !hasCatalog {
+            if !hasCatalog {
                 status = "正在更新照片数据库…"
                 try await synchronize { stage, completed, total in
                     self.reportWork(stage, completed: completed, total: total, id: id)
@@ -157,29 +153,15 @@ final class IOSThumbnailDownload: ObservableObject {
         }
         guard !Task.isCancelled, runID == id else { finish(id: id, completed: false); return }
         guard completed else { finish(id: id, completed: false); return }
-        isComplete = true
-        var cloudFailed = false
-        do {
-            try await KeepsCloudReplica.shared.backup(configuration: configuration, progress: { message in
-                await self.reportCloud(message, id: id)
-            }, workProgress: { completed, total in
-                await self.reportWork(.backup, completed: completed, total: total, id: id)
-            })
-        } catch {
-            cloudFailed = true
-            reportCloud("iCloud 副本待继续同步：" + String(reflecting: error), id: id)
-            Self.logger.error("Cloud backup failed: \(String(reflecting: error), privacy: .public)")
-        }
-        finish(id: id, completed: completed, cloudFailed: cloudFailed)
+        finish(id: id, completed: true)
     }
 
-    private func finish(id: UUID, completed: Bool, cloudFailed: Bool = false) {
+    private func finish(id: UUID, completed: Bool) {
         guard runID == id else { return }
         let cancelled = Task.isCancelled
         let succeeded = completed && !cancelled
         if succeeded { systemProgress.complete() }
         if cancelled { status = "准备已暂停，已缓存的文件会保留；点击继续。" }
-        else if cloudFailed { status = "本地检查已结束，iCloud 副本待继续同步。" }
         else if completed { status = "离线图库准备完成。" }
         else { status = "准备已暂停，已完成的数据库和下载进度会保留；点击继续。" }
         systemTask?.progress.completedUnitCount = systemProgress.completedUnitCount
@@ -189,6 +171,7 @@ final class IOSThumbnailDownload: ObservableObject {
         work = nil
         systemTask = nil
         runID = nil
+        if succeeded { isComplete = true }
     }
 
     private func reportCloud(_ message: String, id: UUID) {

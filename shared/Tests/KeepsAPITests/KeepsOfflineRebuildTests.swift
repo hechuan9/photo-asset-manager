@@ -68,7 +68,7 @@ struct KeepsOfflineRebuildTests {
         #expect(result.revision == 42)
         #expect(try reader.revision == 42)
     }
-    @Test func rejectsMalformedArchivesWhileRetainingAlreadyCommittedDatabase() async throws {
+    @Test func rejectsMalformedArchivesWithoutPublishingDatabase() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let entries = try fixture(root)
@@ -78,13 +78,13 @@ struct KeepsOfflineRebuildTests {
         let archive = root.appendingPathComponent("test.tar")
         let service = KeepsOfflineRebuild()
         let invalid = [tar(entries + [("../escape", Data())]), tar(entries, type: 50), tar(entries + [entries[0]]), tar(entries).dropLast(600)]
-        for (index, bytes) in invalid.enumerated() {
+        for bytes in invalid {
             try reader.completeSync(revision: 7, isStable: true)
             try bytes.write(to: archive)
             await #expect(throws: (any Error).self) {
                 _ = try await service.unpack(archive, root: root, configuration: configuration, databaseRoot: destination, progress: { _ in })
             }
-            #expect(try reader.revision == (index == 1 ? 7 : 42))
+            #expect(try reader.revision == 7)
         }
         #expect(!FileManager.default.fileExists(atPath: root.deletingLastPathComponent().appendingPathComponent("escape").path))
     }
@@ -125,6 +125,20 @@ struct KeepsOfflineRebuildTests {
         #expect(try await cache.cachedFileURL(forKey: existingKey) != nil)
         #expect(try await cache.cachedFileURL(forKey: missingKey) == nil)
         try FileManager.default.removeItem(at: blockedCacheFile)
+        let freshDestination = root.appendingPathComponent("paused-destination")
+        let paused = Task {
+            try await service.unpack(archive, root: root, configuration: configuration, databaseRoot: freshDestination) { progress in
+                if progress.message == "导入离线图库" { withUnsafeCurrentTask { $0?.cancel() } }
+            }
+        }
+        await #expect(throws: CancellationError.self) { _ = try await paused.value }
+        #expect(try KeepsLibraryDatabase(configuration: configuration, rootDirectory: freshDestination).revision == nil)
+        let cachedFile = try #require(try await cache.cachedFileURL(forKey: missingKey))
+        let cachedDate = try cachedFile.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        #expect(FileManager.default.fileExists(atPath: archive.path))
+        _ = try await service.unpack(archive, root: root, configuration: configuration, databaseRoot: freshDestination, progress: { _ in })
+        #expect(try KeepsLibraryDatabase(configuration: configuration, rootDirectory: freshDestination).revision == 55)
+        #expect(try cachedFile.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate == cachedDate)
         _ = try await service.unpack(archive, root: root, configuration: configuration, databaseRoot: destination, progress: { _ in })
         #expect(try reader.revision == 55)
         let key = PreviewCache.key(assetID: asset.id, preview: preview, configuration: configuration, role: .thumbnail)
