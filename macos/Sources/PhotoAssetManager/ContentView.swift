@@ -39,8 +39,13 @@ struct ContentView: View {
         .foregroundStyle(WorkspaceStyle.text)
         .preferredColorScheme(.dark)
         .tint(WorkspaceStyle.accent)
+        .disabled(library.isDirectoryTrashBlocking)
+        .overlay { if library.isDirectoryTrashBlocking { Color.clear.contentShape(Rectangle()).onTapGesture {} } }
         .sheet(isPresented: $showsImport, onDismiss: { library.refreshNavigation(); library.refresh(force: true) }) {
-            if let importStore { ImportView(store: importStore, initialTarget: library.query.directory) }
+            if let importStore { ImportView(store: importStore, initialTarget: library.query.directory).disabled(library.isDirectoryTrashBlocking) }
+        }
+        .sheet(item: $library.directoryToTrash) { directory in
+            DirectoryTrashSheet(library: library, directory: directory)
         }
         .task { library.refresh() }
         .prefetchKeepsThumbnails(configuration: library.configuration)

@@ -104,6 +104,36 @@ public struct KeepsNavigationDirectory: Decodable, Identifiable, Equatable, Send
     public var photoCount: Int
     public var hasChildren: Bool
     public var id: String { path }
+
+    public init(path: String, name: String, photoCount: Int, hasChildren: Bool) {
+        self.path = path
+        self.name = name
+        self.photoCount = photoCount
+        self.hasChildren = hasChildren
+    }
+}
+
+public struct KeepsDirectoryTrashTask: Codable, Equatable, Identifiable, Sendable {
+    public var id: UUID
+    public var path: String
+    public var status: String
+    public var phase: String
+    public var error: String?
+    public var createdAt: Double
+    public var updatedAt: Double
+    public var finishedAt: Double?
+    public var isTerminal: Bool { status == "completed" || status == "failed" }
+
+    public init(id: UUID, path: String, status: String, phase: String, error: String? = nil, createdAt: Double, updatedAt: Double, finishedAt: Double? = nil) {
+        self.id = id
+        self.path = path
+        self.status = status
+        self.phase = phase
+        self.error = error
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.finishedAt = finishedAt
+    }
 }
 
 public struct KeepsNavigation: Decodable, Sendable {

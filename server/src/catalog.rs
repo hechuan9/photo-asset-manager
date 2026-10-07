@@ -308,7 +308,7 @@ impl Store {
                 }
             }
         }
-        let mut filter = "a.library_id=? AND a.trashed=?".to_string();
+        let mut filter = "a.library_id=? AND a.trashed=? AND EXISTS(SELECT 1 FROM catalog_paths live WHERE live.library_id=a.library_id AND live.asset_id=a.id)".to_string();
         let mut values: Vec<rusqlite::types::Value> = vec![
             lib.to_string().into(),
             (q.trashed.unwrap_or(false) as i64).into(),
@@ -411,7 +411,7 @@ impl Store {
     }
     pub fn counts(&self, lib: &str, show_hidden: bool) -> Result<Value> {
         let db = self.lock()?;
-        let mut filter = "a.library_id=?".to_string();
+        let mut filter = "a.library_id=? AND EXISTS(SELECT 1 FROM catalog_paths live WHERE live.library_id=a.library_id AND live.asset_id=a.id)".to_string();
         let mut values: Vec<rusqlite::types::Value> = vec![lib.to_string().into()];
         if !show_hidden {
             hidden_filter(&mut filter, &mut values, lib, None);
@@ -1028,6 +1028,10 @@ mod tests {
                 "INSERT INTO catalog_assets VALUES ('lib',?,?, 'hash','fingerprint',?,'photo.jpg',1,'unflagged',NULL,0)",
                 params![id, asset.to_string(), time],
             )?;
+            store.lock()?.execute(
+                "INSERT INTO catalog_paths VALUES('lib',?,?,'hash','jpeg_original')",
+                params![format!("/photos/{id}.jpg"), id],
+            )?;
             Ok(())
         };
         for (id, time) in [
@@ -1573,6 +1577,11 @@ mod tests {
             store.mark_missing_under("lib", photos.to_str().unwrap())?,
             1
         );
+        assert_eq!(
+            store.query_assets("lib", &AssetQuery::default())?["items"],
+            json!([])
+        );
+        assert_eq!(store.counts("lib", false)?["all"], 0);
         std::fs::write(&a, b"same")?;
         assert_eq!(
             store.ingest_original("lib", a.to_str().unwrap(), &file, &snapshot())?,

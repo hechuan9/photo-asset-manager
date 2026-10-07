@@ -13,10 +13,12 @@ struct DirectoryOutlineView: NSViewRepresentable {
             coordinator?.contextMenu(for: item)
         }
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("directory"))
+        column.minWidth = 0
         column.resizingMask = .autoresizingMask
         outline.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         outline.addTableColumn(column)
         outline.outlineTableColumn = column
+        outline.autoresizingMask = [.width]
         outline.headerView = nil
         outline.rowHeight = 30
         outline.indentationPerLevel = 14
@@ -51,9 +53,18 @@ struct DirectoryOutlineView: NSViewRepresentable {
         }
 
         override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
-            var rect = super.frameOfCell(atColumn: column, row: row)
+            let rect = super.frameOfCell(atColumn: column, row: row)
             // 目录层级只缩进左侧，计数始终对齐侧栏右侧的同一条边线。
-            rect.size.width = max(0, bounds.width - rect.minX - 14)
+            let visibleWidth = enclosingScrollView?.contentSize.width ?? bounds.width
+            let rightEdge = visibleWidth - 14
+            let leftEdge = min(rect.origin.x, max(0, rightEdge - 100))
+            return NSRect(x: leftEdge, y: rect.origin.y, width: max(0, rightEdge - leftEdge), height: rect.height)
+        }
+
+        override func frameOfOutlineCell(atRow row: Int) -> NSRect {
+            var rect = super.frameOfOutlineCell(atRow: row)
+            let visibleWidth = enclosingScrollView?.contentSize.width ?? bounds.width
+            rect.origin.x = min(rect.minX, max(0, visibleWidth - 114 - rect.width))
             return rect
         }
 
@@ -64,19 +75,27 @@ struct DirectoryOutlineView: NSViewRepresentable {
         }
     }
 
+    final class DirectoryNameLabel: NSTextField {
+        // 目录展开与列宽变化时，使用 AppKit 的标准绘制路径，避免文本图层保留空白内容。
+        override func draw(_ dirtyRect: NSRect) { super.draw(dirtyRect) }
+    }
+
     final class DirectoryCell: NSTableCellView {
+        let nameLabel = DirectoryNameLabel(labelWithString: "")
         let spinner = NSProgressIndicator()
         let countLabel = NSTextField(labelWithString: "")
-        private let icon = NSImageView()
+        let icon = NSImageView()
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
-            let label = NSTextField(labelWithString: "")
+            let label = nameLabel
             label.lineBreakMode = .byTruncatingMiddle
             label.font = .systemFont(ofSize: 12)
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             countLabel.font = .systemFont(ofSize: 11)
             countLabel.alignment = .right
             countLabel.textColor = .secondaryLabelColor
             countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+            countLabel.setContentHuggingPriority(.required, for: .horizontal)
             countLabel.toolTip = "已索引照片，包含子目录，不含回收站"
             icon.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
             spinner.style = .spinning
@@ -91,14 +110,14 @@ struct DirectoryOutlineView: NSViewRepresentable {
                 icon.leadingAnchor.constraint(equalTo: leadingAnchor), icon.centerYAnchor.constraint(equalTo: centerYAnchor), icon.widthAnchor.constraint(equalToConstant: 16),
                 spinner.leadingAnchor.constraint(equalTo: icon.leadingAnchor), spinner.centerYAnchor.constraint(equalTo: centerYAnchor), spinner.widthAnchor.constraint(equalToConstant: 16), spinner.heightAnchor.constraint(equalToConstant: 16),
                 label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6), label.centerYAnchor.constraint(equalTo: centerYAnchor),
-                countLabel.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 6), countLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0), countLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
+                countLabel.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 6), countLabel.trailingAnchor.constraint(equalTo: trailingAnchor), countLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
             ])
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
         func configure(_ directory: KeepsNavigationDirectory, loading: Bool, hidden: Bool = false) {
             icon.image = NSImage(systemSymbolName: hidden ? "folder.badge.minus" : "folder", accessibilityDescription: hidden ? "隐藏目录" : "目录")
-            textField?.stringValue = directory.name
-            textField?.textColor = hidden ? .secondaryLabelColor : .labelColor
+            nameLabel.stringValue = directory.name
+            nameLabel.textColor = hidden ? .secondaryLabelColor : .labelColor
             icon.contentTintColor = hidden ? .tertiaryLabelColor : .secondaryLabelColor
             countLabel.textColor = hidden ? .tertiaryLabelColor : .secondaryLabelColor
             countLabel.stringValue = String(directory.photoCount)
@@ -148,7 +167,7 @@ struct DirectoryOutlineView: NSViewRepresentable {
         }
 
         func update() {
-            guard let outline else { return }
+            guard let outline, !updating else { return }
             updating = true
             defer { updating = false }
             let hiddenChanged = hiddenPaths != library.hiddenDirectoryPaths
@@ -226,7 +245,9 @@ struct DirectoryOutlineView: NSViewRepresentable {
             guard let item = item as? Node else { return false }
             return children[item.path].map { !$0.isEmpty || errors[item.path] != nil } ?? (directory(item.path)?.hasChildren == true)
         }
-        func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool { item is Node }
+        func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool { !library.isDirectoryTrashBlocking && item is Node }
+        func outlineView(_ outlineView: NSOutlineView, shouldExpandItem item: Any) -> Bool { !library.isDirectoryTrashBlocking }
+        func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool { !library.isDirectoryTrashBlocking }
         func outlineViewItemDidExpand(_ notification: Notification) {
             guard !updating, let item = notification.userInfo?["NSObject"] as? Node else { return }
             library.setDirectoryExpanded(item.path, expanded: true)
@@ -240,7 +261,7 @@ struct DirectoryOutlineView: NSViewRepresentable {
             if library.query.directory != item.path { library.showLibrary(directory: item.path) }
         }
         func contextMenu(for item: Any) -> NSMenu? {
-            guard let node = item as? Node, let outline else { return nil }
+            guard !library.isDirectoryTrashBlocking, let node = item as? Node, let outline else { return nil }
             let menu = NSMenu()
             if outline.isExpandable(node) {
                 let expanded = outline.isItemExpanded(node)
@@ -264,27 +285,36 @@ struct DirectoryOutlineView: NSViewRepresentable {
                 let inherited = menu.addItem(withTitle: "已继承父目录的隐藏设置", action: nil, keyEquivalent: "")
                 inherited.isEnabled = false
             }
+            menu.addItem(.separator())
+            let trash = menu.addItem(withTitle: "删除文件夹…", action: #selector(trashDirectory(_:)), keyEquivalent: "")
+            trash.target = self
+            trash.representedObject = node
             return menu
         }
 
+        @objc private func trashDirectory(_ sender: NSMenuItem) {
+            guard !library.isDirectoryTrashBlocking, let node = sender.representedObject as? Node else { return }
+            library.directoryToTrash = directory(node.path)
+        }
+
         @objc private func toggleHiddenDirectory(_ sender: NSMenuItem) {
-            guard let node = sender.representedObject as? Node else { return }
+            guard !library.isDirectoryTrashBlocking, let node = sender.representedObject as? Node else { return }
             library.setDirectoryHidden(node.path, hidden: !library.hiddenDirectoryPaths.contains(node.path))
         }
 
         @objc private func toggleDirectory(_ sender: NSMenuItem) {
-            guard let node = sender.representedObject as? Node, let outline else { return }
+            guard !library.isDirectoryTrashBlocking, let node = sender.representedObject as? Node, let outline else { return }
             if outline.isItemExpanded(node) { outline.collapseItem(node) }
             else { outline.expandItem(node) }
         }
 
         @objc private func refreshDirectory(_ sender: NSMenuItem) {
-            guard let node = sender.representedObject as? Node else { return }
+            guard !library.isDirectoryTrashBlocking, let node = sender.representedObject as? Node else { return }
             library.loadChildren(of: node.path, refresh: true)
         }
 
         @objc private func copyDirectoryPath(_ sender: NSMenuItem) {
-            guard let node = sender.representedObject as? Node else { return }
+            guard !library.isDirectoryTrashBlocking, let node = sender.representedObject as? Node else { return }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(node.path, forType: .string)
         }

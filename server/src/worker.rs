@@ -89,6 +89,7 @@ pub fn run_one(
     job: &Job,
     stop: &AtomicBool,
 ) -> Result<bool> {
+    let _directory_guard = jobs.directory_mutation.read().unwrap();
     if stopped(jobs, job, stop)? {
         return Ok(false);
     }
@@ -496,6 +497,7 @@ pub fn process_identity_batch(
     previews: &PreviewStorage,
     stop: &AtomicBool,
 ) -> Result<()> {
+    let _directory_guard = jobs.directory_mutation.read().unwrap();
     for (folder, text) in jobs.pending_identities(20)? {
         if stop.load(Ordering::Relaxed) || jobs.has_path_sync()? {
             break;

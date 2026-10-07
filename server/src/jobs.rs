@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use std::{
     path::{Component, Path},
-    sync::Mutex,
+    sync::{Mutex, RwLock},
 };
 use uuid::Uuid;
 
@@ -49,6 +49,8 @@ pub struct FileState {
     pub error: Option<String>,
 }
 pub struct Jobs {
+    pub(crate) directory_mutation: RwLock<()>,
+    pub(crate) trash_db: Mutex<Connection>,
     pub(crate) db: Mutex<Connection>,
     root: std::path::PathBuf,
 }
@@ -181,7 +183,12 @@ impl Jobs {
             UPDATE jobs SET scope_path=(SELECT path FROM folders WHERE id=jobs.folder_id) WHERE scope_path IS NULL;
             DROP INDEX IF EXISTS jobs_live_scope;
             CREATE UNIQUE INDEX jobs_live_scope ON jobs(folder_id,scope_path,scope_kind) WHERE status IN ('pending','running');")?;
+        let trash_db = Connection::open(path)?;
+        trash_db.busy_timeout(std::time::Duration::from_secs(5))?;
+        crate::directory_trash::initialize(&trash_db)?;
         let jobs = Self {
+            directory_mutation: RwLock::new(()),
+            trash_db: Mutex::new(trash_db),
             db: Mutex::new(db),
             root,
         };
