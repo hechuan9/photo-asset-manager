@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import CryptoKit
+import KeepsAPI
 
 @MainActor final class AIEditingSettingsStore: ObservableObject {
     @Published var expectedEmail: String {
@@ -21,10 +22,12 @@ import CryptoKit
     let logDirectory: URL
     let root: URL
     let runtime: URL
+    let codeRuntime: URL
+    private var sampleTask: Task<URL, Error>?
     private let defaults: UserDefaults
     private let runner = AIEditingProcess()
     private var home: URL { root.appendingPathComponent("codex", isDirectory: true) }
-    private var executable: URL { runtime.appendingPathComponent("codex") }
+    private var executable: URL { codeRuntime.appendingPathComponent("codex") }
     private let model = "gpt-6-luna"
 
     init(root: URL? = nil, runtime: URL? = nil, defaults: UserDefaults = .standard) {
@@ -33,6 +36,7 @@ import CryptoKit
         self.root = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Keeps/AIEditing", isDirectory: true)
         self.runtime = runtime ?? (Bundle.main.resourceURL ?? Bundle.main.bundleURL).appendingPathComponent("AIEditing", isDirectory: true)
+        self.codeRuntime = runtime ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers", isDirectory: true)
         self.logDirectory = self.root.appendingPathComponent("logs", isDirectory: true)
     }
 
@@ -106,61 +110,133 @@ import CryptoKit
         }
     }
 
-    func testPhoto(_ source: URL) async {
-        await perform("正在执行单张 AI 调色测试") {
-            self.resultPreview = nil; self.resultSummary = nil
+    static let samplePath = "照片/2023/香港/DSC01194.ARW"
+
+    func testFixedPhoto(client: KeepsClient?) async {
+        await perform("正在获取固定样片 DSC01194.ARW") {
+            guard let client else { throw AIEditingFailure("请先在服务器设置中连接 NAS，以获取固定样片。") }
             try self.prepareDirectories(); try self.checkRuntime(); try self.readAccount(); try self.requireAccount()
             guard self.connectionVerified else { throw AIEditingFailure("请先完成模型连接测试。") }
-            let allowed = ["arw", "3fr", "dng", "cr2", "cr3", "nef", "raf", "orf", "rw2"]
-            guard allowed.contains(source.pathExtension.lowercased()) else { throw AIEditingFailure("当前测试仅支持 RAW 原片，请选择 RAW 文件。") }
-            let accessed = source.startAccessingSecurityScopedResource()
-            defer { if accessed { source.stopAccessingSecurityScopedResource() } }
-            guard FileManager.default.isReadableFile(atPath: source.path) else { throw AIEditingFailure("无法读取选中的照片。") }
-            let job = try self.newJob("photo")
-            let skill = try Data(contentsOf: self.runtime.appendingPathComponent("SKILL.md"))
-            let schema: [String: Any] = ["type": "object", "properties": [
-                "status": ["type": "string", "enum": ["selected", "unchanged", "needs_review"]],
-                "candidateID": ["type": "string"], "reason": ["type": "string"]],
-                "required": ["status", "candidateID", "reason"], "additionalProperties": false]
-            let schemaURL = job.appendingPathComponent("result.schema.json")
-            try JSONSerialization.data(withJSONObject: schema).write(to: schemaURL, options: .atomic)
-            var arguments = self.execArguments(job: job) + ["--output-schema", schemaURL.path]
-            let settings: [String: Any] = [
-                "mcp_servers.keeps_color.required": true,
-                "mcp_servers.keeps_color.default_tools_approval_mode": "auto",
-                "mcp_servers.keeps_color.command": self.runtime.appendingPathComponent("keeps-color-mcp").path,
-                "mcp_servers.keeps_color.args": ["--darktable", self.runtime.appendingPathComponent("darktable.app/Contents/MacOS/darktable-cli").path,
-                    "--source", source.path, "--job", job.appendingPathComponent("render").path],
-                "mcp_servers.keeps_color.startup_timeout_sec": 180,
-                "mcp_servers.keeps_color.tool_timeout_sec": 240]
-            for key in settings.keys.sorted() { arguments += ["-c", key + "=" + (try Self.json(settings[key]!))] }
-            let version = try await self.runner.run(executable: self.executable, arguments: ["--version"], home: self.home, directory: job, timeout: 15)
-            guard version.exitCode == 0 else { throw AIEditingFailure("无法检查内置 Codex 版本。") }
-            let started = Date()
-            var runExitCode: Int32 = -1
-            defer {
-                let metadata: [String: Any] = ["model": self.model, "codexVersion": version.output.trimmingCharacters(in: .whitespacesAndNewlines),
-                    "engineVersion": "5.6.2", "elapsedSeconds": Date().timeIntervalSince(started), "exitCode": runExitCode,
-                    "skillSHA256": SHA256.hash(data: skill).map { String(format: "%02x", $0) }.joined()]
-                if let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys]) {
-                    try? data.write(to: job.appendingPathComponent("run.json"), options: .atomic)
-                }
-            }
-            let prompt = String(decoding: skill, as: UTF8.self) + "\nComplete this photo independently using only Keeps tools. Return the specified result, with reason in Chinese."
-            let result = try await self.runner.run(executable: self.executable, arguments: arguments + ["-"],
-                home: self.home, directory: job, input: prompt, timeout: 600)
-            try self.writeLog(result, job: job)
-            runExitCode = result.exitCode
-            guard result.exitCode == 0 else { throw AIEditingFailure("调色失败（退出码 \(result.exitCode)）。诊断日志：\(job.path)") }
-            try self.readAccount(); try self.requireAccount()
-            let validated = try Self.validateResult(in: job)
-            self.resultPreview = validated.preview
-            self.resultSummary = validated.reason
-            self.status = validated.selected ? "单张调色测试成功；结果保存在本机" : "测试完成；结果需要人工检查"
+            let task = Task { try await self.fixedPhoto(client: client) }
+            self.sampleTask = task
+            defer { self.sampleTask = nil }
+            let source = try await task.value
+            try Task.checkCancellation()
+            self.status = "正在使用 DSC01194.ARW 验证 AI 调色"
+            try await self.runPhoto(source)
         }
     }
 
-    func cancel() { runner.cancel() }
+    private func fixedPhoto(client: KeepsClient) async throws -> URL {
+        var query = KeepsAssetQuery()
+        query.q = "DSC01194"; query.showHidden = true
+        var matches: [(UUID, KeepsAssetVersion)] = []
+        repeat {
+            let page = try await client.assets(query: query)
+            for asset in page.items {
+                for version in try await client.versions(assetID: asset.id) where Self.isFixedSample(version) {
+                    matches.append((asset.id, version))
+                }
+            }
+            query.cursor = page.nextCursor
+        } while query.cursor != nil
+        guard matches.count == 1, let (assetID, version) = matches.first else {
+            throw AIEditingFailure(matches.isEmpty ? "NAS 中找不到可用的固定样片：\(Self.samplePath)" : "NAS 中有多个同路径样片，无法确定验证原片。")
+        }
+        let directory = root.appendingPathComponent("sample", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let target = try Self.sampleCacheURL(directory: directory, hash: version.contentHash)
+        if try Self.sampleCacheIsValid(target, hash: version.contentHash) { return target }
+        let downloaded = directory.appendingPathComponent("pending-" + UUID().uuidString + ".ARW")
+        defer { try? FileManager.default.removeItem(at: downloaded) }
+        try await client.downloadVersion(assetID: assetID, contentHash: version.contentHash, to: downloaded)
+        guard try Self.sampleCacheIsValid(downloaded, hash: version.contentHash) else {
+            throw AIEditingFailure("固定样片下载校验失败，请重试；NAS 原片未改动。")
+        }
+        // Atomic replacement touches only the app-owned cache.
+        try Data(contentsOf: downloaded, options: .mappedIfSafe).write(to: target, options: .atomic)
+        return target
+    }
+
+    static func isFixedSample(_ version: KeepsAssetVersion) -> Bool {
+        version.available && version.paths.contains { location in
+            location.available && (location.path == samplePath || location.path.hasSuffix("/" + samplePath))
+        }
+    }
+
+    static func sampleCacheURL(directory: URL, hash: String) throws -> URL {
+        guard hash.count == 64, hash.allSatisfy({ "0123456789abcdef".contains($0) }) else {
+            throw AIEditingFailure("NAS 样片内容校验标识无效。")
+        }
+        return directory.appendingPathComponent(hash + ".ARW")
+    }
+
+    static func sampleCacheIsValid(_ url: URL, hash: String) throws -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        let file = try FileHandle(forReadingFrom: url)
+        defer { try? file.close() }
+        var digest = SHA256()
+        while let data = try file.read(upToCount: 1024 * 1024), !data.isEmpty { digest.update(data: data) }
+        return digest.finalize().map { String(format: "%02x", $0) }.joined() == hash
+    }
+
+    func testPhoto(_ source: URL) async {
+        await perform("正在执行单张 AI 调色测试") { try await self.runPhoto(source) }
+    }
+
+    private func runPhoto(_ source: URL) async throws {
+        self.resultPreview = nil; self.resultSummary = nil
+        try self.prepareDirectories(); try self.checkRuntime(); try self.readAccount(); try self.requireAccount()
+        guard self.connectionVerified else { throw AIEditingFailure("请先完成模型连接测试。") }
+        let allowed = ["arw", "3fr", "dng", "cr2", "cr3", "nef", "raf", "orf", "rw2"]
+        guard allowed.contains(source.pathExtension.lowercased()) else { throw AIEditingFailure("当前测试仅支持 RAW 原片，请选择 RAW 文件。") }
+        let accessed = source.startAccessingSecurityScopedResource()
+        defer { if accessed { source.stopAccessingSecurityScopedResource() } }
+        guard FileManager.default.isReadableFile(atPath: source.path) else { throw AIEditingFailure("无法读取选中的照片。") }
+        let job = try self.newJob("photo")
+        let skill = try Data(contentsOf: self.runtime.appendingPathComponent("SKILL.md"))
+        let schema: [String: Any] = ["type": "object", "properties": [
+            "status": ["type": "string", "enum": ["selected", "unchanged", "needs_review"]],
+            "candidateID": ["type": "string"], "reason": ["type": "string"]],
+            "required": ["status", "candidateID", "reason"], "additionalProperties": false]
+        let schemaURL = job.appendingPathComponent("result.schema.json")
+        try JSONSerialization.data(withJSONObject: schema).write(to: schemaURL, options: .atomic)
+        var arguments = self.execArguments(job: job) + ["--output-schema", schemaURL.path]
+        let settings: [String: Any] = [
+            "mcp_servers.keeps_color.required": true,
+            "mcp_servers.keeps_color.default_tools_approval_mode": "auto",
+            "mcp_servers.keeps_color.command": self.codeRuntime.appendingPathComponent("keeps-color-mcp").path,
+            "mcp_servers.keeps_color.args": ["--darktable", self.codeRuntime.appendingPathComponent("darktable.app/Contents/MacOS/darktable-cli").path,
+                "--source", source.path, "--job", job.appendingPathComponent("render").path],
+            "mcp_servers.keeps_color.startup_timeout_sec": 180,
+            "mcp_servers.keeps_color.tool_timeout_sec": 240]
+        for key in settings.keys.sorted() { arguments += ["-c", key + "=" + (try Self.json(settings[key]!))] }
+        let version = try await self.runner.run(executable: self.executable, arguments: ["--version"], home: self.home, directory: job, timeout: 15)
+        guard version.exitCode == 0 else { throw AIEditingFailure("无法检查内置 Codex 版本。") }
+        let started = Date()
+        var runExitCode: Int32 = -1
+        defer {
+            let metadata: [String: Any] = ["model": self.model, "codexVersion": version.output.trimmingCharacters(in: .whitespacesAndNewlines),
+                "engineVersion": "5.6.2", "elapsedSeconds": Date().timeIntervalSince(started), "exitCode": runExitCode,
+                "skillSHA256": SHA256.hash(data: skill).map { String(format: "%02x", $0) }.joined()]
+            if let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys]) {
+                try? data.write(to: job.appendingPathComponent("run.json"), options: .atomic)
+            }
+        }
+        let prompt = String(decoding: skill, as: UTF8.self) + "\nComplete this photo independently using only Keeps tools. Return the specified result, with reason in Chinese."
+        let result = try await self.runner.run(executable: self.executable, arguments: arguments + ["-"],
+            home: self.home, directory: job, input: prompt, timeout: 600)
+        try self.writeLog(result, job: job)
+        runExitCode = result.exitCode
+        guard result.exitCode == 0 else { throw AIEditingFailure("调色失败（退出码 \(result.exitCode)）。诊断日志：\(job.path)") }
+        try self.readAccount(); try self.requireAccount()
+        let validated = try Self.validateResult(in: job)
+        self.resultPreview = validated.preview
+        self.resultSummary = validated.reason
+        self.status = validated.selected ? "单张调色测试成功；结果保存在本机" : "测试完成；结果需要人工检查"
+    }
+
+    func cancel() { sampleTask?.cancel(); runner.cancel() }
 
     private func perform(_ message: String, includeProcessLog: Bool = true, operation: () async throws -> Void) async {
         guard !isBusy else { return }
@@ -185,7 +261,7 @@ import CryptoKit
     private func checkRuntime() throws {
         runtimeReady = false
         for relative in ["codex", "keeps-color-mcp", "darktable.app/Contents/MacOS/darktable-cli"] {
-            guard FileManager.default.isExecutableFile(atPath: runtime.appendingPathComponent(relative).path) else {
+            guard FileManager.default.isExecutableFile(atPath: codeRuntime.appendingPathComponent(relative).path) else {
                 throw AIEditingFailure("当前应用缺少内置 AI 修图组件：\(relative)。请安装包含 AI 修图运行时的 Keeps。")
             }
         }

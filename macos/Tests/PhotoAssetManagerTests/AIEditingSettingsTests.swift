@@ -1,8 +1,44 @@
 import Foundation
 import Testing
+import KeepsAPI
+import CryptoKit
 @testable import PhotoAssetManager
 
 @MainActor struct AIEditingSettingsTests {
+    @Test func fixedSampleRequiresExactAvailableVersion() throws {
+        func version(_ path: String, available: Bool = true) throws -> KeepsAssetVersion {
+            let data = try JSONSerialization.data(withJSONObject: ["contentHash": String(repeating: "a", count: 64), "width": 6000, "height": 4000, "priority": 1, "isDefault": false, "userSelected": false, "available": available, "paths": [["path": path, "available": available]]])
+            return try JSONDecoder().decode(KeepsAssetVersion.self, from: data)
+        }
+        #expect(try AIEditingSettingsStore.isFixedSample(version("/myphoto/照片/2023/香港/DSC01194.ARW")))
+        #expect(try AIEditingSettingsStore.isFixedSample(version(AIEditingSettingsStore.samplePath)))
+        #expect(try !AIEditingSettingsStore.isFixedSample(version("/myphoto/照片/2024/香港/DSC01194.ARW")))
+        #expect(try !AIEditingSettingsStore.isFixedSample(version("/myphoto/照片/2023/香港/DSC01194.JPG")))
+        #expect(try !AIEditingSettingsStore.isFixedSample(version(AIEditingSettingsStore.samplePath, available: false)))
+    }
+
+    @Test func fixedSampleCacheRejectsStaleOrPartialContent() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("keeps-sample-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let data = Data("raw sample bytes".utf8)
+        let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let target = try AIEditingSettingsStore.sampleCacheURL(directory: directory, hash: hash)
+        #expect(try !AIEditingSettingsStore.sampleCacheIsValid(target, hash: hash))
+        try data.write(to: target)
+        #expect(try AIEditingSettingsStore.sampleCacheIsValid(target, hash: hash))
+        try Data("partial".utf8).write(to: target)
+        #expect(try !AIEditingSettingsStore.sampleCacheIsValid(target, hash: hash))
+        #expect(throws: (any Error).self) { try AIEditingSettingsStore.sampleCacheURL(directory: directory, hash: "../../other") }
+    }
+
+    @Test func fixedSampleWithoutNASExplainsConnectionRequirement() async {
+        let store = AIEditingSettingsStore()
+        await store.testFixedPhoto(client: nil)
+        #expect(store.errorMessage?.contains("连接 NAS") == true)
+        #expect(!store.isBusy)
+    }
+
     @Test func environmentDoesNotInheritHostAuthentication() {
         let home = URL(fileURLWithPath: "/tmp/keeps-only")
         let env = AIEditingProcess.environment(home: home, ambient: [

@@ -2322,3 +2322,90 @@ async fn photo_move_tasks_are_durable_scoped_and_idempotent() {
         StatusCode::NOT_FOUND
     );
 }
+
+#[tokio::test]
+async fn version_download_checks_membership_tracking_and_source_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let state = state(&root);
+    let hash = "a".repeat(64);
+    let path = root.join("originals/sample.ARW");
+    std::fs::write(&path, b"raw bytes").unwrap();
+    let snapshot = json!({"originalFilename":"sample.ARW","contentFingerprint":hash,"metadataFingerprint":"sample","rating":0,"tags":[],"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z"});
+    let id = state
+        .store
+        .ingest_original(
+            "photos",
+            path.to_str().unwrap(),
+            &json!({"contentHash":hash,"sizeBytes":9,"role":"raw_original"}),
+            &snapshot,
+        )
+        .unwrap();
+    let other = seed(&state, &root, "other.jpg");
+    let folder = state.jobs.add_folder("photos", ".").unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+    let mtime = metadata
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64;
+    state
+        .jobs
+        .record_file(
+            &folder.id,
+            path.to_str().unwrap(),
+            9,
+            mtime,
+            &id,
+            &hash,
+            None,
+        )
+        .unwrap();
+    let app = router(state.clone());
+    let route = format!("/libraries/photos/assets/{id}/versions/{hash}/download");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&route)
+                .header("authorization", format!("Bearer {SIGNING_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        "raw bytes"
+    );
+    assert_eq!(
+        call(
+            app.clone(),
+            "GET",
+            &format!("/libraries/photos/assets/{other}/versions/{hash}/download"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    std::fs::write(&path, b"changed raw bytes").unwrap();
+    assert_eq!(
+        call(app.clone(), "GET", &route, Value::Null).await.0,
+        StatusCode::CONFLICT
+    );
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(
+        call(app.clone(), "GET", &route, Value::Null).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let outside = root.join("outside.ARW");
+    std::fs::write(&outside, b"raw bytes").unwrap();
+    std::os::unix::fs::symlink(&outside, &path).unwrap();
+    assert_eq!(
+        call(app, "GET", &route, Value::Null).await.0,
+        StatusCode::CONFLICT
+    );
+}

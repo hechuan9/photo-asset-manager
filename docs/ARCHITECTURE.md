@@ -324,6 +324,8 @@ NAS 离线重建由 `POST /libraries/{library}/offline-rebuild` 创建任务，�
 
 专用 Skill 位于该包 `Skills/keeps-color`。`scripts/evaluate_ai.py` 仅供开发验证，显式指定 Codex、helper、darktable、输入和全新任务目录，默认 GPT-6 Luna；禁用通用 shell、插件及外部应用工具，只加载本地调色 MCP，保留事件与结构化结果，并核实模型所选候选确实已渲染。此脚本必须显式提供专属 `--codex-home` 和 `--account-email`，拒绝默认开发者目录及不匹配的账户，不继承环境中的 API 凭证。渲染测试通过 `KEEPS_TEST_DARKTABLE` 和 `KEEPS_TEST_RAW` 指定本机输入，未配置则跳过真实 RAW 集成测试。
 
-macOS「设置 → AI 修图」提供运行环境检查、指定邮箱登录、退出、连接测试与本地 RAW 试修图。原生 Swift runner 只调用应用 `Resources/AIEditing` 内的 Codex、helper、darktable 与 Skill，不搜索系统安装，不回退到开发账户。认证与日志位于 Application Support/Keeps/AIEditing；Codex 使用其中的独立 `codex` 目录、file 凭证和强制 ChatGPT 登录，每次请求核对实际邮箱。首次 OAuth 授权由用户在浏览器完成，登录状态可在应用重启后重新读取。设置测试仅生成本地候选，不自动发布 NAS 或更新图库缩略图；完整调色任务恢复仍由后续调度任务实现。
+macOS「设置 → AI 修图」提供运行环境检查、指定邮箱登录、退出、连接测试与固定 RAW 样片验证。原生 Swift runner 只调用应用 `Contents/Helpers` 内的 Codex、helper、darktable；Skill 位于 `Contents/Resources/AIEditing`，不搜索系统安装，不回退到开发账户。认证与日志位于 Application Support/Keeps/AIEditing；Codex 使用其中的独立 `codex` 目录、file 凭证和强制 ChatGPT 登录，每次请求核对实际邮箱。首次 OAuth 授权由用户在浏览器完成，登录状态可在应用重启后重新读取。设置测试仅生成本地候选，不自动发布 NAS 或更新图库缩略图；完整调色任务恢复仍由后续调度任务实现。
 
-本机调试打包可通过显式 `KEEPS_CODEX_BINARY` 与 `KEEPS_DARKTABLE_APP` 嵌入完整运行时，打包脚本记录版本与文件摘要并验证嵌套签名，绝不复制凭证；没有输入的普通开发/CI 包显示组件缺失。当前运行时装配仅用于本机调试，正式 TestFlight 分发、沙盒下所有子进程能力及第三方再分发审查仍未完成。
+Release 归档要求显式 `KEEPS_CODEX_BINARY` 与 `KEEPS_DARKTABLE_APP`，固定公开 Codex 0.161.0 和 darktable 5.6.2；缺少组件或签名身份即失败。当前 AI 发行包仅支持 Apple Silicon。构建记录版本/摘要并从内到外签名，子进程继承主应用沙盒；保留上游许可及对应源指向，绝不复制登录凭证。没有运行时输入的普通 Debug/CI 包显示组件缺失。
+
+固定验证样片为 `照片/2023/香港/DSC01194.ARW`，从已连接资料库按可用版本及路径精确匹配，经受鉴权的 `GET /libraries/{library}/assets/{id}/versions/{contentHash}/download` 下载。服务端确认资产归属、活跃追踪路径、文件身份/尺寸/修改时间，拒绝符号链接并只读流式响应。客户端按 SHA256 校验并缓存于自身容器，后续验证复用相同内容；样片不进入安装包。

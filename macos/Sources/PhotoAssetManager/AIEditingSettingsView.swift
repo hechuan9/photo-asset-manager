@@ -1,8 +1,9 @@
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
+import KeepsAPI
 
 struct AIEditingSettingsView: View {
+    let client: KeepsClient?
     @StateObject private var store = AIEditingSettingsStore()
 
     var body: some View {
@@ -70,7 +71,7 @@ struct AIEditingSettingsView: View {
     private var verificationSection: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 12) {
-                Text("先确认 AI 连接可用，再选择一张本地 RAW 照片完成试调色。原片保持不变，预览会发送给 AI 服务进行分析。")
+                Text("先确认 AI 连接可用，再使用固定样片完成试调色。原片保持不变，预览会发送给 AI 服务进行分析。")
                     .font(.callout).foregroundStyle(.secondary)
                 HStack {
                     Button("测试 AI 连接") { Task { await store.testConnection() } }
@@ -81,8 +82,10 @@ struct AIEditingSettingsView: View {
                     }
                     Spacer()
                 }
-                Button("选择 RAW 照片并试修图…", action: choosePhoto)
-                    .disabled(store.isBusy || !store.connectionVerified)
+                Text("固定样片：照片/2023/香港/DSC01194.ARW").font(.caption).textSelection(.enabled)
+                if client == nil { Text("请先在服务器设置中连接 NAS，以获取固定样片。").font(.caption).foregroundStyle(.secondary) }
+                Button("使用固定样片验证") { Task { await store.testFixedPhoto(client: client) } }
+                    .disabled(store.isBusy || !store.connectionVerified || client == nil)
                     .accessibilityIdentifier("ai-editing-test-photo")
             }.padding(8)
         } label: { Text("3. 验证与试修图") }
@@ -123,17 +126,4 @@ struct AIEditingSettingsView: View {
         }
     }
 
-    private func choosePhoto() {
-        let panel = NSOpenPanel()
-        panel.title = "选择试修图的 RAW 照片"
-        panel.prompt = "开始试修图"
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.rawImage]
-        panel.begin { response in
-            guard response == .OK, let url = panel.url else { return }
-            Task { @MainActor in await store.testPhoto(url) }
-        }
-    }
 }

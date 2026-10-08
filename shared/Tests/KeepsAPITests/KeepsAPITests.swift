@@ -7,6 +7,40 @@ private let assetJSON = """
 """
 
 struct KeepsAPITests {
+    @Test func originalDownloadUsesAuthenticatedVersionRouteAndPreservesExistingDestination() async throws {
+        let id = UUID()
+        let hash = String(repeating: "a", count: 64)
+        let fixture = Fixture { request in
+            #expect(request.httpMethod == "GET")
+            #expect(request.url!.path == "/api/libraries/library/assets/\(id.uuidString)/versions/\(hash)/download")
+            #expect(request.value(forHTTPHeaderField: "Accept") == "application/octet-stream")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-credential")
+            return (200, "raw bytes")
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("sample.ARW")
+        try await fixture.client.downloadVersion(assetID: id, contentHash: hash, to: destination)
+        #expect(try Data(contentsOf: destination) == Data("raw bytes".utf8))
+        await #expect(throws: (any Error).self) {
+            try await fixture.client.downloadVersion(assetID: id, contentHash: hash, to: destination)
+        }
+        #expect(try Data(contentsOf: destination) == Data("raw bytes".utf8))
+    }
+
+    @Test func originalDownloadFailureDoesNotPublishFileOrExposeResponseBody() async throws {
+        let fixture = Fixture { _ in (403, "private response text") }
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        do {
+            try await fixture.client.downloadVersion(assetID: UUID(), contentHash: String(repeating: "a", count: 64), to: destination)
+            Issue.record("Expected download failure")
+        } catch {
+            #expect(!error.localizedDescription.contains("private response text"))
+        }
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+    }
+
     @Test func trashDirectorySendsStableRequestIDAndReturnsAcceptedTask() async throws {
         let id = UUID()
         let fixture = Fixture { request in

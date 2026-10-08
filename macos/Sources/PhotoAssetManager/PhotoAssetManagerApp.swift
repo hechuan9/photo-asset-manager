@@ -68,7 +68,7 @@ struct PhotoAssetManagerApp: App {
                     }
                 }
                 .tabItem { Label("来源", systemImage: "folder") }
-                AIEditingSettingsView()
+                AIEditingSettingsView(client: library.client)
                     .tabItem { Label("AI 修图", systemImage: "slider.horizontal.3") }
             }
             .environmentObject(library)

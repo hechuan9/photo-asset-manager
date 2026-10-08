@@ -13,6 +13,8 @@ class AIRuntimePackagingTests(unittest.TestCase):
         environment = dict(os.environ)
         environment.pop("KEEPS_CODEX_BINARY", None)
         environment.pop("KEEPS_DARKTABLE_APP", None)
+        environment.pop("CONFIGURATION", None)
+        environment.pop("EXPANDED_CODE_SIGN_IDENTITY", None)
         environment.update(inputs)
         return subprocess.run(["bash", str(SCRIPT), str(destination)], env=environment,
                               capture_output=True, text=True)
@@ -23,6 +25,28 @@ class AIRuntimePackagingTests(unittest.TestCase):
             result = self.run_bundle(destination)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((destination / "AIEditing").exists())
+
+    def test_release_requires_explicit_runtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self.run_bundle(Path(temporary), CONFIGURATION="Release")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("must both be supplied", result.stderr)
+
+    def test_release_requires_signing_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex = root / "codex"
+            darktable = root / "darktable.app"
+            cli = darktable / "Contents/MacOS/darktable-cli"
+            cli.parent.mkdir(parents=True)
+            for binary in (codex, cli):
+                binary.write_text("#!/bin/sh\nexit 0\n")
+                binary.chmod(0o755)
+            (darktable / "Contents/Info.plist").write_text("test")
+            result = self.run_bundle(root / "Resources", CONFIGURATION="Release",
+                                     KEEPS_CODEX_BINARY=str(codex), KEEPS_DARKTABLE_APP=str(darktable))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("requires a code signing identity", result.stderr)
 
     def test_incomplete_configuration_fails_without_creating_runtime(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -42,6 +42,20 @@ public final class KeepsClient: Sendable {
     public func versionDetails(assetID: UUID) async throws -> KeepsAssetVersions {
         try await request("GET", library + ["assets", assetID.uuidString, "versions"])
     }
+    public func downloadVersion(assetID: UUID, contentHash: String, to destination: URL) async throws {
+        var request = try makeRequest("GET", library + ["assets", assetID.uuidString, "versions", contentHash, "download"])
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 3600
+        let (temporary, response) = try await session.download(for: request)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        guard let http = response as? HTTPURLResponse else { throw KeepsAPIError.invalidResponse }
+        guard 200..<300 ~= http.statusCode else { throw KeepsAPIError.http(http.statusCode, "原片下载失败。") }
+        let pending = destination.deletingLastPathComponent().appendingPathComponent(".download-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: pending) }
+        try FileManager.default.copyItem(at: temporary, to: pending)
+        // A completed cache entry is immutable; never overwrite an existing destination.
+        try FileManager.default.moveItem(at: pending, to: destination)
+    }
     public func setDefaultVersion(assetID: UUID, contentHash: String) async throws -> [KeepsAssetVersion] {
         let response: KeepsAssetVersions = try await request("PUT", library + ["assets", assetID.uuidString, "default-version"], body: JSONEncoder().encode(["contentHash": contentHash]))
         return response.items
