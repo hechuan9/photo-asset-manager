@@ -1306,6 +1306,9 @@ async fn imports_flatten_grouped_files_verify_and_publish_only_on_finish() {
         "card1/IMG.heic",
         "card2/IMG.CR3",
         "card2/IMG.xmp",
+        "card3/nested/IMG.JPG",
+        "card3/nested/IMG.JPG.xmp",
+        "card4/nested/IMG.JpEg",
     ];
     let data = b"imported original";
     let files:Vec<Value>=paths.iter().map(|p|json!({"id":uuid::Uuid::new_v4().to_string().to_uppercase(),"relativePath":p,"size":data.len(),"sha256":format!("{:x}",Sha256::digest(data))})).collect();
@@ -1331,7 +1334,10 @@ async fn imports_flatten_grouped_files_verify_and_publish_only_on_finish() {
             "IMG (1).CR3.xmp",
             "IMG (1).heic",
             "IMG (2).CR3",
-            "IMG (2).xmp"
+            "IMG (2).xmp",
+            "IMG (3).JPG",
+            "IMG (3).JPG.xmp",
+            "IMG (4).JpEg"
         ]
     );
     let finish_url = format!("/libraries/photos/imports/{batch}/finish");
@@ -1453,7 +1459,7 @@ async fn imports_reject_escape_symlinks_untracked_targets_and_preserve_late_coll
         "../IMG.RAW",
         "/IMG.RAW",
         "sub/../IMG.RAW",
-        "IMG.JPG",
+        "IMG.PNG",
         ".RAW",
     ] {
         let mut bad = manifest.clone();
