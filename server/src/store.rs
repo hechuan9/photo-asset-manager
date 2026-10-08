@@ -122,6 +122,7 @@ mod tests {
         store.patch_asset("lib", &id, &json!({"rating":5,"tags":["retain"]}))?;
         store.set_trashed("lib", &id, true)?;
         store.declare_generated_preview("lib", &id, &json!({"assetID":id,"role":"preview","fileObject":{"contentHash":"thumbnail","sizeBytes":4,"role":"preview"},"objectRef":{"bucket":"previews","key":"a.heic"},"pixelSize":{"width":512,"height":512}}))?;
+        store.initialize_negative("lib", &id)?;
         let snapshot = store.asset("lib", &id)?;
         let revision = store.library_revision("lib")?;
         let derivative = store.derivative_metadata(Some("lib"), &id, "preview")?;
@@ -129,6 +130,7 @@ mod tests {
         {
             let db = store.lock()?;
             db.execute_batch(include_str!("../tests/fixtures/legacy_schema.sql"))?;
+            crate::edits::remove_schema(&db)?;
             db.execute_batch("ALTER TABLE derivative_objects ADD COLUMN declared_event_seq INTEGER NOT NULL DEFAULT 42; DROP TABLE catalog_identity_roots; DROP TABLE catalog_identity_aliases; PRAGMA user_version=6;")?;
             db.execute("INSERT INTO ledger_events VALUES('lib',1,'old-op','old-device',1,'{}','user','asset','removed-asset','asset_snapshot_declared',?,'hash',NULL,'2024-01-01T00:00:00Z')", [json!({"assetSnapshotDeclared":{"snapshot":{"assetID":"removed-asset","originalFilename":"/volume2/myphoto/removed.jpg"}}}).to_string()])?;
         }
@@ -136,7 +138,10 @@ mod tests {
         assert!(Store::open(&path, false).is_err());
         let store = Store::open(&path, true)?;
         assert_eq!(store.asset("lib", &id)?, snapshot);
-        assert_eq!(store.library_revision("lib")?, revision);
+        assert_eq!(
+            store.library_revision("lib")?["revision"],
+            revision["revision"].as_i64().unwrap() + 1
+        );
         assert_eq!(
             store.derivative_metadata(Some("lib"), &id, "preview")?,
             derivative
@@ -147,7 +152,7 @@ mod tests {
             let db = store.lock()?;
             assert_eq!(
                 db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))?,
-                11
+                12
             );
             let legacy_count: i64 = db.query_row("SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN ('ledger_events','ledger_sequence_counters','device_states','archive_receipts','sync_conflicts')", [], |r| r.get(0))?;
             assert_eq!(legacy_count, 0);

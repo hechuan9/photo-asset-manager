@@ -70,6 +70,7 @@ impl IntoResponse for ApiError {
 pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .merge(crate::remote_worker::router())
+        .merge(crate::edits::router())
         .merge(crate::imports::router())
         .merge(crate::offline_rebuild::router(state.clone()))
         .route("/libraries/{library}/assets", get(assets))
@@ -165,6 +166,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(|| async { Json(json!({"status":"ok"})) }))
         .route("/derivatives/local-download/{token}", get(local_download))
         .route(
+            "/derivatives/local-upload/{token}",
+            axum::routing::put(crate::edits::upload),
+        )
+        .route(
             "/derivatives/local-standard/{token}",
             get(standard_download),
         )
@@ -232,19 +237,20 @@ fn signed_asset(state: &AppState, mut asset: Value) -> anyhow::Result<Value> {
     } else {
         json!({"downloadURL":state.previews.download_url(&preview["objectRef"])?,"width":preview["width"],"height":preview["height"],"version":preview["version"]})
     };
-    if let Some(id) = asset["id"].as_str().map(str::to_owned)
-        && let Some((thumbnail, standard)) =
-            state.store.cache_descriptors(&state.library_id, &id)?
-    {
-        asset["thumbnail"] = json!({"downloadURL":state.previews.download_url(&thumbnail["objectRef"])?,"width":thumbnail["width"],"height":thumbnail["height"],"version":thumbnail["version"]});
-        asset["standard"] = standard_descriptor(state, &state.library_id, &id, &standard)?;
-    }
     if let Some(id) = asset["id"].as_str().map(str::to_owned) {
-        asset["browseThumbnail"] = match state.store.browse_descriptor(&state.library_id, &id)? {
-            Some(d) => {
-                json!({"downloadURL":state.previews.download_url(&d["objectRef"])?,"width":d["width"],"height":d["height"],"version":d["version"]})
-            }
-            None => Value::Null,
+        let media = state.store.media_snapshot(&state.library_id, &id)?;
+        asset["negativeContentHash"] = media["negativeContentHash"].clone();
+        if !media["thumbnail"].is_null() {
+            let d = &media["thumbnail"];
+            asset["thumbnail"] = json!({"downloadURL":state.previews.download_url(&d["objectRef"])?,"width":d["width"],"height":d["height"],"version":d["version"]});
+            asset["standard"] =
+                standard_descriptor(state, &state.library_id, &id, &media["standard"])?;
+        }
+        asset["browseThumbnail"] = if media["browse"].is_null() {
+            Value::Null
+        } else {
+            let d = &media["browse"];
+            json!({"downloadURL":state.previews.download_url(&d["objectRef"])?,"width":d["width"],"height":d["height"],"version":d["version"]})
         };
     }
     Ok(asset)
@@ -895,6 +901,11 @@ pub(crate) fn standard_descriptor(
         ))
     {
         return Ok(Value::Null);
+    }
+    if !standard["objectRef"].is_null() {
+        return Ok(
+            json!({"downloadURL":state.previews.download_url(&standard["objectRef"])?,"width":standard["width"],"height":standard["height"],"version":standard["version"]}),
+        );
     }
     let object = json!({"bucket":"keeps-previews","key":format!("libraries/{library}/assets/{asset}/standard/{}",standard["version"].as_str().unwrap_or(""))});
     Ok(

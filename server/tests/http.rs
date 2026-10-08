@@ -209,7 +209,7 @@ async fn nas_catalog_commands_queries_authentication_and_restart() {
 }
 
 #[tokio::test]
-async fn client_cannot_upload_ledger_originals_or_derivatives() {
+async fn client_cannot_upload_ledger_originals_or_unsigned_derivatives() {
     let dir = tempfile::tempdir().unwrap();
     let app = router(state(dir.path()));
     for path in [
@@ -231,7 +231,7 @@ async fn client_cannot_upload_ledger_originals_or_derivatives() {
         call(app, "PUT", "/derivatives/local-upload/anything", json!({}))
             .await
             .0,
-        StatusCode::NOT_FOUND
+        StatusCode::BAD_REQUEST
     );
 }
 

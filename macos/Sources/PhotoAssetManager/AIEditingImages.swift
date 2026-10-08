@@ -1,0 +1,58 @@
+import CoreImage
+import CryptoKit
+import Foundation
+import ImageIO
+
+struct AIEditingImageInfo: Sendable {
+    let hash: String
+    let size: Int64
+    let width: Int
+    let height: Int
+}
+
+enum AIEditingImages {
+    static func inspect(_ url: URL, image: Bool) async throws -> AIEditingImageInfo {
+        let task = Task.detached(priority: .utility) {
+            let file = try FileHandle(forReadingFrom: url)
+            defer { try? file.close() }
+            var hash = SHA256(), size: Int64 = 0
+            while let data = try file.read(upToCount: 1024 * 1024), !data.isEmpty {
+                try Task.checkCancellation()
+                hash.update(data: data); size += Int64(data.count)
+            }
+            var width = 0, height = 0
+            if image {
+                guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                      let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                      let w = properties[kCGImagePropertyPixelWidth] as? Int,
+                      let h = properties[kCGImagePropertyPixelHeight] as? Int else { throw AIEditingFailure("无法读取调色输出。") }
+                width = w; height = h
+            }
+            return AIEditingImageInfo(hash: hash.finalize().map { String(format: "%02x", $0) }.joined(), size: size, width: width, height: height)
+        }
+        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+    }
+
+    static func derivatives(from source: URL, directory: URL) async throws -> [String: URL] {
+        let task = Task.detached(priority: .utility) {
+            guard let image = CIImage(contentsOf: source, options: [.applyOrientationProperty: true]),
+                  image.extent.width > 0, image.extent.height > 0, !image.extent.isInfinite,
+                  let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { throw AIEditingFailure("无法生成调色展示图。") }
+            let context = CIContext()
+            var outputs: [String: URL] = [:]
+            for (role, limit) in [("standard", 0.0), ("thumbnail", 512.0), ("browse", 64.0)] {
+                try Task.checkCancellation()
+                let scale = limit == 0 ? 1 : min(1, limit / max(image.extent.width, image.extent.height))
+                let resized = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                let url = directory.appendingPathComponent(role + ".heic")
+                let pending = directory.appendingPathComponent(UUID().uuidString + ".heic")
+                defer { try? FileManager.default.removeItem(at: pending) }
+                try context.writeHEIFRepresentation(of: resized, to: pending, format: .RGBA8, colorSpace: colorSpace, options: [:])
+                try Data(contentsOf: pending, options: .mappedIfSafe).write(to: url, options: .atomic)
+                outputs[role] = url
+            }
+            return outputs
+        }
+        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+    }
+}

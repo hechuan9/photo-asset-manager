@@ -40,12 +40,8 @@ pub fn status(db: &Connection, library: &str) -> Result<Value> {
 
 impl Store {
     pub fn browse_descriptor(&self, library: &str, asset: &str) -> Result<Option<Value>> {
-        let row: Option<String> = self.lock()?.query_row(
-            "SELECT c.browse_thumbnail FROM media_cache c JOIN catalog_assets a ON a.library_id=c.library_id AND a.id=c.asset_id LEFT JOIN catalog_defaults d ON d.library_id=a.library_id AND d.asset_id=a.id WHERE c.library_id=?1 AND c.asset_id=?2 AND c.status='ready' AND c.spec=?3 AND c.source_hash=coalesce(d.content_hash,a.content_hash) AND c.browse_source_version=json_extract(c.thumbnail,'$.version') AND c.browse_spec=?4 AND json_extract(c.browse_thumbnail,'$.sourceThumbnailVersion')=c.browse_source_version AND json_extract(c.browse_thumbnail,'$.spec')=?4",
-            params![library,asset,cache_pipeline::spec()?,SPEC], |r| r.get(0),
-        ).optional()?.flatten();
-        row.map(|v| serde_json::from_str(&v).map_err(Into::into))
-            .transpose()
+        let media = self.media_snapshot(library, asset)?;
+        Ok((!media["browse"].is_null()).then(|| media["browse"].clone()))
     }
 }
 
@@ -131,7 +127,7 @@ fn publish(
 mod tests {
     use super::*;
     fn seed(store: &Store) -> Result<()> {
-        store.lock()?.execute("INSERT INTO catalog_assets VALUES('lib','asset','{}','hash','fingerprint','2024-01-01','photo.jpg',0,'none',NULL,1)", [])?;
+        store.lock()?.execute("INSERT INTO catalog_assets(library_id,id,snapshot,content_hash,fingerprint,sort_time,filename,rating,flag,color,trashed) VALUES('lib','asset','{}','hash','fingerprint','2024-01-01','photo.jpg',0,'none',NULL,1)", [])?;
         store.lock()?.execute("INSERT INTO media_cache(library_id,asset_id,source_hash,spec,status,thumbnail,browse_source_version,browse_spec) VALUES('lib','asset','hash',?,'ready',?, 'preview-v1',?)",params![cache_pipeline::spec()?,json!({"version":"preview-v1","objectRef":{"bucket":"keeps-previews","key":"libraries/lib/assets/asset/derivatives/thumbnail/missing.heic"}}).to_string(),SPEC])?;
         Ok(())
     }

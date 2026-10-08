@@ -99,6 +99,12 @@ private final class AIProcessOutput: @unchecked Sendable {
 
     func cancel() { cancelled = true }
 
+    func stopForExit() {
+        cancelled = true
+        guard let process, process.isRunning else { return }
+        for pid in processTree(process.processIdentifier).reversed() { Darwin.kill(pid, SIGKILL) }
+    }
+
     private func processTree(_ root: Int32) -> [Int32] {
         // Stop the renderer and MCP descendants too, so cancellation releases source files.
         let listing = Process(), pipe = Pipe()

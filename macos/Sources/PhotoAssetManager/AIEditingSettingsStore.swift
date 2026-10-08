@@ -126,16 +126,41 @@ import CryptoKit
         await perform("正在执行单张 AI 调色测试") { try await self.runPhoto(source) }
     }
 
-    private func runPhoto(_ source: URL) async throws {
+    func validateEditingAccount() throws {
+        try prepareDirectories(); try checkRuntime(); try readAccount(); try requireAccount()
+    }
+
+    func gradePhoto(_ source: URL, job: URL) async throws -> AIGradeResult {
+        guard !isBusy else { throw AIEditingFailure("已有 AI 操作正在执行。") }
+        isBusy = true
+        defer { isBusy = false }
+        try validateEditingAccount()
+        let result = job.appendingPathComponent("result.json")
+        if FileManager.default.fileExists(atPath: result.path) {
+            do { return try Self.gradeResult(in: job) }
+            catch {
+                // Preserve rejected model output for diagnosis, then allow an explicit retry.
+                let rejected = job.appendingPathComponent("rejected-result-" + UUID().uuidString + ".json")
+                try FileManager.default.moveItem(at: result, to: rejected)
+            }
+        }
+        try await runPhoto(source, job: job)
+        return try Self.gradeResult(in: job)
+    }
+
+    func stopForExit() { runner.stopForExit() }
+
+    private func runPhoto(_ source: URL, job requestedJob: URL? = nil) async throws {
         self.resultPreview = nil; self.resultSummary = nil
         try self.prepareDirectories(); try self.checkRuntime(); try self.readAccount(); try self.requireAccount()
-        guard self.connectionVerified else { throw AIEditingFailure("请先完成模型连接测试。") }
-        let allowed = ["arw", "3fr", "dng", "cr2", "cr3", "nef", "raf", "orf", "rw2", "jpg", "jpeg"]
-        guard allowed.contains(source.pathExtension.lowercased()) else { throw AIEditingFailure("当前测试支持 RAW 和 JPEG 照片。") }
+        guard requestedJob != nil || self.connectionVerified else { throw AIEditingFailure("请先完成模型连接测试。") }
+        let allowed = ["arw", "3fr", "dng", "cr2", "cr3", "nef", "raf", "orf", "rw2", "jpg", "jpeg", "heic", "heif"]
+        guard allowed.contains(source.pathExtension.lowercased()) else { throw AIEditingFailure("当前支持 RAW、JPEG 和 HEIF 照片。") }
         let accessed = source.startAccessingSecurityScopedResource()
         defer { if accessed { source.stopAccessingSecurityScopedResource() } }
         guard FileManager.default.isReadableFile(atPath: source.path) else { throw AIEditingFailure("无法读取选中的照片。") }
-        let job = try self.newJob("photo")
+        let job = try requestedJob ?? self.newJob("photo")
+        try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
         let skill = try Data(contentsOf: self.runtime.appendingPathComponent("SKILL.md"))
         let schema: [String: Any] = ["type": "object", "properties": [
             "status": ["type": "string", "enum": ["selected", "unchanged", "needs_review"]],
@@ -283,6 +308,28 @@ import CryptoKit
         result = result.replacingOccurrences(of: #"\"data\"\s*:\s*\"[A-Za-z0-9+/=]{256,}\""#, with: "\"data\":\"[image omitted]\"", options: .regularExpression)
         return result
     }
+    static func gradeResult(in job: URL) throws -> AIGradeResult {
+        let checked = try validateResult(in: job)
+        let result = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("result.json"))) as! [String: Any]
+        guard checked.selected else {
+            return AIGradeResult(status: result["status"] as! String, reason: checked.reason)
+        }
+        let selection = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("render/selection.json"))) as! [String: Any]
+        let state = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("render/candidates.json"))) as! [String: Any]
+        guard let full = selection["fullSize"] as? String,
+              let id = result["candidateID"] as? String,
+              let candidates = state["candidates"] as? [[String: Any]],
+              let encoded = candidates.first(where: { $0["id"] as? String == id })?["recipe"] as? String,
+              let recipe = Data(base64Encoded: encoded),
+              (try JSONSerialization.jsonObject(with: recipe)) is [String: Any] else {
+            throw AIEditingFailure("调色配方缺失，无法无损保存。")
+        }
+        let fullURL = URL(fileURLWithPath: full)
+        let xmpURL = fullURL.deletingPathExtension().appendingPathExtension("xmp")
+        return AIGradeResult(status: "selected", reason: checked.reason, fullSize: fullURL,
+            recipeJSON: String(decoding: recipe, as: UTF8.self), xmp: try String(contentsOf: xmpURL, encoding: .utf8))
+    }
+
     struct ValidatedResult { let selected: Bool; let preview: URL?; let reason: String }
     static func validateResult(in job: URL) throws -> ValidatedResult {
         func object(_ path: String) throws -> [String: Any] {
@@ -311,4 +358,12 @@ import CryptoKit
         }
         return ValidatedResult(selected: true, preview: URL(fileURLWithPath: preview), reason: reason)
     }
+}
+
+struct AIGradeResult: Codable, Sendable {
+    var status: String
+    var reason: String
+    var fullSize: URL? = nil
+    var recipeJSON: String? = nil
+    var xmp: String? = nil
 }

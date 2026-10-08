@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 struct AIEditingSettingsView: View {
-    @StateObject private var store = AIEditingSettingsStore()
+    @ObservedObject var store: AIEditingSettingsStore
 
     var body: some View {
         ScrollView {

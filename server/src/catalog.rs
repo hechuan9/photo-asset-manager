@@ -20,7 +20,7 @@ fn missing_paths_query(scope: &str) -> Result<String> {
     ))
 }
 
-const VERSION: i64 = 11;
+const VERSION: i64 = 12;
 const DIRECTORY_ASSET_SET: &str =
     " AND a.id IN (SELECT f.asset_id FROM catalog_paths f WHERE f.library_id=? AND ";
 // Ordering by path must not make SQLite scan the whole library for every asset.
@@ -43,6 +43,11 @@ pub fn ensure_schema(db: &mut Connection, allow_migrate: bool) -> Result<()> {
         "database schema {version} is newer than this server supports ({VERSION})"
     );
     if version == VERSION {
+        db.prepare("SELECT negative_hash,edit_revision,negative_selected,last_edit_request FROM catalog_assets LIMIT 0")?;
+        db.prepare(
+            "SELECT negative_hash,exposure_ev,standard,thumbnail,browse,recipe FROM photo_edits LIMIT 0",
+        )?;
+        db.prepare("SELECT request_id,payload,response FROM photo_edit_requests LIMIT 0")?;
         db.prepare("SELECT library_id,path,retained_path,basis,reason FROM catalog_deprecated_files LIMIT 0")?;
         db.prepare("SELECT library_id,asset_id,root_id FROM catalog_identity_roots LIMIT 0")?;
         db.prepare("SELECT library_id,root_id,asset_id FROM catalog_identity_aliases LIMIT 0")?;
@@ -139,6 +144,9 @@ pub fn ensure_schema(db: &mut Connection, allow_migrate: bool) -> Result<()> {
         crate::photo_relations::migrate(&tx)?;
     }
     crate::browse_cache::migrate(&tx)?;
+    if version < 12 {
+        crate::edits::migrate(&tx)?;
+    }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
     Ok(())
@@ -159,7 +167,7 @@ fn existing(db: &Connection, lib: &str, id: &str) -> Result<Option<Value>> {
         .transpose()
 }
 fn save(db: &Connection, lib: &str, a: &Value) -> Result<()> {
-    db.execute("INSERT INTO catalog_assets VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(library_id,id) DO UPDATE SET snapshot=excluded.snapshot,content_hash=excluded.content_hash,fingerprint=excluded.fingerprint,sort_time=excluded.sort_time,filename=excluded.filename,rating=excluded.rating,flag=excluded.flag,color=excluded.color,trashed=excluded.trashed",params![lib,text(a,"id")?,a.to_string(),text(a,"contentFingerprint")?,text(a,"metadataFingerprint")?,a["captureTime"].as_str().unwrap_or(text(a,"createdAt")?),text(a,"originalFilename")?,a["rating"].as_i64().unwrap_or(0),a["flagState"].as_str().unwrap_or("unflagged"),a["colorLabel"].as_str(),a["trashed"].as_bool().unwrap_or(false)])?;
+    db.execute("INSERT INTO catalog_assets(library_id,id,snapshot,content_hash,fingerprint,sort_time,filename,rating,flag,color,trashed) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(library_id,id) DO UPDATE SET snapshot=excluded.snapshot,content_hash=excluded.content_hash,fingerprint=excluded.fingerprint,sort_time=excluded.sort_time,filename=excluded.filename,rating=excluded.rating,flag=excluded.flag,color=excluded.color,trashed=excluded.trashed",params![lib,text(a,"id")?,a.to_string(),text(a,"contentFingerprint")?,text(a,"metadataFingerprint")?,a["captureTime"].as_str().unwrap_or(text(a,"createdAt")?),text(a,"originalFilename")?,a["rating"].as_i64().unwrap_or(0),a["flagState"].as_str().unwrap_or("unflagged"),a["colorLabel"].as_str(),a["trashed"].as_bool().unwrap_or(false)])?;
     Ok(())
 }
 
@@ -223,6 +231,11 @@ fn not_found() -> anyhow::Error {
 }
 fn decorate(db: &Connection, lib: &str, mut a: Value) -> Result<Value> {
     let id = text(&a, "id")?.to_owned();
+    a["negativeContentHash"] = json!(db.query_row(
+        "SELECT negative_hash FROM catalog_assets WHERE library_id=? AND id=?",
+        params![lib, id],
+        |r| r.get::<_, Option<String>>(0)
+    )?);
     let mut paths = db.prepare_cached(ASSET_PATHS)?;
     a["paths"] = json!(
         paths
@@ -604,6 +617,7 @@ pub(crate) fn merge_unlocated_identity(
         return Ok(());
     };
     let mut current = existing(db, lib, target)?.context("identity merge target missing")?;
+    crate::edits::merge(db, lib, old, target)?;
     let tags: BTreeSet<String> = [&current, &previous]
         .into_iter()
         .flat_map(|s| {
@@ -682,6 +696,8 @@ fn metadata_identity_updated(
     metadata: (&str, u64, &str),
 ) -> Result<()> {
     let (new, size, mtime) = metadata;
+    db.execute("UPDATE catalog_assets SET negative_hash=?4,edit_revision=edit_revision+1 WHERE library_id=?1 AND id=?2 AND negative_hash=?3",params![lib,id,old,new])?;
+    db.execute("UPDATE photo_edits SET negative_hash=?4 WHERE library_id=?1 AND asset_id=?2 AND negative_hash=?3",params![lib,id,old,new])?;
     let size = i64::try_from(size)?;
     db.execute("INSERT OR REPLACE INTO catalog_files SELECT library_id,asset_id,?4,?5,role,holder,availability FROM catalog_files WHERE library_id=?1 AND asset_id=?2 AND content_hash=?3",params![lib,id,old,new,size])?;
     db.execute("INSERT OR IGNORE INTO catalog_versions SELECT library_id,asset_id,?4,visual_hash,capture_key,width,height,priority,json_set(evidence,'$.capture.contentFingerprint',?4) FROM catalog_versions WHERE library_id=?1 AND asset_id=?2 AND content_hash=?3",params![lib,id,old,new])?;
@@ -1060,7 +1076,7 @@ mod tests {
             asset["id"] = json!(id);
             asset["captureTime"] = json!(time);
             store.lock()?.execute(
-                "INSERT INTO catalog_assets VALUES ('lib',?,?, 'hash','fingerprint',?,'photo.jpg',1,'unflagged',NULL,0)",
+                "INSERT INTO catalog_assets(library_id,id,snapshot,content_hash,fingerprint,sort_time,filename,rating,flag,color,trashed) VALUES ('lib',?,?, 'hash','fingerprint',?,'photo.jpg',1,'unflagged',NULL,0)",
                 params![id, asset.to_string(), time],
             )?;
             store.lock()?.execute(
@@ -1436,6 +1452,7 @@ mod tests {
         drop(store);
         let db = Connection::open(&path)?;
         crate::revisions::remove_schema(&db)?;
+        crate::edits::remove_schema(&db)?;
         db.execute_batch("DROP TABLE catalog_identity_roots; DROP TABLE catalog_identity_aliases; DROP TABLE catalog_hidden_directories; DROP TABLE catalog_versions; DROP TABLE catalog_version_paths; DROP TABLE catalog_defaults; PRAGMA user_version=1;")?;
         drop(db);
         assert!(Store::open(&path, false).is_err());

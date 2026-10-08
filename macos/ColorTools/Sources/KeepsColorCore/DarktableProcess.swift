@@ -7,7 +7,7 @@ public final class DarktableProcess {
     public let input: URL
     public let baseline: String
     public let supportsLocalMasks: Bool
-    public let isJPEG: Bool
+    public let isDisplayReferred: Bool
     public let store: CandidateStore
     private let executable: URL
     private let lock: FileHandle
@@ -23,8 +23,6 @@ public final class DarktableProcess {
         guard flock(lock.fileDescriptor, LOCK_EX | LOCK_NB) == 0 else { throw ColorToolError("Task already has an active worker") }
         let imageSource = CGImageSourceCreateWithURL(source as CFURL, nil)
         let properties = imageSource.flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [CFString: Any] }
-        isJPEG = imageSource.map { CGImageSourceGetType($0) as String? == "public.jpeg" } ?? false
-        supportsLocalMasks = !isJPEG && (properties?[kCGImagePropertyOrientation] as? NSNumber)?.intValue == 1
         let digest = try contentHash(source)
         store = try CandidateStore(directory: directory, sourceHash: digest)
         input = directory.appendingPathComponent("input." + source.pathExtension.lowercased())
@@ -56,6 +54,10 @@ public final class DarktableProcess {
             try Data(contentsOf: generated).write(to: baselineURL, options: .atomic)
         }
         baseline = try String(contentsOf: baselineURL, encoding: .utf8)
+        let document = try XMLDocument(xmlString: baseline)
+        let description = try document.nodes(forXPath: "//*[local-name()='Description']").first as? XMLElement
+        isDisplayReferred = description?.attribute(forName: "darktable:iop_order_version")?.stringValue == "5"
+        supportsLocalMasks = !isDisplayReferred && (properties?[kCGImagePropertyOrientation] as? NSNumber)?.intValue == 1
     }
 
     public func render(xmp: String, candidateID: String, full: Bool = false) throws -> URL {

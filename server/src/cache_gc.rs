@@ -43,7 +43,8 @@ fn generated_key(object: &Value) -> Result<(&str, &str)> {
         && parts[0] == "libraries"
         && parts[2] == "assets"
         && parts[4] == "derivatives"
-        && ["preview", "thumbnail", "browse"].contains(&parts[5])
+        && (["preview", "thumbnail", "browse"].contains(&parts[5])
+            || parts[5] == "standard" && parts[6].starts_with("edit-"))
         && parts[6].ends_with(".heic")
         && parts.iter().all(|part| {
             !part.is_empty() && ![".", ".."].contains(part) && !part.contains(['\\', '\0'])
@@ -153,6 +154,7 @@ impl Store {
         let mut deleted = 0;
         for (bucket, key, attempts) in rows.into_iter().take(LIMIT) {
             let referenced: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM derivative_objects WHERE object_bucket=?1 AND object_key=?2) OR EXISTS(SELECT 1 FROM media_cache WHERE json_extract(thumbnail,'$.objectRef.bucket')=?1 AND json_extract(thumbnail,'$.objectRef.key')=?2) OR EXISTS(SELECT 1 FROM media_cache WHERE json_extract(browse_thumbnail,'$.objectRef.bucket')=?1 AND json_extract(browse_thumbnail,'$.objectRef.key')=?2)",params![bucket,key],|r|r.get(0))?;
+            let referenced = referenced || tx.query_row("SELECT EXISTS(SELECT 1 FROM photo_edits WHERE json_extract(standard,'$.objectRef.key')=?1 OR json_extract(thumbnail,'$.objectRef.key')=?1 OR json_extract(browse,'$.objectRef.key')=?1)", [&key], |r|r.get::<_,bool>(0))?;
             if referenced {
                 tx.execute(
                     "UPDATE media_cache_gc SET not_before=? WHERE bucket=? AND object_key=?",

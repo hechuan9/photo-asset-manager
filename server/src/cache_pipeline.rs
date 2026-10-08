@@ -207,10 +207,16 @@ impl Store {
         Ok(self.lock()?.execute("UPDATE media_cache SET status='pending',attempts=0,available_at=0,last_error=NULL,updated_at=0 WHERE rowid IN (SELECT rowid FROM media_cache WHERE library_id=? AND status IN ('pending','failed') AND last_error IS NOT NULL ORDER BY updated_at LIMIT 20)",[library])?)
     }
     pub fn cache_descriptors(&self, library: &str, asset: &str) -> Result<Option<(Value, Value)>> {
-        let row: Option<(String,String)>=self.lock()?.query_row("SELECT thumbnail,standard FROM media_cache c JOIN catalog_assets a ON a.library_id=c.library_id AND a.id=c.asset_id LEFT JOIN catalog_defaults d ON d.library_id=c.library_id AND d.asset_id=c.asset_id WHERE c.library_id=? AND c.asset_id=? AND c.status='ready' AND c.source_hash=coalesce(d.content_hash,a.content_hash) AND c.spec=?",params![library,asset,spec()?],|r| Ok((r.get(0)?,r.get(1)?))).optional()?;
-        row.map(|(a, b)| Ok((serde_json::from_str(&a)?, serde_json::from_str(&b)?)))
-            .transpose()
+        let media = self.media_snapshot(library, asset)?;
+        if media["thumbnail"].is_null() {
+            return Ok(None);
+        }
+        Ok(Some((
+            media["thumbnail"].clone(),
+            media["standard"].clone(),
+        )))
     }
+
     fn claim_cache(&self) -> Result<Option<(String, String, String)>> {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -719,7 +725,7 @@ mod tests {
     fn seed(store: &Store, n: usize) -> Result<()> {
         for index in 0..n {
             let id = format!("00000000-0000-0000-0000-{index:012}");
-            store.lock()?.execute("INSERT INTO catalog_assets VALUES('lib',?,?,?,'fingerprint','2024-01-01','photo.jpg',3,'picked',NULL,0)",params![id,json!({"id":id,"rating":3,"tags":["keep"]}).to_string(),format!("hash{index}")])?;
+            store.lock()?.execute("INSERT INTO catalog_assets(library_id,id,snapshot,content_hash,fingerprint,sort_time,filename,rating,flag,color,trashed) VALUES('lib',?,?,?,'fingerprint','2024-01-01','photo.jpg',3,'picked',NULL,0)",params![id,json!({"id":id,"rating":3,"tags":["keep"]}).to_string(),format!("hash{index}")])?;
         }
         Ok(())
     }
@@ -889,7 +895,7 @@ mod tests {
                 json!({"path":source,"sizeBytes":999,"mtimeNs":0}).to_string()
             ],
         )?;
-        store.lock()?.execute("INSERT INTO catalog_assets VALUES('lib','new','{}','newhash','fingerprint','2024-01-01','photo.jpg',0,'picked',NULL,0)", [])?;
+        store.lock()?.execute("INSERT INTO catalog_assets(library_id,id,snapshot,content_hash,fingerprint,sort_time,filename,rating,flag,color,trashed) VALUES('lib','new','{}','newhash','fingerprint','2024-01-01','photo.jpg',0,'picked',NULL,0)", [])?;
         let stop = AtomicBool::new(false);
         maintain(&store, &jobs, &previews, &stop)?;
         let status = store.cache_status("lib")?;

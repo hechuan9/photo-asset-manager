@@ -19,8 +19,10 @@ extension FocusedValues {
 
 struct ContentView: View {
     @EnvironmentObject private var library: LibraryStore
+    @EnvironmentObject private var batch: AIEditingBatchStore
     @Environment(\.openWindow) private var openWindow
     @State private var showsImport = false
+    @State private var importWindowID = UUID()
     @State private var importStore: ImportStore?
     @FocusState private var galleryFocused: Bool
 
@@ -57,13 +59,26 @@ struct ContentView: View {
         .foregroundStyle(WorkspaceStyle.text)
         .preferredColorScheme(.dark)
         .tint(WorkspaceStyle.accent)
-        .disabled(library.isDirectoryOperationBlocking)
-        .overlay { if library.isDirectoryOperationBlocking { Color.clear.contentShape(Rectangle()).onTapGesture {} } }
+        .disabled(library.isOperationBlocking)
+        .overlay { if library.isOperationBlocking { Color.clear.contentShape(Rectangle()).onTapGesture {} } }
         .sheet(isPresented: $showsImport, onDismiss: { library.refreshNavigation(); library.refresh(force: true) }) {
-            if let importStore { ImportView(store: importStore, initialTarget: library.query.directory).disabled(library.isDirectoryOperationBlocking) }
+            if let importStore {
+                ImportView(store: importStore, initialTarget: library.query.directory)
+                    .disabled(library.isOperationBlocking)
+                    .onAppear { library.openImportWindows.insert(importWindowID) }
+                    .onDisappear { library.openImportWindows.remove(importWindowID) }
+            }
         }
         .overlay {
-            if library.isMovingDirectory {
+            if batch.isBlocking {
+                AIBatchProgressView(batch: batch)
+            } else if library.isAISettingsBusy {
+                VStack(spacing: 16) {
+                    ProgressView()
+                    Text("AI 修图设置正在运行，请在设置中查看进度。")
+                    Button("取消", action: batch.editor.cancel)
+                }.padding(28).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            } else if library.isMovingDirectory {
                 DirectoryMoveProgressView(library: library)
             } else if library.photoMove != nil {
                 PhotoMoveProgressView(library: library)
@@ -71,11 +86,13 @@ struct ContentView: View {
         }
         .sheet(item: $library.directoryToRename) { directory in
             DirectoryRenameSheet(library: library, directory: directory)
+                .disabled(library.isAIEditingBlocking || library.isAISettingsBusy)
         }
         .sheet(item: $library.directoryToTrash) { directory in
             DirectoryTrashSheet(library: library, directory: directory)
+                .disabled(library.isAIEditingBlocking || library.isAISettingsBusy)
         }
-        .task { library.refresh(); library.refreshNavigation(force: false) }
+        .task { batch.restore(library: library); library.refresh(); library.refreshNavigation(force: false) }
         .prefetchKeepsThumbnails(configuration: library.configuration)
         .onChange(of: library.query) { _, _ in library.refresh() }
         .onChange(of: library.query.directory) { _, _ in detailMode = false }
@@ -323,12 +340,29 @@ struct ContentView: View {
                     Text("选择照片以查看信息").font(.system(size: 12)).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            Divider()
+            Button { batch.prepare(library: library) } label: {
+                Label(aiEditingTitle, systemImage: "slider.horizontal.3").frame(maxWidth: .infinity)
+            }.disabled(!canStartAIEditing).padding(16)
         }.background(WorkspaceStyle.panel)
+    }
+
+    private var aiEditingTitle: String {
+        library.selectedIDs.count > 1 ? "AI 调色（\(library.selectedIDs.count) 张）" : "AI 调色"
+    }
+
+    private var canStartAIEditing: Bool {
+        !library.selectedIDs.isEmpty && library.client != nil && !library.isOperationBlocking &&
+        !library.isMutating && !library.isSelectingAll && !library.isCheckingConnection && !library.isUpdatingHiddenDirectory &&
+        !library.isImportingPhotos && library.directoryToRename == nil && library.directoryToTrash == nil
     }
 
     private var inspectorRail: some View {
         VStack {
             railButton("照片信息", icon: "info.circle", selected: showsInspector) { showsInspector.toggle() }
+            railButton(aiEditingTitle, icon: "slider.horizontal.3", selected: false) { batch.prepare(library: library) }
+                .disabled(!canStartAIEditing)
+                .accessibilityIdentifier("ai-editing-selected-photos")
             Spacer()
         }.padding(.top, 18).frame(width: 48).background(WorkspaceStyle.panel)
     }
@@ -520,5 +554,60 @@ private struct SidebarLayoutAutosave: NSViewRepresentable {
                 ancestor = view.superview
             }
         }
+    }
+}
+
+
+private struct AIBatchProgressView: View {
+    @Environment(\.openSettings) private var openSettings
+    @ObservedObject var batch: AIEditingBatchStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(batch.isAwaitingConfirmation ? "为 \(batch.totalCount) 张照片进行 AI 调色？" : "AI 调色 · \(batch.completedCount) / \(batch.totalCount) 张")
+                .font(.title2)
+            if batch.isAwaitingConfirmation {
+                Text("本次固定处理已选中的 \(batch.totalCount) 张照片。AI 在线分析预览，调色由这台 Mac 逐张执行，原图保持不变。")
+                Text("运行期间将暂停客户端的其他操作。你可以随时取消，已完成的照片会保留调整。")
+                    .foregroundStyle(.secondary)
+            } else {
+                ProgressView(value: Double(batch.completedCount), total: Double(max(batch.totalCount, 1)))
+                if !batch.currentName.isEmpty { Text(batch.currentName).lineLimit(2) }
+            }
+            Text(batch.status).font(.callout)
+            if batch.isFinished, let batchState = batch.batch {
+                ScrollView {
+                    LazyVStack(alignment: .leading) {
+                        ForEach(batchState.items.filter { $0.phase == .review }) { item in
+                            Text("\(item.name)：\(item.result?.reason ?? "需要检查")").font(.caption)
+                        }
+                    }
+                }.frame(maxHeight: 120)
+            }
+            if let error = batch.errorMessage {
+                ScrollView { Text(error).foregroundStyle(.red).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                    .frame(maxHeight: 180)
+            }
+            HStack {
+                Spacer()
+                if batch.isAwaitingConfirmation {
+                    Button("取消", action: batch.dismiss)
+                    Button("AI 设置") { openSettings() }
+                    Button("开始调色 \(batch.totalCount) 张", action: batch.start).buttonStyle(.borderedProminent)
+                } else if batch.isRunning {
+                    Button("取消调色", action: batch.cancel)
+                } else {
+                    Button(batch.isFinished ? "关闭" : "放弃剩余并关闭", action: batch.dismiss)
+                    if batch.errorMessage != nil && !batch.isFinished {
+                        Button("AI 设置") { openSettings() }
+                        Button("重试", action: batch.retry).buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+        }
+        .padding(28).frame(width: 500)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.secondary.opacity(0.3)))
+        .padding(24)
     }
 }

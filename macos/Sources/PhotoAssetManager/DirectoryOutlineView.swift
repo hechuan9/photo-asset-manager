@@ -287,7 +287,7 @@ struct DirectoryOutlineView: NSViewRepresentable {
         }
 
         func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
-            guard !library.isDirectoryOperationBlocking, outlineView.selectedRowIndexes.count <= 1,
+            guard !library.isOperationBlocking, outlineView.selectedRowIndexes.count <= 1,
                   let node = item as? Node,
                   !roots.contains(where: { $0.path == node.path }) else { return nil }
             dragGeneration = library.navigationGeneration
@@ -353,9 +353,9 @@ struct DirectoryOutlineView: NSViewRepresentable {
             guard let item = item as? Node else { return false }
             return children[item.path].map { !$0.isEmpty || errors[item.path] != nil } ?? (directory(item.path)?.hasChildren == true)
         }
-        func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool { !library.isDirectoryOperationBlocking && item is Node }
-        func outlineView(_ outlineView: NSOutlineView, shouldExpandItem item: Any) -> Bool { !library.isDirectoryOperationBlocking }
-        func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool { !library.isDirectoryOperationBlocking }
+        func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool { !library.isOperationBlocking && item is Node }
+        func outlineView(_ outlineView: NSOutlineView, shouldExpandItem item: Any) -> Bool { !library.isOperationBlocking }
+        func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool { !library.isOperationBlocking }
         func outlineViewItemDidExpand(_ notification: Notification) {
             guard !updating, let item = notification.userInfo?["NSObject"] as? Node else { return }
             library.setDirectoryExpanded(item.path, expanded: true)
@@ -370,7 +370,7 @@ struct DirectoryOutlineView: NSViewRepresentable {
             if library.query.directory != item.path { library.showLibrary(directory: item.path) }
         }
         func contextMenu(for item: Any) -> NSMenu? {
-            guard !library.isDirectoryOperationBlocking, let node = item as? Node, let outline else { return nil }
+            guard !library.isOperationBlocking, let node = item as? Node, let outline else { return nil }
             let menu = NSMenu()
             if outline.isExpandable(node) {
                 let expanded = outline.isItemExpanded(node)
@@ -411,28 +411,28 @@ struct DirectoryOutlineView: NSViewRepresentable {
         }
 
         @objc private func trashDirectory(_ sender: NSMenuItem) {
-            guard !library.isDirectoryOperationBlocking, let node = sender.representedObject as? Node else { return }
+            guard !library.isOperationBlocking, let node = sender.representedObject as? Node else { return }
             library.directoryToTrash = directory(node.path)
         }
 
         @objc private func toggleHiddenDirectory(_ sender: NSMenuItem) {
-            guard !library.isDirectoryOperationBlocking, let node = sender.representedObject as? Node else { return }
+            guard !library.isOperationBlocking, let node = sender.representedObject as? Node else { return }
             library.setDirectoryHidden(node.path, hidden: !library.hiddenDirectoryPaths.contains(node.path))
         }
 
         @objc private func toggleDirectory(_ sender: NSMenuItem) {
-            guard !library.isDirectoryOperationBlocking, let node = sender.representedObject as? Node, let outline else { return }
+            guard !library.isOperationBlocking, let node = sender.representedObject as? Node, let outline else { return }
             if outline.isItemExpanded(node) { outline.collapseItem(node) }
             else { outline.expandItem(node) }
         }
 
         @objc private func refreshDirectory(_ sender: NSMenuItem) {
-            guard !library.isDirectoryOperationBlocking, let node = sender.representedObject as? Node else { return }
+            guard !library.isOperationBlocking, let node = sender.representedObject as? Node else { return }
             library.loadChildren(of: node.path, refresh: true)
         }
 
         @objc private func copyDirectoryPath(_ sender: NSMenuItem) {
-            guard !library.isDirectoryOperationBlocking, let node = sender.representedObject as? Node else { return }
+            guard !library.isOperationBlocking, let node = sender.representedObject as? Node else { return }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(node.path, forType: .string)
         }

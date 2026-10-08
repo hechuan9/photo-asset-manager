@@ -85,7 +85,7 @@ public enum DarktableRecipe {
               let masks = try doc.nodes(forXPath: "//*[local-name()='masks_history']/*[local-name()='Seq']").first as? XMLElement,
               masks.childCount == 0 else { throw RecipeError.invalid("Requires pristine darktable 5.6.2 baseline (XMP 5, order 4 or 5, no masks/custom order)") }
         if description.attribute(forName: "darktable:iop_order_version")?.stringValue == "5" {
-            return try applyJPEG(recipe, document: doc, description: description, history: history)
+            return try applyDisplayReferred(recipe, document: doc, description: description, history: history)
         }
         let items = history.children?.compactMap { $0 as? XMLElement } ?? []
         func module(_ operation: String, version: Int, size: Int) throws -> (XMLElement, [UInt8]) {
@@ -163,17 +163,17 @@ public enum DarktableRecipe {
         }
         return doc.xmlString(options: [])
     }
-    // JPEG's v5 pipeline is already display-referred: retain its color profile and
+    // The v5 pipeline is already display-referred: retain its color profile and
     // tone response rather than adding the RAW white balance and sigmoid stages.
-    private static func applyJPEG(_ recipe: ColorRecipe, document: XMLDocument, description: XMLElement, history: XMLElement) throws -> String {
+    private static func applyDisplayReferred(_ recipe: ColorRecipe, document: XMLDocument, description: XMLElement, history: XMLElement) throws -> String {
         guard recipe.whiteBalanceRGB == [1, 1, 1], recipe.contrast == 1.5, recipe.skew == 0, recipe.localAdjustments.isEmpty else {
-            throw RecipeError.invalid("JPEG supports exposureEV and saturation only; RAW white balance, sigmoid and local masks are unavailable")
+            throw RecipeError.invalid("Display-referred images support exposureEV and saturation only; RAW white balance, sigmoid and local masks are unavailable")
         }
         let items = history.children?.compactMap { $0 as? XMLElement } ?? []
         guard Set(items.compactMap { $0.attribute(forName: "darktable:operation")?.stringValue }) == Set(["colorin", "colorout", "gamma", "flip"]), items.count == 4,
               let template = items.first,
               template.attribute(forName: "darktable:blendop_version")?.stringValue == "14" else {
-            throw RecipeError.invalid("Requires pristine darktable JPEG baseline")
+            throw RecipeError.invalid("Requires pristine darktable display-referred baseline")
         }
         var count = items.count
         func append(_ operation: String, version: Int, params: [UInt8]) {

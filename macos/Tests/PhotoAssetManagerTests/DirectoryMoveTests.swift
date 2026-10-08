@@ -170,7 +170,7 @@ import KeepsAPI
         let move = Task { await store.moveDirectory("/photos/source", to: "/photos/destination") }
         try await waitUntil { state.hasPendingMove }
         #expect(store.isMovingDirectory)
-        #expect(store.isDirectoryOperationBlocking)
+        #expect(store.isOperationBlocking)
         #expect(!store.canMoveDirectory("/photos/another", to: "/photos/destination"))
         await store.moveDirectory("/photos/another", to: "/photos/destination")
         let changed = await store.checkConnection(baseURL: "https://another.invalid", libraryID: "other", accessCredential: "", save: true)
@@ -181,7 +181,7 @@ import KeepsAPI
         await move.value
         try await waitUntil { !store.isLoading && !store.isLoadingNavigation }
         #expect(!store.isMovingDirectory)
-        #expect(!store.isDirectoryOperationBlocking)
+        #expect(!store.isOperationBlocking)
     }
 
     @Test func dropUsesWholeRowAndHighlightsOnlyName() async throws {

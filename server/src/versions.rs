@@ -370,6 +370,11 @@ impl Store {
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let negative: Option<String> = db.query_row(
+            "SELECT negative_hash FROM catalog_assets WHERE library_id=? AND id=?",
+            params![lib, id],
+            |r| r.get(0),
+        )?;
         let mut items = Vec::new();
         for (hash, width, height, priority, evidence, default, user, available) in rows {
             let mut paths=db.prepare("SELECT p.path,p.available FROM catalog_version_paths p WHERE p.library_id=? AND p.asset_id=? AND p.content_hash=? AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files x WHERE x.library_id=p.library_id AND x.path=p.path) ORDER BY p.path")?;
@@ -381,10 +386,10 @@ impl Store {
             if paths.is_empty() {
                 continue;
             }
-            items.push(json!({"contentHash":hash,"width":width,"height":height,"priority":priority,"evidence":serde_json::from_str::<Value>(&evidence)?,"isDefault":default,"userSelected":default&&user,"available":available,"paths":paths}));
+            items.push(json!({"contentHash":hash,"width":width,"height":height,"priority":priority,"evidence":serde_json::from_str::<Value>(&evidence)?,"isNegative":negative.as_deref()==Some(hash.as_str()),"isDefault":default,"userSelected":default&&user,"available":available,"paths":paths}));
         }
         let deprecated = crate::photo_relations::deprecated_files(&db, lib, id)?;
-        Ok(json!({"items":items,"deprecatedFiles":deprecated}))
+        Ok(json!({"items":items,"deprecatedFiles":deprecated,"negativeContentHash":negative}))
     }
     pub fn version_candidates(&self, lib: &str, id: &str) -> Result<Value> {
         self.asset(lib, id)?;
@@ -979,6 +984,7 @@ mod tests {
         {
             let db = store.lock()?;
             crate::revisions::remove_schema(&db)?;
+            crate::edits::remove_schema(&db)?;
             db.execute_batch("DROP TABLE catalog_versions;DROP TABLE catalog_defaults;DROP TABLE catalog_version_paths;DROP TABLE catalog_version_revision;DROP TABLE catalog_identity_roots; DROP TABLE catalog_identity_aliases; PRAGMA user_version=2;")?;
         }
         drop(store);

@@ -40,6 +40,7 @@ public struct KeepsAsset: Codable, Identifiable, Equatable, Sendable {
     public var browseThumbnail: KeepsPreview? = nil
     public var thumbnail: KeepsPreview? = nil
     public var standard: KeepsPreview? = nil
+    public var negativeContentHash: String? = nil
     public var paths: [String]? = nil
     public var gridPreview: KeepsPreview? { thumbnail ?? preview }
 }
@@ -245,6 +246,7 @@ public struct KeepsAssetPatch: Encodable, Sendable {
 
 public struct KeepsAssetVersions: Decodable, Sendable {
     public var items: [KeepsAssetVersion]
+    public var negativeContentHash: String?
     public var deprecatedFiles: [DeprecatedFile]?
 
     public struct DeprecatedFile: Decodable, Sendable {
@@ -262,6 +264,7 @@ public struct KeepsAssetVersion: Decodable, Identifiable, Sendable {
     public var priority: Int
     public var isDefault: Bool
     public var userSelected: Bool
+    public var isNegative: Bool? = nil
     public var available: Bool
     public var paths: [Location]
     public var id: String { contentHash }

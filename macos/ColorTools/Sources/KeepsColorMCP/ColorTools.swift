@@ -32,7 +32,7 @@ import KeepsColorCore
         case "inspect_photo":
             let image = try imageBlock(preview(initial.id))
             reviewed.insert(initial.id)
-            return [try textBlock(["initialCandidateID": initial.id, "candidates": engine.store.candidates.map(\.id), "engine": "darktable 5.6.2", "supportsLocalMasks": engine.supportsLocalMasks, "supportedAdjustments": engine.isJPEG ? ["exposureEV", "saturation"] : ["exposureEV", "whiteBalanceRGB", "contrast", "skew", "saturation", "localAdjustments"], "remainingAdjustments": max(0, 5 - engine.store.candidates.count)]), image]
+            return [try textBlock(["initialCandidateID": initial.id, "candidates": engine.store.candidates.map(\.id), "engine": "darktable 5.6.2", "supportsLocalMasks": engine.supportsLocalMasks, "supportedAdjustments": engine.isDisplayReferred ? ["exposureEV", "saturation"] : ["exposureEV", "whiteBalanceRGB", "contrast", "skew", "saturation", "localAdjustments"], "remainingAdjustments": max(0, 5 - engine.store.candidates.count)]), image]
         case "get_recipe":
             let candidate = try engine.store.candidate(string("candidateID"))
             return [try textBlock(["candidateID": candidate.id, "recipe": JSONSerialization.jsonObject(with: candidate.recipe)])]

@@ -44,16 +44,24 @@ final class RenderingTests: XCTestCase {
     }
 
     func testRealJPEGExposureAndReplay() throws {
+        try verifyDisplayReferredExposureAndReplay(sourceVariable: "KEEPS_TEST_JPEG")
+    }
+
+    func testRealHEIFExposureAndReplay() throws {
+        try verifyDisplayReferredExposureAndReplay(sourceVariable: "KEEPS_TEST_HEIF")
+    }
+
+    private func verifyDisplayReferredExposureAndReplay(sourceVariable: String) throws {
         let environment = ProcessInfo.processInfo.environment
-        guard let executable = environment["KEEPS_TEST_DARKTABLE"], let source = environment["KEEPS_TEST_JPEG"] else {
-            throw XCTSkip("Set KEEPS_TEST_DARKTABLE and KEEPS_TEST_JPEG for real JPEG validation")
+        guard let executable = environment["KEEPS_TEST_DARKTABLE"], let source = environment[sourceVariable] else {
+            throw XCTSkip("Set KEEPS_TEST_DARKTABLE and \(sourceVariable) for real display-referred validation")
         }
         let sourceURL = URL(fileURLWithPath: source)
         let before = try contentHash(sourceURL)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("keeps-jpeg-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         var engine: DarktableProcess? = try DarktableProcess(executable: URL(fileURLWithPath: executable), source: sourceURL, directory: directory)
-        XCTAssertTrue(engine!.isJPEG)
+        XCTAssertTrue(engine!.isDisplayReferred)
         XCTAssertFalse(engine!.supportsLocalMasks)
         func render(_ engine: DarktableProcess, recipe: ColorRecipe, operation: String, full: Bool = false) throws -> Pixels {
             let candidate = try engine.store.add(operationID: operation, parentID: nil, recipe: JSONEncoder().encode(recipe))

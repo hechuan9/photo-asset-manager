@@ -602,7 +602,7 @@ mod tests {
     fn setup() -> Result<(tempfile::TempDir, Store)> {
         let root = tempfile::tempdir()?;
         let store = Store::open(&root.path().join("db.sqlite"), true)?;
-        store.lock()?.execute("INSERT INTO catalog_assets VALUES('lib','asset','{}','hash','fingerprint','2024-01-01','photo.jpg',0,'none',NULL,0)",[])?;
+        store.lock()?.execute("INSERT INTO catalog_assets(library_id,id,snapshot,content_hash,fingerprint,sort_time,filename,rating,flag,color,trashed) VALUES('lib','asset','{}','hash','fingerprint','2024-01-01','photo.jpg',0,'none',NULL,0)",[])?;
         store.reconcile_cache()?;
         store
             .lock()?
@@ -736,7 +736,7 @@ mod tests {
             )?,
             0
         );
-        state.store.lock()?.execute("INSERT INTO catalog_assets VALUES('lib','other','{}','otherhash','fp','2024-01-01','other.jpg',0,'none',NULL,0)",[])?;
+        state.store.lock()?.execute("INSERT INTO catalog_assets(library_id,id,snapshot,content_hash,fingerprint,sort_time,filename,rating,flag,color,trashed) VALUES('lib','other','{}','otherhash','fp','2024-01-01','other.jpg',0,'none',NULL,0)",[])?;
         state.store.reconcile_cache()?;
         assert_eq!(
             claim_pending(&state.store, "lib", "worker")?.unwrap().1,
@@ -767,7 +767,7 @@ mod tests {
     fn concurrent_claims_lease_each_asset_once() -> Result<()> {
         let (_root, store) = pending_setup()?;
         for i in 0..24 {
-            store.lock()?.execute("INSERT INTO catalog_assets SELECT library_id,?1,snapshot,?1,?1,sort_time,filename,rating,flag,color,trashed FROM catalog_assets WHERE id='asset'", [format!("asset-{i}")])?;
+            store.lock()?.execute("INSERT INTO catalog_assets(library_id,id,snapshot,content_hash,fingerprint,sort_time,filename,rating,flag,color,trashed) SELECT library_id,?1,snapshot,?1,?1,sort_time,filename,rating,flag,color,trashed FROM catalog_assets WHERE id='asset'", [format!("asset-{i}")])?;
         }
         store.reconcile_cache()?;
         let store = Arc::new(store);
