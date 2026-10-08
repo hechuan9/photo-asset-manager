@@ -317,3 +317,9 @@ NAS 离线重建由 `POST /libraries/{library}/offline-rebuild` 创建任务，�
 顶部导航采用 `safeAreaInset` 与 `ultraThinMaterial`，网格使用系统 `backgroundExtensionEffect()` 向安全区域延伸背景；该效果不改变实际照片视口，也不把目录菜单纳入网格布局。API 依据：[Apple backgroundExtensionEffect](https://developer.apple.com/documentation/swiftui/view/backgroundextensioneffect())。
 
 目录面板以 ScrollView 内容的实际高度决定尺寸，最大为照片视口高度；超出时滚动并留出底部浮动导航避让空间，保持全宽直角磨砂覆盖效果。`ios/Package.swift` 提供图库与目录状态模块的宿主测试，`swift test --package-path ios` 验证本地启动、离线查询、同步跳过、失败保留和连接隔离；SQLite 查询及持久性在共享包测试。
+
+### 本地 AI 调色验证工具
+
+`macos/ColorTools` 是独立原生 Swift helper（尚未接入客户端菜单或发布包），固定调用 darktable 5.6.2 CLI。模型经 stdio MCP 读取预览/区域裁切，设置绝对参数、比较不可变候选并选择结果；配方适配层负责 XMP 模块版本、顺序和局部蒙版。原片只读复制到任务私有目录，候选按操作 ID 幂等落盘；每次从固定 baseline 重建，不累积改写原片。当前验证范围为 RAW、曝光、源白平衡 RGB 倍率、sigmoid、饱和度及渐变/椭圆局部曝光；局部蒙版暂仅支持方向为 1 的底片，其他方向明确拒绝。跨任务缓存、NAS 发布和 App 运行时打包由后续任务接入。
+
+专用 Skill 位于该包 `Skills/keeps-color`。`scripts/evaluate_ai.py` 仅供开发验证，显式指定 Codex、helper、darktable、输入和全新任务目录，默认 GPT-6 Luna；禁用通用 shell、插件及外部应用工具，只加载本地调色 MCP，保留事件与结构化结果，并核实模型所选候选确实已渲染。此脚本复用开发者 CLI 认证，不能视为完成独立认证或内置分发。渲染测试通过 `KEEPS_TEST_DARKTABLE` 和 `KEEPS_TEST_RAW` 指定本机输入，未配置则跳过真实 RAW 集成测试。

@@ -1,0 +1,14 @@
+---
+name: keeps-color
+description: Adjust a single photograph non-destructively with Keeps local darktable tools; inspect each rendered candidate before selecting the final recipe.
+---
+
+Use the supplied Keeps MCP tools for this photo. Start with inspect_photo and get_recipe. The preview is rendered from the negative, not the camera JPEG. Do not seek a camera JPEG, matching curve, or reference histogram.
+
+Identify the subject, lighting intent, exposure imbalance, and color cast from the image. For portraits, inspect the face with preview_region before editing and before selection. A face that remains difficult to see is not a successful natural portrait correction just because the background is preserved. Use a face-centered mask or combined global/local correction when needed; do not stop merely because the first attempt is slightly better. Preserve the scene's lighting character and plausible skin color. Do not brighten every shadow or force every highlight to gray. Global exposure affects the whole scene; use a soft local exposure mask when the subject and background need different treatment.
+
+set_adjustments takes absolute values. Start from a named parent candidate; retain its ID for comparisons. whiteBalanceRGB multiplies the source's RGB white balance coefficients, rather than specifying Kelvin. contrast and skew control sigmoid. saturation=1 is neutral. Local masks replace the whole localAdjustments array. Ellipse centers are measured from the TOP LEFT and use normalized raw image width and height; radii and feather use the shorter raw edge. Gradient coordinates and direction follow the tool schema. Do not use local masks when the tool reports an unsupported orientation.
+
+After each adjustment, call render_preview and assess the actual image: subject visibility, skin, clipping, color cast, halos, and unnatural local transitions. Use compare_candidates to compare the best result with the initial preview or another candidate. Do not assume larger numeric changes improve the photo. You have at most four candidate adjustments; prefer one coherent correction per round and stop early when further changes would be speculative.
+
+Call select_candidate only after reviewing that candidate's image. It renders the full-size local result; it does not publish to NAS. If the result is not convincing, return needs_review with the best existing candidate ID and concrete remaining problems. Return unchanged if the initial rendering is already preferable. Do not invoke shell commands, change files yourself, or describe an unrendered candidate as successful.

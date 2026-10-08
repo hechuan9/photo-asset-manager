@@ -49,6 +49,7 @@ jobs:
       - run: swift test --package-path shared
       - run: swift test --package-path ios
       - run: swift test --package-path macos
+      - run: swift test --package-path macos/ColorTools
       - run: bash macos/scripts/package_app.sh
       - name: Build iOS Simulator
         run: xcodebuild -project ios/KeepsIOS.xcodeproj -scheme KeepsIOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build

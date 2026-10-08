@@ -1,0 +1,41 @@
+import XCTest
+@testable import KeepsColorCore
+
+final class DarktableRecipeTests: XCTestCase {
+    func testRejectsUnknownParameter() throws {
+        XCTAssertThrowsError(try DarktableRecipe.decode(Data(#"{"exposureEV":1,"mystery":4}"#.utf8)))
+    }
+    func testRejectsNonFiniteAndInvalidMask() throws {
+        XCTAssertThrowsError(try ColorRecipe(exposureEV: .infinity).validate())
+        var recipe = ColorRecipe()
+        recipe.localAdjustments = [.init(id: "face", exposureEV: 1, mask: .ellipse(centerX: 0.5, centerY: 0.5, radiusX: -1, radiusY: 0.1, rotation: 0, feather: 0.1))]
+        XCTAssertThrowsError(try recipe.validate())
+    }
+    func testRejectsUnsupportedBaseline() {
+        XCTAssertThrowsError(try DarktableRecipe.apply(ColorRecipe(), to: "<root/>"))
+    }
+    func testRecipeRoundTrip() throws {
+        var recipe = ColorRecipe(exposureEV: 1.2)
+        recipe.localAdjustments = [.init(id: "sky", exposureEV: -1, mask: .gradient(anchorX: 0.5, anchorY: 0.4, rotation: 90, compression: 0.2))]
+        XCTAssertEqual(try DarktableRecipe.decode(JSONEncoder().encode(recipe)), recipe)
+    }
+    func testNativeMaskReferencesAndOrdering() throws {
+        var recipe = ColorRecipe(exposureEV: 1.5, saturation: 1.1)
+        recipe.localAdjustments = [.init(id: "face", exposureEV: 1, mask: .ellipse(centerX: 0.5, centerY: 0.5, radiusX: 0.2, radiusY: 0.3, rotation: 0, feather: 0.1)), .init(id: "sky", exposureEV: -1, mask: .gradient(anchorX: 0.5, anchorY: 0.4, rotation: 90, compression: 0.2))]
+        let output = try DarktableRecipe.apply(recipe, to: Self.baseline)
+        let document = try XMLDocument(xmlString: output)
+        let masks = try document.nodes(forXPath: "//*[local-name()='masks_history']/*/*")
+        XCTAssertEqual(masks.count, 4)
+        XCTAssertTrue(output.contains("exposure,0,exposure,1,exposure,2,"))
+        XCTAssertTrue(output.contains("darktable:history_end=\"14\""))
+        XCTAssertTrue(output.contains("darktable:mask_type=\"32\""))
+        XCTAssertTrue(output.contains("darktable:mask_type=\"16\""))
+        XCTAssertThrowsError(try DarktableRecipe.apply(recipe, to: output))
+    }
+    func testRejectsMismatchedModuleVersion() {
+        XCTAssertThrowsError(try DarktableRecipe.apply(ColorRecipe(), to: Self.baseline.replacingOccurrences(of: "darktable:modversion=\"7\"", with: "darktable:modversion=\"8\"")))
+    }
+    private static let baseline = #"""
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="XMP Core 4.4.0-Exiv2"> <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"> <rdf:Description rdf:about="" xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:darktable="http://darktable.sf.net/" xmpMM:OriginalDocumentID="xmp.did:0aa4ff62-a2cb-488f-b356-3b1dd3f05aa8" xmpMM:DerivedFrom="DSC01194.ARW" xmp:Rating="0" darktable:xmp_version="5" darktable:raw_params="0" darktable:auto_presets_applied="1" darktable:history_end="11" darktable:iop_order_version="4"> <darktable:masks_history> <rdf:Seq/> </darktable:masks_history> <darktable:history> <rdf:Seq> <rdf:li darktable:num="0" darktable:operation="rawprepare" darktable:enabled="1" darktable:modversion="2" darktable:params="000000000000000008000000000000000002000200020002003c000000000000" darktable:multi_name="" darktable:multi_name_hand_edited="0" darktable:multi_priority="0" darktable:blendop_version="14" darktable:blendop_params="gz11eJxjYIAACQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dcF/IADRAGpyHQU="/> <rdf:li darktable:num="1" darktable:operation="demosaic" darktable:enabled="1" darktable:modversion="6" darktable:params="0000000000000000000000000500000001000000cdcc4c3e000000007d3fb53e00000000080000000000000000000000" darktable:multi_name="" darktable:multi_name_hand_edited="0" darktable:multi_priority="0" darktable:blendop_version="14" darktable:blendop_params="gz11eJxjYIAACQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dcF/IADRAGpyHQU="/> <rdf:li darktable:num="2" darktable:operation="colorin" darktable:enabled="1" darktable:modversion="7" darktable:params="gz48eJzjZhgFowABWAbaAaNgwAEAOQAAEA==" darktable:multi_name="" darktable:multi_name_hand_edited="0" darktable:multi_priority="0" darktable:blendop_version="14" darktable:blendop_params="gz11eJxjYIAACQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dcF/IADRAGpyHQU="/> <rdf:li darktable:num="3" darktable:operation="colorout" darktable:enabled="1" darktable:modversion="5" darktable:params="gz35eJxjZBgFo4CBAQAEEAAC" darktable:multi_name="" darktable:multi_name_hand_edited="0" darktable:multi_priority="0" darktable:blendop_version="14" darktable:blendop_params="gz11eJxjYIAACQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dcF/IADRAGpyHQU="/> <rdf:li darktable:num="4" darktable:operation="gamma" darktable:enabled="1" darktable:modversion="1" darktable:params="0000000000000000" darktable:multi_name="" darktable:multi_name_hand_edited="0" darktable:multi_priority="0" darktable:blendop_version="14" darktable:blendop_params="gz11eJxjYIAACQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dcF/IADRAGpyHQU="/> <rdf:li darktable:num="5" darktable:operation="temperature" darktable:enabled="1" darktable:modversion="4" darktable:params="004038400000803f0080b13f0000000004000000" darktable:multi_name="" darktable:multi_name_hand_edited="0" darktable:multi_priority="0" darktable:blendop_version="14" darktable:blendop_params="gz11eJxjYIAACQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dcF/IADRAGpyHQU="/> <rdf:li darktable:num="6" darktable:operation="highlights" darktable:enabled="1" darktable:modversion="4" darktable:params="050000000000803f00000000000000000000803f000000001e00000006000000cdcccc3e000000400000000000000000" darktable:multi_name="" darktable:multi_name_hand_edited="0" darktable:multi_priority="0" darktable:blendop_version="14" darktable:blendop_params="gz11eJxjYGBgYARiCQYYOOHEgAZY0QWgejBBgz0Ej1Q+dcF/IADRAGwSHQY="/> <rdf:li darktable:num="7" darktable:operation="channelmixerrgb" darktable:enabled="1" darktable:modversion="3" darktable:params="gz04eJxjYGiwZ8AAxIqRD9iBmAmIWYCYEYjvRKy2s2ndYZfyfIUryC5GqDwArn4JGg==" darktable:multi_name="_builtin_scene-referred default" darktable:multi_name_hand_edited="0" darktable:multi_priority="0" darktable:blendop_version="14" darktable:blendop_params="gz08eJxjYGBgYAFiCQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dlAx68oBEMbFxwX+AwGIBgCbGCeh"/> <rdf:li darktable:num="8" darktable:operation="exposure" darktable:enabled="1" darktable:modversion="7" darktable:params="00000000000080b93333333f00004842000080c00100000001000000" darktable:multi_name="_builtin_scene-referred default" darktable:multi_name_hand_edited="0" darktable:multi_priority="0" darktable:blendop_version="14" darktable:blendop_params="gz08eJxjYGBgYAFiCQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dlAx68oBEMbFxwX+AwGIBgCbGCeh"/> <rdf:li darktable:num="9" darktable:operation="flip" darktable:enabled="1" darktable:modversion="2" darktable:params="ffffffff" darktable:multi_name="_builtin_auto" darktable:multi_name_hand_edited="0" darktable:multi_priority="0" darktable:blendop_version="14" darktable:blendop_params="gz11eJxjYIAACQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dcF/IADRAGpyHQU="/> <rdf:li darktable:num="10" darktable:operation="sigmoid" darktable:enabled="1" darktable:modversion="3" darktable:params="0000c03f000000000000c8426c09793c000000000000c8420000000000000000000000000000000000000000000000000000000000000000" darktable:multi_name="_builtin_scene-referred default" darktable:multi_name_hand_edited="0" darktable:multi_priority="0" darktable:blendop_version="14" darktable:blendop_params="gz08eJxjYGBgYAFiCQYYOOHEgAZY0QWAgBGLGANDgz0Ej1Q+dlAx68oBEMbFxwX+AwGIBgCbGCeh"/> </rdf:Seq> </darktable:history> </rdf:Description> </rdf:RDF> </x:xmpmeta>
+"""#
+}
