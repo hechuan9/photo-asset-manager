@@ -320,6 +320,10 @@ NAS 离线重建由 `POST /libraries/{library}/offline-rebuild` 创建任务，�
 
 ### 本地 AI 调色验证工具
 
-`macos/ColorTools` 是独立原生 Swift helper（尚未接入客户端菜单或发布包），固定调用 darktable 5.6.2 CLI。模型经 stdio MCP 读取预览/区域裁切，设置绝对参数、比较不可变候选并选择结果；配方适配层负责 XMP 模块版本、顺序和局部蒙版。原片只读复制到任务私有目录，候选按操作 ID 幂等落盘；每次从固定 baseline 重建，不累积改写原片。当前验证范围为 RAW、曝光、源白平衡 RGB 倍率、sigmoid、饱和度及渐变/椭圆局部曝光；局部蒙版暂仅支持方向为 1 的底片，其他方向明确拒绝。跨任务缓存、NAS 发布和 App 运行时打包由后续任务接入。
+`macos/ColorTools` 是独立原生 Swift helper（已接入 macOS 设置中的单张试修图，尚未接入图库发布），固定调用 darktable 5.6.2 CLI。模型经 stdio MCP 读取预览/区域裁切，设置绝对参数、比较不可变候选并选择结果；配方适配层负责 XMP 模块版本、顺序和局部蒙版。原片只读复制到任务私有目录，候选按操作 ID 幂等落盘；每次从固定 baseline 重建，不累积改写原片。当前验证范围为 RAW、曝光、源白平衡 RGB 倍率、sigmoid、饱和度及渐变/椭圆局部曝光；局部蒙版暂仅支持方向为 1 的底片，其他方向明确拒绝。跨任务缓存、NAS 发布和正式分发由后续任务接入。
 
-专用 Skill 位于该包 `Skills/keeps-color`。`scripts/evaluate_ai.py` 仅供开发验证，显式指定 Codex、helper、darktable、输入和全新任务目录，默认 GPT-6 Luna；禁用通用 shell、插件及外部应用工具，只加载本地调色 MCP，保留事件与结构化结果，并核实模型所选候选确实已渲染。此脚本复用开发者 CLI 认证，不能视为完成独立认证或内置分发。渲染测试通过 `KEEPS_TEST_DARKTABLE` 和 `KEEPS_TEST_RAW` 指定本机输入，未配置则跳过真实 RAW 集成测试。
+专用 Skill 位于该包 `Skills/keeps-color`。`scripts/evaluate_ai.py` 仅供开发验证，显式指定 Codex、helper、darktable、输入和全新任务目录，默认 GPT-6 Luna；禁用通用 shell、插件及外部应用工具，只加载本地调色 MCP，保留事件与结构化结果，并核实模型所选候选确实已渲染。此脚本必须显式提供专属 `--codex-home` 和 `--account-email`，拒绝默认开发者目录及不匹配的账户，不继承环境中的 API 凭证。渲染测试通过 `KEEPS_TEST_DARKTABLE` 和 `KEEPS_TEST_RAW` 指定本机输入，未配置则跳过真实 RAW 集成测试。
+
+macOS「设置 → AI 修图」提供运行环境检查、指定邮箱登录、退出、连接测试与本地 RAW 试修图。原生 Swift runner 只调用应用 `Resources/AIEditing` 内的 Codex、helper、darktable 与 Skill，不搜索系统安装，不回退到开发账户。认证与日志位于 Application Support/Keeps/AIEditing；Codex 使用其中的独立 `codex` 目录、file 凭证和强制 ChatGPT 登录，每次请求核对实际邮箱。首次 OAuth 授权由用户在浏览器完成，登录状态可在应用重启后重新读取。设置测试仅生成本地候选，不自动发布 NAS 或更新图库缩略图；完整调色任务恢复仍由后续调度任务实现。
+
+本机调试打包可通过显式 `KEEPS_CODEX_BINARY` 与 `KEEPS_DARKTABLE_APP` 嵌入完整运行时，打包脚本记录版本与文件摘要并验证嵌套签名，绝不复制凭证；没有输入的普通开发/CI 包显示组件缺失。当前运行时装配仅用于本机调试，正式 TestFlight 分发、沙盒下所有子进程能力及第三方再分发审查仍未完成。
