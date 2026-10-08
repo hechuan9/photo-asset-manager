@@ -252,7 +252,14 @@ struct ContentView: View {
             guard key.modifiers.contains(.command) || key.modifiers.contains(.control) else { return .ignored }
             library.selectAll(); return .handled
         }
-        .onKeyPress(.escape) { library.deselectAll(); return .handled }
+        .onKeyPress(.escape) {
+            if detailMode {
+                detailMode = false
+            } else {
+                library.deselectAll()
+            }
+            return .handled
+        }
     }
 
     private func galleryTile(_ asset: KeepsAsset, height: CGFloat) -> some View {
@@ -273,7 +280,11 @@ struct ContentView: View {
             }
             .contentShape(Rectangle())
             .overlay {
-                PhotoDragSource(item: { library.photoDragItem(for: asset.id) }) { modifiers in
+                PhotoDragSource(item: { library.photoDragItem(for: asset.id) }, open: {
+                    library.select(asset.id, extending: false)
+                    detailMode = true
+                    galleryFocused = true
+                }) { modifiers in
                     galleryFocused = true
                     library.select(asset.id, extending: modifiers.contains(.command) || modifiers.contains(.control),
                                    range: modifiers.contains(.shift))
@@ -297,6 +308,7 @@ struct ContentView: View {
             railButton("单张视图", icon: "rectangle", selected: detailMode) {
                 if library.selectedAsset == nil, let first = library.assets.first { library.select(first.id, extending: false) }
                 detailMode = true
+                galleryFocused = true
             }.disabled(library.assets.isEmpty)
             Divider().frame(height: 16)
             if !library.selectedIDs.isEmpty {
