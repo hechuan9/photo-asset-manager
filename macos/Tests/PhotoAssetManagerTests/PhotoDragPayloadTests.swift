@@ -1,9 +1,31 @@
 import Foundation
+import AppKit
 import Testing
 import KeepsAPI
 @testable import PhotoAssetManager
 
 @MainActor struct PhotoDragPayloadTests {
+    @Test func doubleClickOpensPhotoWithoutRepeatingSelection() throws {
+        let view = PhotoDragSource.SourceView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        var selections = 0
+        var opens = 0
+        view.select = { _ in selections += 1 }
+        view.open = { opens += 1 }
+        for count in 1...2 {
+            let down = try #require(NSEvent.mouseEvent(with: .leftMouseDown,
+                location: NSPoint(x: 50, y: 50), modifierFlags: [], timestamp: 0,
+                windowNumber: 0, context: nil, eventNumber: count, clickCount: count, pressure: 1))
+            let up = try #require(NSEvent.mouseEvent(with: .leftMouseUp,
+                location: NSPoint(x: 50, y: 50), modifierFlags: [], timestamp: 0,
+                windowNumber: 0, context: nil, eventNumber: count, clickCount: count, pressure: 0))
+            view.mouseDown(with: down)
+            view.mouseUp(with: up)
+            view.mouseUp(with: up)
+        }
+        #expect(selections == 1)
+        #expect(opens == 1)
+    }
+
     @Test func photoDragTypeIsDeclaredAsDataForAppKitBridge() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let data = try Data(contentsOf: root.appendingPathComponent("Sources/PhotoAssetManager/Resources/Info.plist"))

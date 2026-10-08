@@ -158,16 +158,19 @@ struct PendingPhotoMove: Codable {
 
 struct PhotoDragSource: NSViewRepresentable {
     let item: () -> NSPasteboardItem?
+    let open: () -> Void
     let select: (NSEvent.ModifierFlags) -> Void
 
     func makeNSView(context: Context) -> SourceView { SourceView() }
     func updateNSView(_ view: SourceView, context: Context) {
         view.item = item
+        view.open = open
         view.select = select
     }
 
     final class SourceView: NSView, NSDraggingSource {
         var item: (() -> NSPasteboardItem?)?
+        var open: (() -> Void)?
         var select: ((NSEvent.ModifierFlags) -> Void)?
         private var mouseDownEvent: NSEvent?
 
@@ -185,7 +188,12 @@ struct PhotoDragSource: NSViewRepresentable {
         override func mouseUp(with event: NSEvent) {
             guard mouseDownEvent != nil else { return }
             mouseDownEvent = nil
-            if bounds.contains(convert(event.locationInWindow, from: nil)) { select?(event.modifierFlags) }
+            guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+            if event.clickCount == 2 {
+                open?()
+            } else {
+                select?(event.modifierFlags)
+            }
         }
 
         override func mouseDragged(with event: NSEvent) {
