@@ -11,7 +11,11 @@ final class PreviewAnalysisTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("fixture.png")
-        let bytes = Data((0..<100).flatMap { row in (0..<100).flatMap { _ in [UInt8](repeating: row < 50 ? 255 : 0, count: 3) + [255] } })
+        var bytes = Data()
+        for row in 0..<100 {
+            let channel: UInt8 = row < 50 ? 255 : 0
+            for _ in 0..<100 { bytes.append(contentsOf: [channel, channel, channel, 255]) }
+        }
         let provider = try XCTUnwrap(CGDataProvider(data: bytes as CFData))
         let image = try XCTUnwrap(CGImage(width: 100, height: 100, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 400, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue), provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
         let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil))

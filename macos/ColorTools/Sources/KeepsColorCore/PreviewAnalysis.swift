@@ -16,7 +16,14 @@ public enum PreviewAnalysis {
             guard let context = CGContext(data: buffer.baseAddress, width: 128, height: 128, bitsPerComponent: 8, bytesPerRow: 512, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw ColorToolError("Cannot analyze preview") }
             context.draw(crop, in: CGRect(x: 0, y: 0, width: 128, height: 128))
         }
-        let luma = stride(from: 0, to: pixels.count, by: 4).map { (0.2126*Double(pixels[$0])+0.7152*Double(pixels[$0+1])+0.0722*Double(pixels[$0+2]))/255 }.sorted()
+        var luma: [Double] = []
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            let red = 0.2126 * Double(pixels[offset])
+            let green = 0.7152 * Double(pixels[offset + 1])
+            let blue = 0.0722 * Double(pixels[offset + 2])
+            luma.append((red + green + blue) / 255)
+        }
+        luma.sort()
         return (data as Data, ["sRGBLumaMedian": luma[luma.count/2], "sRGBLumaP05": luma[luma.count/20], "sRGBLumaP95": luma[luma.count*19/20]])
     }
 }
