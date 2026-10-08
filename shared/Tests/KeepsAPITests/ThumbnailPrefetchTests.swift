@@ -22,6 +22,7 @@ struct ThumbnailPrefetchTests {
         if thumbnail {
             value.thumbnail = KeepsPreview(downloadURL: URL(string: "https://prefetch.invalid/thumb")!, width: 10, height: 10, version: "1")
         }
+        value.browseThumbnail = value.thumbnail
         return value
     }
 
@@ -111,6 +112,7 @@ struct LocalThumbnailPrefetchTests {
             value.thumbnail = KeepsPreview(downloadURL: URL(string: "https://local-prefetch.invalid/\(number)")!,
                                             width: 1, height: 1, version: "1")
         }
+        value.browseThumbnail = value.thumbnail
         return value
     }
 
@@ -118,8 +120,10 @@ struct LocalThumbnailPrefetchTests {
         PreviewCache(directory: root.appendingPathComponent("thumbs"), diskLimit: Int.max, session: session, role: .thumbnail)
     }
 
-    private func seed(_ assets: [KeepsAsset], cache: PreviewCache) async throws {
+    private func seed(_ assets: [KeepsAsset], cache: PreviewCache, browseCache: PreviewCache) async throws {
         for asset in assets {
+            try await browseCache.store(image, key: PreviewCache.key(assetID: asset.id, preview: asset.browseThumbnail!,
+                                                                    configuration: configuration, role: .browse))
             try await cache.store(image, key: PreviewCache.key(assetID: asset.id, preview: asset.thumbnail!,
                                                              configuration: configuration, role: .thumbnail))
         }
@@ -133,9 +137,10 @@ struct LocalThumbnailPrefetchTests {
         try db.beginSync(); try db.ingest(values); try db.replaceHiddenDirectories(["/hidden"])
         try db.completeSync(revision: 1, isStable: true)
         let cache = cache(root)
-        try await seed(values, cache: cache)
+        let browseCache = PreviewCache(directory: root.appendingPathComponent("browse"), diskLimit: Int.max, role: .browse)
+        try await seed(values, cache: cache, browseCache: browseCache)
         let recorder = PrefetchRecorder()
-        let worker = ThumbnailPrefetch(cache: cache)
+        let worker = ThumbnailPrefetch(cache: cache, browseCache: browseCache)
         #expect(await worker.runLocal(configuration: configuration, downloadMissing: false, databaseRoot: root) {
             await recorder.record($0)
         })
@@ -151,17 +156,18 @@ struct LocalThumbnailPrefetchTests {
         let values = [asset(1), asset(2), asset(3, thumbnail: false)]
         try db.ingest(values)
         let cache = cache(root)
-        let worker = ThumbnailPrefetch(cache: cache)
+        let browseCache = PreviewCache(directory: root.appendingPathComponent("browse"), diskLimit: Int.max, role: .browse)
+        let worker = ThumbnailPrefetch(cache: cache, browseCache: browseCache)
         #expect(await worker.runLocal(configuration: configuration, downloadMissing: false, databaseRoot: root) == false)
         try db.completeSync(revision: 1, isStable: true)
-        try await seed([values[0]], cache: cache)
+        try await seed([values[0]], cache: cache, browseCache: browseCache)
         let recorder = PrefetchRecorder()
         #expect(await worker.runLocal(configuration: configuration, downloadMissing: false, databaseRoot: root) {
             await recorder.record($0)
         } == false)
         #expect(await recorder.progress.last?.failed == 1)
         #expect(await recorder.progress.last?.unavailable == 1)
-        try await seed([values[1]], cache: cache)
+        try await seed([values[1]], cache: cache, browseCache: browseCache)
         #expect(await worker.runLocal(configuration: configuration, downloadMissing: false, databaseRoot: root) {
             await recorder.record($0)
         })
@@ -184,18 +190,41 @@ struct LocalThumbnailPrefetchTests {
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
         let cache = cache(root, session: session)
-        try await seed([values[0]], cache: cache)
-        let worker = ThumbnailPrefetch(cache: cache)
+        let browseCache = PreviewCache(directory: root.appendingPathComponent("browse"), diskLimit: Int.max, session: session, role: .browse)
+        try await seed([values[0]], cache: cache, browseCache: browseCache)
+        let worker = ThumbnailPrefetch(cache: cache, browseCache: browseCache)
         let image = image
         LocalThumbnailProtocol.reset { request in (request.url!.path == "/3" ? 500 : 200, image) }
         #expect(await worker.runLocal(configuration: configuration, downloadMissing: true, databaseRoot: root) == false)
-        #expect(LocalThumbnailProtocol.paths == ["/2", "/3"])
+        #expect(LocalThumbnailProtocol.paths == ["/2", "/2", "/3", "/3"])
         LocalThumbnailProtocol.reset { _ in (200, image) }
         #expect(await worker.runLocal(configuration: configuration, downloadMissing: true, databaseRoot: root))
-        #expect(LocalThumbnailProtocol.paths == ["/3"])
+        #expect(LocalThumbnailProtocol.paths == ["/3", "/3"])
         LocalThumbnailProtocol.reset { _ in (500, Data()) }
         #expect(await worker.runLocal(configuration: configuration, downloadMissing: false, databaseRoot: root))
         #expect(LocalThumbnailProtocol.paths.isEmpty)
+    }
+
+    @Test func missingBrowseFileBlocksEvenWhenPreviewIsCached() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: root)
+        let value = asset(1)
+        try db.ingest([value]); try db.completeSync(revision: 1, isStable: true)
+        let cache = cache(root)
+        let browse = PreviewCache(directory: root.appendingPathComponent("browse"), role: .browse)
+        try await cache.store(image, key: PreviewCache.key(assetID: value.id, preview: value.thumbnail!, configuration: configuration, role: .thumbnail))
+        let recorder = PrefetchRecorder()
+        let worker = ThumbnailPrefetch(cache: cache, browseCache: browse)
+        #expect(await worker.runLocal(configuration: configuration, downloadMissing: false, databaseRoot: root) { await recorder.record($0) } == false)
+        #expect(await recorder.progress.last?.failed == 1)
+        #expect(await recorder.progress.last?.cached == 0)
+        var unavailable = value
+        unavailable.browseThumbnail = nil
+        try db.ingest([unavailable])
+        #expect(await worker.runLocal(configuration: configuration, downloadMissing: false, databaseRoot: root) { await recorder.record($0) })
+        #expect(await recorder.progress.last?.unavailable == 1)
+        #expect(await recorder.progress.last?.cached == 0)
     }
 
     @Test func catalogRevisionChangeDuringInventoryBlocksCompletion() async throws {
@@ -205,9 +234,10 @@ struct LocalThumbnailPrefetchTests {
         let values = [asset(1)]
         try db.beginSync(); try db.ingest(values); try db.completeSync(revision: 1, isStable: true)
         let cache = cache(root)
-        try await seed(values, cache: cache)
+        let browseCache = PreviewCache(directory: root.appendingPathComponent("browse"), diskLimit: Int.max, role: .browse)
+        try await seed(values, cache: cache, browseCache: browseCache)
         let configuration = configuration
-        #expect(await ThumbnailPrefetch(cache: cache).runLocal(configuration: configuration,
+        #expect(await ThumbnailPrefetch(cache: cache, browseCache: browseCache).runLocal(configuration: configuration,
                 downloadMissing: false, databaseRoot: root) { state in
             if state.processed == 1 {
                 let writer = try! KeepsLibraryDatabase(configuration: configuration, rootDirectory: root)

@@ -9,7 +9,8 @@ struct ImportSourceTests {
         let paths = [
             "one/IMG.ARW", "one/IMG.xmp", "one/IMG.ARW.XMP", "one/unrelated.xmp",
             "two/IMG.ARW", "two/IMG.HEIC", "two/IMG.HEIC.xmp", "third/photo.heif", "photo.hif",
-            "two/ignored.jpg", "two/ignored.mov", "notes.txt", ".hidden/file.arw",
+            "deep/nested/IMG.JPG", "deep/nested/IMG.xmp", "deep/nested/IMG.JPG.XMP",
+            "deep/nested/other.JpEg", "deep/nested/other.jpeg.xmp", "two/ignored.mov", "notes.txt", ".hidden/file.arw",
             "@eaDir/thumb.heic", "#recycle/old.nef", "two/.hidden.heif",
         ]
         for path in paths {
@@ -21,6 +22,8 @@ struct ImportSourceTests {
         let files = try ImportSource.scan(root)
 
         #expect(files.map(\.sourcePath) == [
+            "deep/nested/IMG.JPG", "deep/nested/IMG.JPG.XMP", "deep/nested/IMG.xmp",
+            "deep/nested/other.JpEg", "deep/nested/other.jpeg.xmp",
             "one/IMG.ARW", "one/IMG.ARW.XMP", "one/IMG.xmp", "photo.hif", "third/photo.heif",
             "two/IMG.ARW", "two/IMG.HEIC", "two/IMG.HEIC.xmp",
         ])

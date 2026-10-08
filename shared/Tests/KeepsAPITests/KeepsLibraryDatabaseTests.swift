@@ -11,6 +11,73 @@ struct KeepsLibraryDatabaseTests {
         KeepsAsset(id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", n))!, captureTime: "2026-01-01", cameraMake: "", cameraModel: "Camera", lensModel: "", originalFilename: "photo\(n).jpg", contentFingerprint: "hash", metadataFingerprint: "meta", rating: 3, flagState: "picked", colorLabel: nil, tags: ["travel"], createdAt: "2026-01-01", updatedAt: "2026-01-01", trashed: false, preview: nil, paths: paths)
     }
 
+    @Test func timelineMatchesEveryFilterAndIgnoresPagination() throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: root)
+        var photos = (1...12).map { asset($0, paths: [$0.isMultiple(of: 2) ? "/photos/sub/\($0).jpg" : "/photos/\($0).jpg"]) }
+        photos[0].captureTime = nil
+        photos[0].createdAt = "2027-01-01"
+        photos[1].rating = 1
+        photos[2].flagState = "rejected"
+        photos[3].colorLabel = "red"
+        photos[4].tags = ["family"]
+        photos[5].trashed = true
+        photos[6].paths = ["/hidden/7.jpg"]
+        photos[7].originalFilename = "100%_photo.jpg"
+        photos[8].cameraModel = "Other"
+        photos[9].browseThumbnail = KeepsPreview(downloadURL: URL(string: "https://nas.example/browse")!, width: 64, height: 48, version: "b1")
+        photos[9].thumbnail = KeepsPreview(downloadURL: URL(string: "https://nas.example/thumb")!, width: 80, height: 60, version: "t1")
+        photos[9].preview = KeepsPreview(downloadURL: URL(string: "https://nas.example/preview")!, width: 800, height: 600, version: "p1")
+        photos[9].standard = KeepsPreview(downloadURL: URL(string: "https://nas.example/standard")!, width: 2400, height: 1800, version: "s1")
+        try db.ingest(photos.reversed())
+        try db.replaceHiddenDirectories(["/hidden"])
+        var queries = [KeepsAssetQuery()]
+        func add(_ configure: (inout KeepsAssetQuery) -> Void) {
+            var query = KeepsAssetQuery()
+            configure(&query)
+            queries.append(query)
+        }
+        add { $0.minRating = 3 }
+        add { $0.flagState = "rejected" }
+        add { $0.colorLabel = "red" }
+        add { $0.tag = "family" }
+        add { $0.trashed = true }
+        add { $0.showHidden = true }
+        add { $0.directory = "/hidden" }
+        add { $0.directory = "/photos"; $0.recursive = false }
+        add { $0.directory = "/photos"; $0.recursive = true }
+        add { $0.q = "%_" }
+        add { $0.q = "Other" }
+        add { $0.directory = "/photos"; $0.minRating = 3; $0.tag = "travel"; $0.flagState = "picked" }
+        for var query in queries {
+            query.limit = 100
+            let expected = try db.assets(query: query).items
+            query.limit = 1
+            query.cursor = "9"
+            let timeline = try db.timeline(query: query)
+            #expect(timeline.map(\.id) == expected.map(\.id))
+            #expect(timeline.map(\.date) == expected.map { $0.captureTime ?? $0.createdAt })
+            #expect(timeline.map(\.browseThumbnail) == expected.map(\.browseThumbnail))
+            #expect(timeline.map(\.gridPreview) == expected.map(\.gridPreview))
+            #expect(timeline.map(\.standard) == expected.map(\.standard))
+            #expect(timeline.map(\.flagState) == expected.map(\.flagState))
+            #expect(timeline.map(\.filename) == expected.map(\.originalFilename))
+        }
+        #expect(try db.timeline(query: .init()).first?.id == photos[0].id)
+    }
+
+    @Test func viewportAssetsPreserveOrderAcrossBatchesAndSkipMissingIDs() throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: root)
+        let photos = (1...1100).map { asset($0) }
+        try db.ingest(photos)
+        let requested = photos.reversed().map(\.id) + [asset(9999).id, photos[0].id]
+        #expect(try db.assets(ids: requested) == Array(photos.reversed()) + [photos[0]])
+        #expect(try db.assets(ids: []).isEmpty)
+    }
+
     @Test func snapshotIncludesCommittedWALAndRestoresOpenReadersAndNavigation() throws {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }

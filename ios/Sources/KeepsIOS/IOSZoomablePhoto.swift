@@ -25,6 +25,7 @@ final class PhotoZoomController: UIViewController, UIScrollViewDelegate, UIGestu
     private var asset: KeepsAsset
     private var configuration: KeepsConfiguration?
     private var viewport = CGSize.zero
+    private var previewScale: CGFloat = 1
     var toggleControls: () -> Void
     var close: () -> Void
 
@@ -80,10 +81,22 @@ final class PhotoZoomController: UIViewController, UIScrollViewDelegate, UIGestu
         guard self.asset != asset || self.configuration != configuration else { return }
         self.asset = asset
         self.configuration = configuration
-        host.rootView = IOSPreviewImage(asset: asset, configuration: configuration, loadStandard: true)
+        refreshPreview()
     }
 
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { host.view }
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        let scale = min(scrollView.maximumZoomScale, ceil(scrollView.zoomScale))
+        guard scale > previewScale else { return }
+        previewScale = scale
+        refreshPreview()
+    }
+
+    private func refreshPreview() {
+        host.rootView = IOSPreviewImage(asset: asset, configuration: configuration,
+                                       loadStandard: true, previewScale: previewScale)
+    }
 
     @objc private func toggle() { toggleControls() }
     @objc private func swipeDown() { if scroll.zoomScale <= 1.01 { close() } }

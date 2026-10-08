@@ -6,6 +6,9 @@ import KeepsAPI
 @MainActor
 final class IOSLibraryStore: ObservableObject {
     @Published private(set) var assets: [KeepsAsset] = []
+    @Published private(set) var timeline: [KeepsTimelineEntry] = []
+    private(set) var timelineRevision = 0
+    var visibleIDs: Set<UUID> = []
     @Published private(set) var total = 0
     @Published private(set) var layoutRevision = 0
     @Published private(set) var databaseRevision = 0
@@ -57,6 +60,9 @@ final class IOSLibraryStore: ObservableObject {
         isLoadingLocal = false
         database = nil
         assets = []
+        timeline = []
+        visibleIDs = []
+        timelineRevision += 1
         total = 0
         nextCursor = nil
         displayedQuery = nil
@@ -188,6 +194,7 @@ final class IOSLibraryStore: ObservableObject {
         var request = currentQuery
         request.limit = sameQuery ? max(200, loadedCount) : 200
         do {
+            let index = try await reader.timeline(configuration: configuration, root: databaseDirectory, query: currentQuery)
             let page = try await reader.page(configuration: configuration, root: databaseDirectory,
                 query: request, through: sameQuery && !canLoadNewer ? assets.last : nil,
                 first: sameQuery && canLoadNewer ? assets.first : nil, maximumLimit: windowLimit)
@@ -197,6 +204,8 @@ final class IOSLibraryStore: ObservableObject {
                 canLoadNewer = false
             }
             displayedQuery = currentQuery
+            timelineRevision += 1
+            timeline = index
             loadedCount = max(200, page.items.count)
             assets = page.items
             total = page.total
@@ -208,7 +217,24 @@ final class IOSLibraryStore: ObservableObject {
         }
     }
 
-    func synchronize(forceRebuild: Bool = false, progress: IOSOfflineProgress.Reporter? = nil) async {
+    /// Grid actions resolve only the requested photo; the full timeline owns scroll positions.
+    func asset(id: UUID) async -> KeepsAsset? {
+        guard let configuration else { return nil }
+        let currentGeneration = generation
+        let request = query
+        do {
+            let result = try await reader.assets(configuration: configuration, root: databaseDirectory, ids: [id])
+            guard generation == currentGeneration, request == query,
+                  timeline.contains(where: { $0.id == id }) else { return nil }
+            return result.first
+        } catch {
+            guard generation == currentGeneration else { return nil }
+            lastError = String(reflecting: error)
+            return nil
+        }
+    }
+
+    func synchronize(forceRebuild: Bool = false, includeThumbnails: Bool? = nil, progress: IOSOfflineProgress.Reporter? = nil) async {
         let observerID = UUID()
         if let progress { syncObservers[observerID] = progress }
         defer { syncObservers.removeValue(forKey: observerID) }
@@ -228,7 +254,7 @@ final class IOSLibraryStore: ObservableObject {
             }
             do {
                 try await synchronizer.run(configuration: configuration, root: databaseDirectory,
-                    session: session, forceRebuild: forceRebuild) { stage, completed, total in
+                    session: session, forceRebuild: forceRebuild, includeThumbnails: includeThumbnails) { stage, completed, total in
                         guard self.generation == currentGeneration else { return }
                         for observer in Array(self.syncObservers.values) { await observer(stage, completed, total) }
                     }
@@ -244,8 +270,8 @@ final class IOSLibraryStore: ObservableObject {
         await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
     }
 
-    func synchronizeChecked(forceRebuild: Bool = false, progress: IOSOfflineProgress.Reporter? = nil) async throws {
-        await synchronize(forceRebuild: forceRebuild, progress: progress)
+    func synchronizeChecked(forceRebuild: Bool = false, includeThumbnails: Bool? = nil, progress: IOSOfflineProgress.Reporter? = nil) async throws {
+        await synchronize(forceRebuild: forceRebuild, includeThumbnails: includeThumbnails, progress: progress)
         try Task.checkCancellation()
         if let syncError { throw NSError(domain: "KeepsOfflineRebuild", code: 1, userInfo: [NSLocalizedDescriptionKey: syncError]) }
     }
@@ -280,14 +306,14 @@ private actor IOSCatalogSynchronizer {
     }
 
     func run(configuration: KeepsConfiguration, root: URL?, session: URLSession,
-             forceRebuild: Bool, progress: IOSOfflineProgress.Reporter?) async throws {
+             forceRebuild: Bool, includeThumbnails: Bool?, progress: IOSOfflineProgress.Reporter?) async throws {
         try Task.checkCancellation()
         let database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: root)
         let remote = try await KeepsClient(configuration: configuration, session: session).revision()
         if !forceRebuild, try database.syncCheckpoint == nil, try database.revision == remote.revision { return }
         let rebuild = KeepsOfflineRebuild(session: session)
         _ = try await rebuild.run(configuration: configuration, databaseRoot: root,
-                                  includeThumbnails: forceRebuild || (try database.revision) == nil || (try database.syncCheckpoint) != nil) { update in
+                                  includeThumbnails: includeThumbnails ?? (forceRebuild || (try database.revision) == nil || (try database.syncCheckpoint) != nil)) { update in
             let stage: IOSOfflineProgress.Stage
             switch update.phase {
             case .building:
@@ -313,6 +339,22 @@ private actor IOSCatalogReader {
     private var configuration: KeepsConfiguration?
     private var database: KeepsLibraryDatabase?
 
+    private func open(configuration: KeepsConfiguration, root: URL?) throws -> KeepsLibraryDatabase {
+        if self.configuration != configuration {
+            database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: root)
+            self.configuration = configuration
+        }
+        return database!
+    }
+
+    func timeline(configuration: KeepsConfiguration, root: URL?, query: KeepsAssetQuery) throws -> [KeepsTimelineEntry] {
+        try open(configuration: configuration, root: root).timeline(query: query)
+    }
+
+    func assets(configuration: KeepsConfiguration, root: URL?, ids: [UUID]) throws -> [KeepsAsset] {
+        try open(configuration: configuration, root: root).assets(ids: ids)
+    }
+
     func window(configuration: KeepsConfiguration, root: URL?, query: KeepsAssetQuery,
                 around asset: KeepsAsset) throws -> (page: KeepsAssetPage, hasNewer: Bool)? {
         var request = query
@@ -329,11 +371,7 @@ private actor IOSCatalogReader {
     func page(configuration: KeepsConfiguration, root: URL?, query: KeepsAssetQuery,
               older: KeepsAsset? = nil, newer: KeepsAsset? = nil, through: KeepsAsset? = nil,
               first: KeepsAsset? = nil, maximumLimit: Int? = nil, knownTotal: Int? = nil) throws -> KeepsAssetPage {
-        if self.configuration != configuration {
-            database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: root)
-            self.configuration = configuration
-        }
-        return try database!.assets(query: query, includingThrough: through, olderThan: older,
+        return try open(configuration: configuration, root: root).assets(query: query, includingThrough: through, olderThan: older,
                                     newerThan: newer, startingAt: first, maximumLimit: maximumLimit, knownTotal: knownTotal)
     }
 }

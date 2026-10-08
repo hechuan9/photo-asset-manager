@@ -11,7 +11,7 @@ public struct KeepsConfiguration: Equatable, Sendable {
     }
 }
 
-public enum KeepsMediaRole: String, Sendable { case thumbnail, standard, preview }
+public enum KeepsMediaRole: String, Sendable { case thumbnail, browse, standard, preview }
 
 public struct KeepsPreview: Codable, Equatable, Sendable {
     public var downloadURL: URL
@@ -37,6 +37,7 @@ public struct KeepsAsset: Codable, Identifiable, Equatable, Sendable {
     public var updatedAt: String
     public var trashed: Bool
     public var preview: KeepsPreview?
+    public var browseThumbnail: KeepsPreview? = nil
     public var thumbnail: KeepsPreview? = nil
     public var standard: KeepsPreview? = nil
     public var paths: [String]? = nil

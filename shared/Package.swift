@@ -4,5 +4,5 @@ let package = Package(
     name: "KeepsAPI",
     platforms: [.macOS(.v14), .iOS(.v17)],
     products: [.library(name: "KeepsAPI", targets: ["KeepsAPI"])],
-    targets: [.target(name: "KeepsAPI", linkerSettings: [.linkedLibrary("sqlite3")]), .testTarget(name: "KeepsAPITests", dependencies: ["KeepsAPI"])]
+    targets: [.target(name: "KeepsAPI", resources: [.process("Resources")], linkerSettings: [.linkedLibrary("sqlite3")]), .testTarget(name: "KeepsAPITests", dependencies: ["KeepsAPI"])]
 )

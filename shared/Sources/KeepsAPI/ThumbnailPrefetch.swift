@@ -28,20 +28,25 @@ public actor ThumbnailPrefetch {
     private let fetchPage: @Sendable (KeepsConfiguration, KeepsAssetQuery) async throws -> KeepsAssetPage
     private let fetchCounts: @Sendable (KeepsConfiguration) async throws -> KeepsCounts
     private let prefetch: @Sendable (KeepsAsset, KeepsConfiguration) async throws -> Bool
+    private let browseCache: PreviewCache
     private let localCache: PreviewCache
     private let delay: Duration
 
-    public init(cache: PreviewCache = .thumbnails) {
+    public init(cache: PreviewCache = .thumbnails, browseCache: PreviewCache = .browsing) {
+        self.browseCache = browseCache
         localCache = cache
         defaults = .standard
         fetchPage = { try await KeepsClient(configuration: $0).assets(query: $1) }
         fetchCounts = { try await KeepsClient(configuration: $0).counts(showHidden: true) }
         prefetch = { asset, configuration in
-            guard let thumbnail = asset.thumbnail else { return false }
             while await PreviewCache.standards.isDownloading {
                 try await Task.sleep(for: .seconds(1))
             }
-            return try await PreviewCache.thumbnails.prefetch(assetID: asset.id, preview: thumbnail, configuration: configuration)
+            for (descriptor, cache) in [(asset.thumbnail, cache), (asset.browseThumbnail, browseCache)] {
+                guard let descriptor else { continue }
+                guard try await cache.prefetch(assetID: asset.id, preview: descriptor, configuration: configuration) else { return false }
+            }
+            return true
         }
         delay = .milliseconds(250)
     }
@@ -50,6 +55,7 @@ public actor ThumbnailPrefetch {
          fetchPage: @escaping @Sendable (KeepsConfiguration, KeepsAssetQuery) async throws -> KeepsAssetPage,
          fetchCounts: @escaping @Sendable (KeepsConfiguration) async throws -> KeepsCounts,
          prefetch: @escaping @Sendable (KeepsAsset, KeepsConfiguration) async throws -> Bool) {
+        browseCache = .browsing
         localCache = .thumbnails
         defaults = UserDefaults(suiteName: defaultsSuite)!
         self.fetchPage = fetchPage
@@ -62,7 +68,7 @@ public actor ThumbnailPrefetch {
     public func run(configuration: KeepsConfiguration, singlePass: Bool = false,
                     progress: (@Sendable (Progress) async -> Void)? = nil) async -> Bool {
         let identity = [configuration.baseURL.absoluteString, configuration.libraryID].map { "\($0.utf8.count):\($0)" }.joined()
-        let checkpoint = "thumbnail-prefetch-v2-" + SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+        let checkpoint = "thumbnail-prefetch-v3-" + SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
         while running.contains(checkpoint) {
             do { try await Task.sleep(for: .milliseconds(250)) } catch { return false }
         }
@@ -124,8 +130,10 @@ public actor ThumbnailPrefetch {
             guard let revision = try database.revision, try database.syncCheckpoint == nil else {
                 throw LocalCatalogUnavailable()
             }
-            var cachedKeys = try await localCache.cachedKeys()
-            var requiredKeys: Set<String> = []
+            var cachedKeys: [KeepsMediaRole: Set<String>] = [
+                .thumbnail: try await localCache.cachedKeys(), .browse: try await browseCache.cachedKeys()
+            ]
+            var requirements: [[(KeepsMediaRole, String)]] = []
             var downloaded = false
             var pages: [(KeepsAssetQuery, KeepsAssetPage)] = []
             for trashed in [false, true] {
@@ -149,27 +157,33 @@ public actor ThumbnailPrefetch {
                     }
                     for asset in page.items {
                         try Task.checkCancellation()
-                        if let thumbnail = asset.thumbnail {
-                            let key = PreviewCache.key(assetID: asset.id, preview: thumbnail,
-                                                       configuration: configuration, role: .thumbnail)
-                            requiredKeys.insert(key)
-                            if !cachedKeys.contains(key), downloadMissing {
-                                do {
-                                    downloaded = true
-                                    guard try await localCache.prefetch(assetID: asset.id, preview: thumbnail,
-                                                                         configuration: configuration),
-                                          try await localCache.containsCachedKey(key) else { throw CacheUnavailable() }
-                                    cachedKeys.insert(key)
-                                } catch {
-                                    try Task.checkCancellation()
-                                    state.lastError = String(reflecting: error)
-                                    Logger(subsystem: "local.keeps", category: "thumbnail-prefetch")
-                                        .error("Local thumbnail \(asset.id) failed: \(String(reflecting: error), privacy: .public)")
-                                }
+                        var required: [(KeepsMediaRole, String)] = []
+                        for (role, descriptor, cache) in [
+                            (KeepsMediaRole.thumbnail, asset.thumbnail, localCache),
+                            (KeepsMediaRole.browse, asset.browseThumbnail, browseCache)
+                        ] {
+                            guard let descriptor else { continue }
+                            let key = PreviewCache.key(assetID: asset.id, preview: descriptor,
+                                                       configuration: configuration, role: role)
+                            required.append((role, key))
+                            if cachedKeys[role]!.contains(key) || !downloadMissing { continue }
+                            do {
+                                downloaded = true
+                                guard try await cache.prefetch(assetID: asset.id, preview: descriptor,
+                                                               configuration: configuration),
+                                      try await cache.containsCachedKey(key) else { throw CacheUnavailable() }
+                                cachedKeys[role]!.insert(key)
+                            } catch {
+                                try Task.checkCancellation()
+                                state.lastError = String(reflecting: error)
+                                Logger(subsystem: "local.keeps", category: "thumbnail-prefetch")
+                                    .error("Local \(role.rawValue) \(asset.id) failed: \(String(reflecting: error), privacy: .public)")
                             }
-                            if cachedKeys.contains(key) { state.cached += 1 }
-                            else { state.failed += 1 }
-                        } else { state.unavailable += 1 }
+                        }
+                        requirements.append(required)
+                        if required.contains(where: { !cachedKeys[$0.0]!.contains($0.1) }) { state.failed += 1 }
+                        else if required.count == 2 { state.cached += 1 }
+                        else { state.unavailable += 1 }
                         state.processed += 1
                         if lastProgress.duration(to: clock.now) >= .seconds(1) {
                             await progress?(state)
@@ -187,15 +201,21 @@ public actor ThumbnailPrefetch {
                 throw LocalCatalogUnavailable()
             }
             if downloaded {
-                let persisted = try await localCache.cachedKeys()
-                state.cached = requiredKeys.intersection(persisted).count
-                state.failed = requiredKeys.count - state.cached
+                cachedKeys = [.thumbnail: try await localCache.cachedKeys(), .browse: try await browseCache.cachedKeys()]
+                state.cached = 0
+                state.failed = 0
+                state.unavailable = 0
+                for required in requirements {
+                    if required.contains(where: { !cachedKeys[$0.0]!.contains($0.1) }) { state.failed += 1 }
+                    else if required.count == 2 { state.cached += 1 }
+                    else { state.unavailable += 1 }
+                }
             }
             try Task.checkCancellation()
             guard try database.revision == revision, try database.syncCheckpoint == nil else {
                 throw LocalCatalogUnavailable()
             }
-            // Assets without a server thumbnail are valid catalog records, not failed downloads.
+            // Missing NAS derivatives use placeholders; existing descriptors must be persisted before entry.
             state.isComplete = state.processed == state.total && state.failed == 0
             if !state.isComplete, state.lastError == nil {
                 state.lastError = "已有缩略图尚未全部缓存：缺失 \(state.failed)。"
@@ -232,12 +252,13 @@ public actor ThumbnailPrefetch {
                          progress: (@Sendable (Progress) async -> Void)?) async throws {
         for asset in page.items where !state.pageCompleted.contains(asset.id) {
             try Task.checkCancellation()
-            if asset.thumbnail == nil {
+            if asset.thumbnail == nil && asset.browseThumbnail == nil {
                 state.progress.unavailable += 1
             } else {
                 do {
                     try await cache(asset, configuration: configuration, singlePass: singlePass)
-                    state.progress.cached += 1
+                    if asset.thumbnail != nil && asset.browseThumbnail != nil { state.progress.cached += 1 }
+                    else { state.progress.unavailable += 1 }
                 } catch is CacheUnavailable {
                     throw CacheUnavailable()
                 } catch {

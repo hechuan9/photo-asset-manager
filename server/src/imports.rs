@@ -139,8 +139,9 @@ fn group(file: &InputFile) -> Result<(String, String, String)> {
         .unwrap_or("")
         .to_ascii_lowercase();
     ensure!(
-        crate::media::is_raw(path) || ["heif", "heic", "hif", "xmp"].contains(&ext.as_str()),
-        invalid("only RAW, HEIF and associated XMP are supported")
+        crate::media::is_raw(path)
+            || ["jpg", "jpeg", "heif", "heic", "hif", "xmp"].contains(&ext.as_str()),
+        invalid("only RAW, JPEG, HEIF and associated XMP are supported")
     );
     let mut stem = path
         .file_stem()
@@ -149,9 +150,9 @@ fn group(file: &InputFile) -> Result<(String, String, String)> {
     if ext == "xmp" {
         let p = FsPath::new(stem);
         if crate::media::is_raw(p)
-            || p.extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| ["heif", "heic", "hif"].contains(&e.to_ascii_lowercase().as_str()))
+            || p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                ["jpg", "jpeg", "heif", "heic", "hif"].contains(&e.to_ascii_lowercase().as_str())
+            })
         {
             stem = p
                 .file_stem()
@@ -296,7 +297,7 @@ fn prepare(jobs: &Jobs, library: &str, mut input: Prepare) -> Result<Batch> {
             entries
                 .iter()
                 .any(|e| !e.2.to_ascii_lowercase().ends_with(".xmp")),
-            invalid("XMP must accompany a RAW or HEIF file with the same source stem")
+            invalid("XMP must accompany a RAW, JPEG or HEIF file with the same source stem")
         );
         let stem = &entries
             .iter()
@@ -793,6 +794,55 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["IMG.xmp", "IMG.cr3", "IMG.cr3.xmp"]
         );
+    }
+    #[test]
+    fn jpeg_import_keeps_sidecars_together_on_name_collision() {
+        for extension in ["JPG", "JpEg"] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("photos");
+            std::fs::create_dir(&root).unwrap();
+            let original = root.join(format!("IMG.{extension}"));
+            std::fs::write(&original, b"existing").unwrap();
+            let jobs = Jobs::open(&dir.path().join("jobs.sqlite"), &root).unwrap();
+            jobs.add_folder("lib", ".").unwrap();
+            let paths = [
+                format!("deep/nested/IMG.{extension}"),
+                "deep/nested/img.XMP".into(),
+                format!("deep/nested/img.{}.XmP", extension.to_lowercase()),
+            ];
+            let batch = prepare(
+                &jobs,
+                "lib",
+                Prepare {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    target_path: jobs.root().to_str().unwrap().into(),
+                    deduplicate: false,
+                    files: paths
+                        .iter()
+                        .map(|path| InputFile {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            relative_path: path.clone(),
+                            size: 1,
+                            sha256: None,
+                        })
+                        .collect(),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                batch
+                    .files
+                    .iter()
+                    .map(|f| f.file_name.clone())
+                    .collect::<Vec<_>>(),
+                vec![
+                    format!("IMG (1).{extension}"),
+                    "IMG (1).xmp".into(),
+                    format!("IMG (1).{extension}.xmp"),
+                ]
+            );
+            assert_eq!(std::fs::read(original).unwrap(), b"existing");
+        }
     }
     #[test]
     fn reservations_survive_restart_and_avoid_other_extensions() {

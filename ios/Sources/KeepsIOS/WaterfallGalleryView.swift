@@ -1,5 +1,6 @@
 import SwiftUI
 import KeepsAPI
+import OSLog
 
 struct IOSWaterfallGallery: View {
     @EnvironmentObject private var library: IOSLibraryStore
@@ -32,7 +33,11 @@ struct IOSPreviewImage: View {
     let configuration: KeepsConfiguration?
     var contentMode: ContentMode = .fit
     var loadStandard = false
-    var body: some View { KeepsPreviewImage(asset: asset, configuration: configuration, contentMode: contentMode, loadStandard: loadStandard) }
+    var previewScale: CGFloat = 1
+    var body: some View {
+        KeepsPreviewImage(asset: asset, configuration: configuration, contentMode: contentMode,
+                          loadStandard: loadStandard, previewScale: previewScale)
+    }
 }
 
 struct IOSPhotoViewer: View {
@@ -51,6 +56,22 @@ struct IOSPhotoViewer: View {
     }
 
     private var current: KeepsAsset { photos.first { $0.id == selection } ?? initialAsset }
+
+    private var previewBuffer: [KeepsAsset] {
+        guard let index = photos.firstIndex(where: { $0.id == selection }) else { return [initialAsset] }
+        return [0, 1, -1, 2, -2].compactMap { offset in
+            let candidate = index + offset
+            return photos.indices.contains(candidate) ? photos[candidate] : nil
+        }
+    }
+
+    private var previewBufferIdentity: String {
+        let connection = library.configuration
+        return ([connection?.baseURL.absoluteString ?? "", connection?.libraryID ?? "",
+                 connection?.accessCredential ?? ""] + previewBuffer.map {
+            "\($0.id)|\($0.standard?.version ?? "")"
+        }).joined(separator: "|")
+    }
 
     var body: some View {
         ZStack {
@@ -123,6 +144,24 @@ struct IOSPhotoViewer: View {
                 await library.loadMore()
             } else if photos.suffix(3).contains(where: { $0.id == selection }), library.canLoadNewer {
                 await library.loadNewer()
+            }
+        }
+        .task(id: previewBufferIdentity) {
+            guard let configuration = library.configuration else { return }
+            // Warm encoded files in order; full-size decoding belongs to the visible page.
+            for asset in previewBuffer {
+                guard !Task.isCancelled else { return }
+                guard let standard = asset.standard else { continue }
+                do {
+                    let cached = try await PreviewCache.standards.prefetch(
+                        assetID: asset.id, preview: standard, configuration: configuration, skipWhenBusy: false
+                    )
+                    if !cached { return }
+                } catch {
+                    guard !Task.isCancelled, !(error is CancellationError) else { return }
+                    Logger(subsystem: "com.hechuan.Keeps", category: "photo-viewer")
+                        .error("Standard preview prefetch failed: \(String(reflecting: error), privacy: .public)")
+                }
             }
         }
         .sheet(item: $information) { asset in

@@ -25,7 +25,7 @@ struct ImportView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("导入照片到 NAS").font(.title2)
-            Text("递归读取来源中的 RAW、HEIF/HEIC 及关联 XMP，全部放入同一个目标文件夹。原文件保留，同名文件自动另取名称。")
+            Text("递归读取来源中的 RAW、JPG/JPEG、HEIF/HEIC 及关联 XMP，全部放入同一个目标文件夹。原文件保留，同名文件自动另取名称。")
                 .foregroundStyle(.secondary)
             HStack {
                 Text("来源：\(store.source?.path ?? "未选择")").lineLimit(2).textSelection(.enabled)
@@ -37,8 +37,8 @@ struct ImportView: View {
             Toggle("跳过目标文件夹中内容完全相同的文件", isOn: $store.deduplicate)
                 .disabled(store.isBusy || store.manifest != nil)
             Text(store.deduplicate
-                 ? "开启后会读取文件内容进行比较；缺失的 RAW、HEIF 或 XMP 会按配对补齐。"
-                 : "默认不去重、不预读整批照片；RAW、HEIF 和 XMP 保持配对，同名冲突整组改名。")
+                 ? "开启后会读取文件内容进行比较；缺失的 RAW、JPEG、HEIF 或 XMP 会按配对补齐。"
+                 : "默认不去重、不预读整批照片；RAW、JPEG、HEIF 和 XMP 保持配对，同名冲突整组改名。")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             Text(store.message).textSelection(.enabled)
