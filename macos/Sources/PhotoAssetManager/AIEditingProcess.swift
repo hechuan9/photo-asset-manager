@@ -6,9 +6,11 @@ struct AIEditingFailure: LocalizedError {
     let message: String
     var errorDescription: String? { message }
     let logDirectory: URL?
-    init(_ message: String, logDirectory: URL? = nil) {
+    let retryable: Bool
+    init(_ message: String, logDirectory: URL? = nil, retryable: Bool = false) {
         self.message = message
         self.logDirectory = logDirectory
+        self.retryable = retryable
     }
 
     static func process(_ result: AIEditingProcess.Result, job: URL) -> AIEditingFailure {
@@ -32,7 +34,9 @@ struct AIEditingFailure: LocalizedError {
         } else {
             message = "AI 调色进程意外退出，暂时无法确定原因。请重试；若再次失败，请提供诊断日志（退出码 \(result.exitCode)）。"
         }
-        return AIEditingFailure(message, logDirectory: job)
+        let retryable = contains(["429 too many", "status code: 429", "status 429", "http 429", "rate limit", "rate_limit", "too many requests", "stream disconnected", "dns", "connection reset", "network is unreachable"])
+            && !contains(["insufficient_quota", "usage limit", "quota exceeded", "credit balance"])
+        return AIEditingFailure(message, logDirectory: job, retryable: retryable)
     }
 
     static func userMessage(_ error: Error) -> String {
@@ -151,6 +155,7 @@ private final class AIProcessOutput: @unchecked Sendable {
         if let input { try inputPipe.fileHandleForWriting.write(contentsOf: Data(input.utf8)) }
         try inputPipe.fileHandleForWriting.close()
         let deadline = Date().addingTimeInterval(timeout)
+        var stoppedError: AIEditingFailure?
         while child.isRunning {
             for line in output.drainLines() { onEvent?(line) }
             progress?(output.text() + "\n" + errors.text())
@@ -161,7 +166,8 @@ private final class AIProcessOutput: @unchecked Sendable {
                 let stopDeadline = Date().addingTimeInterval(3)
                 while child.isRunning && Date() < stopDeadline { try? await Task.sleep(for: .milliseconds(100)) }
                 for pid in descendants.reversed() { Darwin.kill(pid, SIGKILL) }
-                throw AIEditingFailure(wasCancelled ? "操作已取消。" : "操作超时，请检查网络后重试。")
+                stoppedError = AIEditingFailure(wasCancelled ? "操作已取消。" : "操作超时，请检查网络后重试。")
+                break
             }
             try? await Task.sleep(for: .milliseconds(100))
         }
@@ -172,6 +178,7 @@ private final class AIProcessOutput: @unchecked Sendable {
         }
         for line in output.drainLines() { onEvent?(line) }
         progress?(output.text() + "\n" + errors.text())
+        if let stoppedError { throw stoppedError }
         return Result(exitCode: child.terminationStatus, output: output.text(), errors: errors.text())
     }
 

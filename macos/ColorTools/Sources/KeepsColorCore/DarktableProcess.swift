@@ -49,7 +49,9 @@ public final class DarktableProcess {
         if !fm.fileExists(atPath: baselineURL.path) {
             let output = directory.appendingPathComponent("initial-\(UUID().uuidString).jpg")
             let args = Self.arguments(input: input, xmp: nil, output: output, directory: directory, size: 1600, writeSidecar: true)
-            _ = try Self.run(executable, arguments: args, log: directory.appendingPathComponent("initial.log"))
+            _ = try measuredRender(directory: directory, operation: "initial") {
+                try Self.run(executable, arguments: args, log: directory.appendingPathComponent("initial.log"))
+            }
             let generated = URL(fileURLWithPath: input.path + ".xmp")
             try Data(contentsOf: generated).write(to: baselineURL, options: .atomic)
         }
@@ -68,7 +70,9 @@ public final class DarktableProcess {
         let sidecar = directory.appendingPathComponent(stem + ".xmp")
         try xmp.write(to: sidecar, atomically: true, encoding: .utf8)
         let pending = directory.appendingPathComponent(stem + "-\(UUID().uuidString).jpg")
-        _ = try Self.run(executable, arguments: Self.arguments(input: input, xmp: sidecar, output: pending, directory: directory, size: full ? 0 : 1600, writeSidecar: false), log: directory.appendingPathComponent(stem + ".log"))
+        _ = try measuredRender(directory: directory, operation: stem) {
+            try Self.run(executable, arguments: Self.arguments(input: input, xmp: sidecar, output: pending, directory: directory, size: full ? 0 : 1600, writeSidecar: false), log: directory.appendingPathComponent(stem + ".log"))
+        }
         guard FileManager.default.fileExists(atPath: pending.path) else { throw ColorToolError("Renderer returned no output") }
         try FileManager.default.moveItem(at: pending, to: output)
         return output

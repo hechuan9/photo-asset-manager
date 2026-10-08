@@ -14,6 +14,8 @@ struct AIEditingSettingsView: View {
                 }
                 runtimeSection
                 accountSection
+                concurrencySection
+                AIEditingUsageView(store: store.usage)
                 verificationSection
                 progressSection
                 resultSection
@@ -30,7 +32,7 @@ struct AIEditingSettingsView: View {
                 Label(store.runtimeReady ? "运行环境已就绪" : "准备修图运行环境", systemImage: store.runtimeReady ? "checkmark.circle" : "shippingbox")
                 Spacer()
                 Button("检查运行环境") { Task { await store.prepare() } }
-                    .disabled(store.isBusy)
+                    .disabled(store.isBusy || store.batchActive)
             }.padding(8)
         } label: { Text("1. 运行环境") }
     }
@@ -40,7 +42,7 @@ struct AIEditingSettingsView: View {
             VStack(alignment: .leading, spacing: 12) {
                 TextField("修图账户邮箱", text: $store.expectedEmail)
                     .textFieldStyle(.roundedBorder)
-                    .disabled(store.isBusy)
+                    .disabled(store.isBusy || store.batchActive)
                     .accessibilityIdentifier("ai-editing-email")
                 Text("请在浏览器中使用此邮箱登录。账户核对通过后才能测试修图。")
                     .font(.caption).foregroundStyle(.secondary)
@@ -51,12 +53,12 @@ struct AIEditingSettingsView: View {
                 }
                 HStack {
                     Button("登录修图账户") { Task { await store.login() } }
-                        .disabled(store.isBusy || !store.runtimeReady || store.expectedEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(store.isBusy || store.batchActive || !store.runtimeReady || store.expectedEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .accessibilityIdentifier("ai-editing-login")
-                    Button("刷新状态") { Task { await store.refresh() } }.disabled(store.isBusy)
+                    Button("刷新状态") { Task { await store.refresh() } }.disabled(store.isBusy || store.batchActive)
                     Spacer()
                     Button("退出登录") { Task { await store.logout() } }
-                        .disabled(store.isBusy || store.accountEmail == nil)
+                        .disabled(store.isBusy || store.batchActive || store.accountEmail == nil)
                 }
                 if let url = store.loginURL {
                     Button("在浏览器中继续登录") { NSWorkspace.shared.open(url) }
@@ -73,7 +75,7 @@ struct AIEditingSettingsView: View {
                     .font(.callout).foregroundStyle(.secondary)
                 HStack {
                     Button("测试 AI 连接") { Task { await store.testConnection() } }
-                        .disabled(store.isBusy || !store.runtimeReady || store.accountEmail == nil)
+                        .disabled(store.isBusy || store.batchActive || !store.runtimeReady || store.accountEmail == nil)
                         .accessibilityIdentifier("ai-editing-test-connection")
                     if store.connectionVerified {
                         Label("连接已验证", systemImage: "checkmark.circle").foregroundStyle(.green)
@@ -82,10 +84,25 @@ struct AIEditingSettingsView: View {
                 }
                 Text("内置公开风景样片（CC0），无需连接照片库。").font(.caption).foregroundStyle(.secondary)
                 Button("使用内置样片验证") { Task { await store.testFixedPhoto() } }
-                    .disabled(store.isBusy || !store.connectionVerified)
+                    .disabled(store.isBusy || store.batchActive || !store.connectionVerified)
                     .accessibilityIdentifier("ai-editing-test-photo")
             }.padding(8)
         } label: { Text("3. 验证与试修图") }
+    }
+
+    private var concurrencySection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                Stepper("同时处理照片：\(store.limits.photos)", value: $store.limits.photos, in: 1...20)
+                Stepper("AI 会话：\(store.limits.ai)", value: $store.limits.ai, in: 1...20)
+                Stepper("本地渲染：\(store.limits.renders)", value: $store.limits.renders, in: 1...20)
+                Stepper("下载：\(store.limits.downloads)", value: $store.limits.downloads, in: 1...20)
+                Stepper("上传：\(store.limits.uploads)", value: $store.limits.uploads, in: 1...20)
+                Text("各项独立限制并发数量；本地渲染建议从 2 开始。修改在下一批调色生效。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.padding(8)
+            .disabled(store.isBusy || store.batchActive)
+        } label: { Text("并发处理") }
     }
 
     private var progressSection: some View {
@@ -94,7 +111,7 @@ struct AIEditingSettingsView: View {
                 if store.isBusy { ProgressView().controlSize(.small) }
                 Text(store.status).font(.callout).textSelection(.enabled)
                 Spacer()
-                if store.isBusy { Button("取消", action: store.cancel) }
+                if store.isBusy && !store.batchActive { Button("取消", action: store.cancel) }
             }
             if let error = store.errorMessage {
                 Text(error).font(.callout).foregroundStyle(.red).textSelection(.enabled)
@@ -123,4 +140,44 @@ struct AIEditingSettingsView: View {
         }
     }
 
+}
+
+private struct AIEditingUsageView: View {
+    @ObservedObject var store: AIEditingUsageStore
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                let today = store.days.first { $0.id == AIEditingUsageStore.dayKey(Date()) }
+                Text("今日：\(today?.tokens ?? 0) tokens · API 等价预估 \(money(today?.estimatedUSD ?? 0))")
+                    .font(.headline)
+                if let today, today.unknown > 0 {
+                    Text("\(today.unknown) 次运行尚未报告用量，合计可能不完整。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Text("按 GPT-6 Luna Standard 短上下文价格估算，不代表 ChatGPT 账户账单。日志不提供逐请求上下文档位，长上下文实际等价费用可能更高。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("每百万 tokens：输入 $0.10、缓存输入 $0.01、缓存写入 $0.125、输出 $0.50。费率核对：2026-10-08；每次运行保留当时费率。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Link("查看官方 API 价格", destination: URL(string: "https://developers.openai.com/api/docs/pricing")!)
+                if let error = store.errorMessage { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+                DisclosureGroup("每日历史（按运行开始时本机日期）") {
+                    if store.days.isEmpty { Text("尚无用量记录").foregroundStyle(.secondary) }
+                    ForEach(store.days) { day in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("\(day.id) · \(day.attempts.count) 次运行 · \(day.tokens) tokens · \(money(day.estimatedUSD))")
+                            Text("普通输入 \(day.ordinaryInput) · 缓存输入 \(day.cachedInput) · 缓存写入 \(day.cacheWriteInput) · 输出 \(day.output)")
+                                .font(.caption).foregroundStyle(.secondary)
+                            if day.unknown > 0 { Text("\(day.unknown) 次尚未报告用量（运行中或中断），未计入合计。")
+                                .font(.caption).foregroundStyle(.secondary) }
+                            if day.unpriced > 0 { Text("\(day.unpriced) 次没有已核对费率，未计入费用。")
+                                .font(.caption).foregroundStyle(.secondary) }
+                        }.padding(.vertical, 4)
+                    }
+                }
+            }.padding(8)
+        } label: { Text("用量与费用") }
+    }
+
+    private func money(_ dollars: Double) -> String { String(format: "$%.5f", dollars) }
 }

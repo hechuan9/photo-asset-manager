@@ -567,7 +567,7 @@ private struct AIBatchProgressView: View {
             Text(batch.isAwaitingConfirmation ? "为 \(batch.totalCount) 张照片进行 AI 调色？" : "AI 调色 · \(batch.completedCount) / \(batch.totalCount) 张")
                 .font(.title2)
             if batch.isAwaitingConfirmation {
-                Text("本次固定处理已选中的 \(batch.totalCount) 张照片。AI 在线分析预览，调色由这台 Mac 逐张执行，原图保持不变。")
+                Text("本次固定处理已选中的 \(batch.totalCount) 张照片。AI 在线分析预览，最多同时处理 \(batch.editor.limits.photos) 张，调色由这台 Mac 执行，原图保持不变。")
                 Text("运行期间将暂停客户端的其他操作。你可以随时取消，已完成的照片会保留调整。")
                     .foregroundStyle(.secondary)
             } else {
@@ -578,9 +578,47 @@ private struct AIBatchProgressView: View {
                     Spacer()
                     if batch.isRunning { ProgressView().controlSize(.small) }
                 }.font(.caption).foregroundStyle(.secondary)
-                if !batch.currentName.isEmpty { Text(batch.currentName).lineLimit(2) }
+                Text("处理中 \(batch.activeCount) · 等待 \(batch.waitingCount) · 待重试 \(batch.failedItems.count)")
+                    .font(.caption).foregroundStyle(.secondary)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(batch.activeItems) { item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.name).lineLimit(1)
+                                Text("\(item.title) · \(item.elapsedSeconds) 秒").font(.caption).foregroundStyle(.secondary)
+                                ProgressView(value: item.progress).animation(.linear(duration: 1), value: item.progress)
+                            }
+                        }
+                        ForEach(batch.failedItems) { item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.name).lineLimit(1)
+                                Text(item.failure ?? "").font(.caption).foregroundStyle(.red)
+                                if let result = item.result?.fullSize {
+                                    Button("查看已保留的调色结果") { NSWorkspace.shared.activateFileViewerSelecting([result]) }
+                                }
+                                DisclosureGroup("诊断详情") { Text(item.failureDetails ?? "").font(.caption).textSelection(.enabled) }
+                            }
+                        }
+                    }
+                }.frame(maxHeight: 240)
             }
             Text(batch.status).font(.callout)
+            if let items = batch.batch?.items, items.contains(where: { $0.result?.timing != nil }) {
+                DisclosureGroup("已处理照片耗时") {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            ForEach(items) { item in
+                                if let timing = item.result?.timing {
+                                    Text("\(item.name)：AI 会话 \(Int(timing.sessionSeconds)) 秒，本地渲染 \(Int(timing.renderSeconds)) 秒，渲染排队 \(Int(timing.renderQueueSeconds)) 秒")
+                                        .font(.caption).textSelection(.enabled)
+                                }
+                            }
+                        }
+                    }.frame(maxHeight: 120)
+                    Text("会话时间包含工具执行；渲染与排队时间含本照片的重试，不能直接相加为批次耗时。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
             if batch.isFinished, let batchState = batch.batch {
                 ScrollView {
                     LazyVStack(alignment: .leading) {
@@ -590,7 +628,7 @@ private struct AIBatchProgressView: View {
                     }
                 }.frame(maxHeight: 120)
             }
-            if let error = batch.errorMessage {
+            if let error = batch.errorMessage, batch.failedItems.isEmpty {
                 ScrollView { Text(error).foregroundStyle(.red).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
                     .frame(maxHeight: 140)
                 DisclosureGroup("诊断详情") {

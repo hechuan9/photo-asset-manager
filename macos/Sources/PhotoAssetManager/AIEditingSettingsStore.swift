@@ -3,6 +3,12 @@ import Combine
 import CryptoKit
 
 @MainActor final class AIEditingSettingsStore: ObservableObject {
+    @Published var limits: AIEditingLimits { didSet { limits.save(defaults: defaults) } }
+    let usage: AIEditingUsageStore
+    private var gradingRunners: [UUID: AIEditingProcess] = [:]
+    @Published private(set) var activeGrades = 0
+    @Published var batchActive = false
+    @Published var usageError: String?
     @Published var expectedEmail: String {
         didSet {
             defaults.set(expectedEmail, forKey: "aiEditing.expectedEmail")
@@ -30,11 +36,13 @@ import CryptoKit
 
     init(root: URL? = nil, runtime: URL? = nil, defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        self.limits = AIEditingLimits.load(defaults: defaults)
         self.expectedEmail = defaults.string(forKey: "aiEditing.expectedEmail") ?? "hechuan@climamind.ai"
         self.root = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Keeps/AIEditing", isDirectory: true)
         self.runtime = runtime ?? (Bundle.main.resourceURL ?? Bundle.main.bundleURL).appendingPathComponent("AIEditing", isDirectory: true)
         self.codeRuntime = runtime ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers", isDirectory: true)
+        self.usage = AIEditingUsageStore(root: self.root.appendingPathComponent("usage", isDirectory: true))
         self.logDirectory = self.root.appendingPathComponent("logs", isDirectory: true)
     }
 
@@ -93,8 +101,8 @@ import CryptoKit
             self.connectionVerified = false
             try self.prepareDirectories(); try self.checkRuntime(); try self.readAccount(); try self.requireAccount()
             let job = try self.newJob("connection")
-            let result = try await self.runner.run(executable: self.executable,
-                arguments: self.execArguments(job: job) + ["-"], home: self.home, directory: job,
+            let result = try await self.runTracked(runner: self.runner, job: job,
+                arguments: self.execArguments(job: job) + ["-"],
                 input: "Reply with exactly KEEPS_CONNECTION_OK. Do not use any tools.", timeout: 90)
             try self.writeLog(result, job: job)
             guard result.exitCode == 0 else { throw AIEditingFailure.process(result, job: job) }
@@ -131,10 +139,11 @@ import CryptoKit
     }
 
     func gradePhoto(_ source: URL, job: URL, progress: ((String, Double, Double) -> Void)? = nil) async throws -> AIGradeResult {
-        guard !isBusy else { throw AIEditingFailure("已有 AI 操作正在执行。") }
+        let id = UUID(), gradingRunner = AIEditingProcess()
+        gradingRunners[id] = gradingRunner
+        activeGrades = gradingRunners.count
         isBusy = true
-        defer { isBusy = false }
-        try validateEditingAccount()
+        defer { gradingRunners[id] = nil; activeGrades = gradingRunners.count; isBusy = activeGrades > 0 }
         let result = job.appendingPathComponent("result.json")
         if FileManager.default.fileExists(atPath: result.path) {
             do { return try Self.gradeResult(in: job) }
@@ -144,14 +153,19 @@ import CryptoKit
                 try FileManager.default.moveItem(at: result, to: rejected)
             }
         }
-        try await runPhoto(source, job: job, progress: progress)
+        try validateEditingAccount()
+        try await runPhoto(source, job: job, runner: gradingRunner, progress: progress)
         return try Self.gradeResult(in: job)
     }
 
-    func stopForExit() { runner.stopForExit() }
+    func stopForExit() {
+        runner.stopForExit()
+        for runner in gradingRunners.values { runner.stopForExit() }
+    }
 
-    private func runPhoto(_ source: URL, job requestedJob: URL? = nil, progress: ((String, Double, Double) -> Void)? = nil) async throws {
-        self.resultPreview = nil; self.resultSummary = nil
+    private func runPhoto(_ source: URL, job requestedJob: URL? = nil, runner suppliedRunner: AIEditingProcess? = nil, progress: ((String, Double, Double) -> Void)? = nil) async throws {
+        let runner = suppliedRunner ?? self.runner
+        if requestedJob == nil { self.resultPreview = nil; self.resultSummary = nil }
         try self.prepareDirectories(); try self.checkRuntime(); try self.readAccount(); try self.requireAccount()
         guard requestedJob != nil || self.connectionVerified else { throw AIEditingFailure("请先完成模型连接测试。") }
         let allowed = ["arw", "3fr", "dng", "cr2", "cr3", "nef", "raf", "orf", "rw2", "jpg", "jpeg", "heic", "heif"]
@@ -175,15 +189,37 @@ import CryptoKit
             "mcp_servers.keeps_color.command": self.codeRuntime.appendingPathComponent("keeps-color-mcp").path,
             "mcp_servers.keeps_color.args": ["--darktable", self.codeRuntime.appendingPathComponent("darktable.app/Contents/MacOS/darktable-cli").path,
                 "--source", source.path, "--job", job.appendingPathComponent("render").path],
-            "mcp_servers.keeps_color.startup_timeout_sec": 180,
-            "mcp_servers.keeps_color.tool_timeout_sec": 240]
+            "mcp_servers.keeps_color.env.KEEPS_RENDER_LIMIT": String(limits.renders),
+            "mcp_servers.keeps_color.env.KEEPS_RENDER_SLOTS": root.appendingPathComponent("render-slots").path,
+            "mcp_servers.keeps_color.startup_timeout_sec": 7200,
+            "mcp_servers.keeps_color.tool_timeout_sec": 7200]
         for key in settings.keys.sorted() { arguments += ["-c", key + "=" + (try Self.json(settings[key]!))] }
-        let version = try await self.runner.run(executable: self.executable, arguments: ["--version"], home: self.home, directory: job, timeout: 15)
+        let version = try await runner.run(executable: self.executable, arguments: ["--version"], home: self.home, directory: job, timeout: 15)
         guard version.exitCode == 0 else { throw AIEditingFailure("无法检查内置 Codex 版本。") }
         let started = Date()
+        var toolStarted: [String: Date] = [:]
+        var toolSeconds = 0.0
+        let renderStatus = job.appendingPathComponent("render/render-status.json")
+        let renderMonitor = Task { @MainActor in
+            var previous = ""
+            while !Task.isCancelled {
+                if let data = try? Data(contentsOf: renderStatus),
+                   let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let phase = state["phase"] as? String, let stamp = state["startedAt"] as? String {
+                    let key = phase + stamp
+                    if key != previous {
+                        previous = key
+                        if phase == "waiting" { progress?("等待本地渲染名额", 0.15, 0.15) }
+                        if phase == "rendering" { progress?("darktable 正在渲染照片", 0.15, 0.85) }
+                    }
+                }
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            }
+        }
+        defer { renderMonitor.cancel() }
         var runExitCode: Int32 = -1
         defer {
-            let metadata: [String: Any] = ["model": self.model, "codexVersion": version.output.trimmingCharacters(in: .whitespacesAndNewlines),
+            let metadata: [String: Any] = ["toolSeconds": toolSeconds, "outsideToolsSeconds": max(0, Date().timeIntervalSince(started) - toolSeconds), "model": self.model, "codexVersion": version.output.trimmingCharacters(in: .whitespacesAndNewlines),
                 "engineVersion": "5.6.2", "elapsedSeconds": Date().timeIntervalSince(started), "exitCode": runExitCode,
                 "skillSHA256": SHA256.hash(data: skill).map { String(format: "%02x", $0) }.joined()]
             if let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys]) {
@@ -192,8 +228,17 @@ import CryptoKit
         }
         let prompt = String(decoding: skill, as: UTF8.self) + "\nComplete this photo independently using only Keeps tools. Return the specified result, with reason in Chinese."
         var steps = AIEditingSteps()
-        let result = try await self.runner.run(executable: self.executable, arguments: arguments + ["-"],
-            home: self.home, directory: job, input: prompt, timeout: 600, onEvent: { line in
+        let result = try await self.runTracked(runner: runner, job: job, arguments: arguments + ["-"],
+            input: prompt, timeout: 14400, onEvent: { line in
+                if let data = line.data(using: .utf8),
+                   let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let item = event["item"] as? [String: Any], item["type"] as? String == "mcp_tool_call",
+                   let id = item["id"] as? String {
+                    if event["type"] as? String == "item.started" { toolStarted[id] = Date() }
+                    if event["type"] as? String == "item.completed", let start = toolStarted.removeValue(forKey: id) {
+                        toolSeconds += Date().timeIntervalSince(start)
+                    }
+                }
                 if let step = steps.consume(line) { progress?(step.title, step.floor, step.ceiling) }
             })
         try self.writeLog(result, job: job)
@@ -201,15 +246,58 @@ import CryptoKit
         guard result.exitCode == 0 else { throw AIEditingFailure.process(result, job: job) }
         try self.readAccount(); try self.requireAccount()
         let validated = try Self.validateResult(in: job)
-        self.resultPreview = validated.preview
-        self.resultSummary = validated.reason
-        self.status = validated.selected ? "单张调色测试成功；结果保存在本机" : "测试完成；结果需要人工检查"
+        if requestedJob == nil {
+            self.resultPreview = validated.preview
+            self.resultSummary = validated.reason
+            self.status = validated.selected ? "单张调色测试成功；结果保存在本机" : "测试完成；结果需要人工检查"
+        }
     }
 
-    func cancel() { runner.cancel() }
+    func cancel() {
+        runner.cancel()
+        for runner in gradingRunners.values { runner.cancel() }
+    }
+
+    func withRenderSlot<T: Sendable>(_ operation: @Sendable () async throws -> T) async throws -> T {
+        try await RenderSlots.withSlot(directory: root.appendingPathComponent("render-slots"),
+                                       limit: limits.bounded.renders, operation: operation)
+    }
+
+    private func runTracked(runner: AIEditingProcess, job: URL, arguments: [String], input: String,
+                            timeout: TimeInterval, onEvent: ((String) -> Void)? = nil) async throws -> AIEditingProcess.Result {
+        let attempt = try usage.begin(model: model, account: accountEmail, job: job)
+        let events = job.appendingPathComponent("events-\(attempt.uuidString).jsonl")
+        try Data().write(to: events, options: .atomic)
+        let handle = try FileHandle(forWritingTo: events)
+        defer { try? handle.close() }
+        var lineIndex = 0
+        var recordingError: Error?
+        do {
+            let result = try await runner.run(executable: executable, arguments: arguments, home: home,
+                directory: job, input: input, timeout: timeout, onEvent: { line in
+                    defer { lineIndex += 1 }
+                    do {
+                        try handle.write(contentsOf: Data((Self.redacted(line) + "\n").utf8))
+                        try self.usage.consume(line, attemptID: attempt, eventIndex: lineIndex)
+                    } catch { recordingError = error; runner.cancel() }
+                    onEvent?(line)
+                })
+            if let recordingError { throw recordingError }
+            try usage.finish(attemptID: attempt, success: result.exitCode == 0)
+            return result
+        } catch {
+            do { try usage.finish(attemptID: attempt, success: false) }
+            catch { usageError = "用量记录无法保存：" + String(reflecting: error) }
+            let original = recordingError ?? error
+            let trace = Self.redacted(String(reflecting: original) + "\n" + runner.lastErrors)
+            do { try Data(trace.utf8).write(to: job.appendingPathComponent("failure-\(attempt.uuidString).log"), options: .atomic) }
+            catch { usageError = "诊断日志无法保存：" + String(reflecting: error) }
+            throw original
+        }
+    }
 
     private func perform(_ message: String, includeProcessLog: Bool = true, operation: () async throws -> Void) async {
-        guard !isBusy else { return }
+        guard !isBusy, !batchActive else { return }
         isBusy = true; status = message; errorMessage = nil
         defer { isBusy = false }
         do { try await operation() } catch {
@@ -316,7 +404,7 @@ import CryptoKit
         let checked = try validateResult(in: job)
         let result = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("result.json"))) as! [String: Any]
         guard checked.selected else {
-            return AIGradeResult(status: result["status"] as! String, reason: checked.reason)
+            return AIGradeResult(status: result["status"] as! String, reason: checked.reason, timing: AIGradeTiming.read(job))
         }
         let selection = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("render/selection.json"))) as! [String: Any]
         let state = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("render/candidates.json"))) as! [String: Any]
@@ -331,7 +419,7 @@ import CryptoKit
         let fullURL = URL(fileURLWithPath: full)
         let xmpURL = fullURL.deletingPathExtension().appendingPathExtension("xmp")
         return AIGradeResult(status: "selected", reason: checked.reason, fullSize: fullURL,
-            recipeJSON: String(decoding: recipe, as: UTF8.self), xmp: try String(contentsOf: xmpURL, encoding: .utf8))
+            recipeJSON: String(decoding: recipe, as: UTF8.self), xmp: try String(contentsOf: xmpURL, encoding: .utf8), timing: AIGradeTiming.read(job))
     }
 
     struct ValidatedResult { let selected: Bool; let preview: URL?; let reason: String }
@@ -370,6 +458,25 @@ struct AIGradeResult: Codable, Sendable {
     var fullSize: URL? = nil
     var recipeJSON: String? = nil
     var xmp: String? = nil
+    var timing: AIGradeTiming? = nil
+}
+
+struct AIGradeTiming: Codable, Sendable {
+    let sessionSeconds: Double
+    let renderSeconds: Double
+    let renderQueueSeconds: Double
+
+    static func read(_ job: URL) -> Self? {
+        guard let data = try? Data(contentsOf: job.appendingPathComponent("run.json")),
+              let run = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let elapsed = run["elapsedSeconds"] as? Double else { return nil }
+        let timingData = try? Data(contentsOf: job.appendingPathComponent("render/render-timings.json"))
+        let document = timingData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let records = document?["records"] as? [[String: Any]] ?? []
+        return Self(sessionSeconds: elapsed,
+                    renderSeconds: records.reduce(0) { $0 + ($1["executionSeconds"] as? Double ?? 0) },
+                    renderQueueSeconds: records.reduce(0) { $0 + ($1["queuedSeconds"] as? Double ?? 0) })
+    }
 }
 
 

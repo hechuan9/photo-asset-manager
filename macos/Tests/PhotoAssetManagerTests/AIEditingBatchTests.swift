@@ -151,7 +151,10 @@ import Testing
         let editor = AIEditingSettingsStore(root: root.appendingPathComponent("no-account"), runtime: root, defaults: UserDefaults(suiteName: UUID().uuidString)!)
         let store = AIEditingBatchStore(root: root, editor: editor)
         store.restore(library: library)
-        try await Task.sleep(for: .milliseconds(30))
+        let deadline = Date().addingTimeInterval(3)
+        while !store.activeItems.contains(where: { $0.ceiling > $0.progress }), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
         #expect(store.isRunning && store.isAwaitingUpload)
         #expect(store.errorMessage == nil)
         #expect(store.pendingResultURL == full)
@@ -166,6 +169,46 @@ import Testing
         #expect(store.overallProgress == paused)
         #expect(store.batch?.items.first?.phase == .uploading)
         #expect(try Data(contentsOf: full) == Data("preserved result".utf8))
+    }
+
+    @Test func concurrentUploadsRespectLimitAndOneFailureDoesNotBlockOthers() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let failedID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let ids = [failedID] + (0..<5).map { _ in UUID() }
+        let items = ids.map { id in
+            AIEditingBatch.Item(id: id, assetID: id, name: "sample.jpg", phase: .uploading,
+                source: .init(negativeContentHash: String(repeating: "a", count: 64), revision: 1,
+                              hasEdit: false, sourceFilename: "sample.jpg", sourceAvailable: true))
+        }
+        var manifest = AIEditingBatch(id: UUID(), baseURL: "https://parallel.invalid", libraryID: "test", items: items)
+        manifest.confirmed = true
+        try JSONEncoder().encode(manifest).write(to: root.appendingPathComponent("batch.json"))
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        var limits = AIEditingLimits(); limits.photos = 4; limits.uploads = 2
+        limits.save(defaults: defaults)
+        let editor = AIEditingSettingsStore(root: root.appendingPathComponent("editor"), runtime: root, defaults: defaults)
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ConcurrentBatchProtocol.self]
+        let library = LibraryStore(configuration: .init(baseURL: URL(string: manifest.baseURL)!, libraryID: "test"),
+            session: URLSession(configuration: config), loadSavedSettings: false, preferences: defaults)
+        ConcurrentBatchProtocol.reset()
+        let store = AIEditingBatchStore(root: root, editor: editor)
+        store.restore(library: library)
+        var peakPhotos = 0
+        for _ in 0..<400 where store.isRunning {
+            peakPhotos = max(peakPhotos, store.activeCount)
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!store.isRunning)
+        #expect(store.completedCount == 5)
+        #expect(store.failedItems.map(\.id) == [failedID])
+        #expect(ConcurrentBatchProtocol.peak == 2)
+        #expect(peakPhotos == 4)
+        #expect(store.batch?.items.allSatisfy { ($0.phaseSeconds?["uploading"] ?? 0) > 0 } == true)
+        let restored = AIEditingBatchStore(root: root, editor: editor)
+        #expect(restored.completedCount == 5)
+        #expect(restored.failedItems.map(\.id) == [failedID])
     }
 
     @Test func onlyTransientNetworkErrorsRetryAutomatically() {
@@ -201,5 +244,31 @@ private final class WaitingBatchProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {}
+    override func stopLoading() {}
+}
+
+private final class ConcurrentBatchProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var active = 0
+    nonisolated(unsafe) private static var maximum = 0
+    static var peak: Int { lock.withLock { maximum } }
+    static func reset() { lock.withLock { active = 0; maximum = 0 } }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        Self.lock.withLock { Self.active += 1; Self.maximum = max(Self.maximum, Self.active) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { [self] in
+            Self.lock.withLock { Self.active -= 1 }
+            let id = request.url!.deletingLastPathComponent().lastPathComponent.lowercased()
+            let failed = id == "00000000-0000-0000-0000-000000000001"
+            let state = KeepsEditState(negativeContentHash: String(repeating: "a", count: 64), revision: 2,
+                hasEdit: true, sourceAvailable: true, lastRequestID: id)
+            let data = failed ? Data("conflict".utf8) : try! JSONEncoder().encode(state)
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: failed ? 409 : 200,
+                httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
     override func stopLoading() {}
 }

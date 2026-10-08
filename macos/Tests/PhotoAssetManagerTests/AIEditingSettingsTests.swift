@@ -23,6 +23,17 @@ import CryptoKit
         #expect(!failure.localizedDescription.contains("AIEditingFailure("))
     }
 
+    @Test func onlyExplicitAITransientFailuresRetry() {
+        let job = URL(fileURLWithPath: "/tmp/diagnostics")
+        func failure(_ text: String) -> AIEditingFailure {
+            AIEditingFailure.process(.init(exitCode: 1, output: "", errors: text), job: job)
+        }
+        #expect(failure("HTTP 429 Too Many Requests").retryable)
+        #expect(failure("stream disconnected").retryable)
+        #expect(!failure("429 insufficient_quota").retryable)
+        #expect(!failure("2026-10-08T12:00:00.429Z unexpected crash").retryable)
+    }
+
     @Test func realToolEventsDescribeInternalSteps() {
         var steps = AIEditingSteps()
         #expect(steps.consume("not json") == nil)
@@ -52,6 +63,62 @@ import CryptoKit
             })
         #expect(lines == ["first", "second"])
         #expect(deliveredWhileRunning)
+    }
+
+    @Test(arguments: [false, true])
+    func cancellationAndTimeoutDrainFinalUsage(cancel: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let event = #"{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10}}"#
+        let script = "trap 'printf \"%s\\n\" \"" + event.replacingOccurrences(of: "\"", with: "\\\"") + "\"; exit 0' TERM; printf 'ready\\n'; while :; do :; done"
+        let process = AIEditingProcess()
+        let usage = AIEditingUsageStore(root: root)
+        let attempt = try usage.begin(model: "gpt-6-luna", account: nil, job: root)
+        var eventIndex = 0
+        var receivedReady = false
+        await #expect(throws: (any Error).self) {
+            _ = try await process.run(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", script],
+                home: root, directory: root, timeout: cancel ? 5 : 0.3, onEvent: { line in
+                    defer { eventIndex += 1 }
+                    do { try usage.consume(line, attemptID: attempt, eventIndex: eventIndex) }
+                    catch { Issue.record("Could not record final usage: \(error)") }
+                    if line == "ready" {
+                        receivedReady = true
+                        if cancel { process.cancel() }
+                    }
+                })
+        }
+        try usage.finish(attemptID: attempt, success: false)
+        #expect(receivedReady)
+        #expect(usage.attempts.first?.usage?.total == 110)
+        #expect(AIEditingUsageStore(root: root).attempts.first?.usage?.total == 110)
+    }
+
+    @Test func completedResultResumesWithoutAccountOrRuntime() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let job = root.appendingPathComponent("job"), render = job.appendingPathComponent("render")
+        try FileManager.default.createDirectory(at: render, withIntermediateDirectories: true)
+        func write(_ value: [String: Any], _ file: String) throws {
+            try JSONSerialization.data(withJSONObject: value).write(to: job.appendingPathComponent(file))
+        }
+        let preview = render.appendingPathComponent("preview.jpg"), full = render.appendingPathComponent("full.jpg")
+        try Data([1]).write(to: preview); try Data([1]).write(to: full)
+        try Data("<xmp/>".utf8).write(to: full.deletingPathExtension().appendingPathExtension("xmp"))
+        try write(["status": "selected", "candidateID": "one", "reason": "已完成"], "result.json")
+        try write(["candidates": [["id": "one", "recipe": Data("{}".utf8).base64EncodedString()]]], "render/candidates.json")
+        try write(["candidateID": "one", "preview": preview.path, "fullSize": full.path], "render/selection.json")
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let store = AIEditingSettingsStore(root: root.appendingPathComponent("no-account"),
+            runtime: root.appendingPathComponent("no-runtime"), defaults: defaults)
+        let result = try await store.gradePhoto(root.appendingPathComponent("unavailable-source.arw"), job: job)
+        #expect(result.status == "selected")
+        #expect(result.fullSize == full)
+        #expect(result.recipeJSON == "{}")
+        #expect(result.xmp == "<xmp/>")
+        #expect(store.usage.attempts.isEmpty)
+        #expect(!store.isBusy && store.activeGrades == 0)
     }
 
     @Test func nasFailureDoesNotExposeRawResponse() {
