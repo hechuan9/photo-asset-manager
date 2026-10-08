@@ -93,11 +93,11 @@ struct AIEditingSettingsView: View {
     private var concurrencySection: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
-                Stepper("同时处理照片：\(store.limits.photos)", value: $store.limits.photos, in: 1...20)
-                Stepper("AI 会话：\(store.limits.ai)", value: $store.limits.ai, in: 1...20)
-                Stepper("本地渲染：\(store.limits.renders)", value: $store.limits.renders, in: 1...20)
-                Stepper("下载：\(store.limits.downloads)", value: $store.limits.downloads, in: 1...20)
-                Stepper("上传：\(store.limits.uploads)", value: $store.limits.uploads, in: 1...20)
+                ConcurrencyNumberField("同时处理照片", value: $store.limits.photos)
+                ConcurrencyNumberField("AI 会话", value: $store.limits.ai)
+                ConcurrencyNumberField("本地渲染", value: $store.limits.renders)
+                ConcurrencyNumberField("下载", value: $store.limits.downloads)
+                ConcurrencyNumberField("上传", value: $store.limits.uploads)
                 Text("各项独立限制并发数量；本地渲染建议从 2 开始。修改在下一批调色生效。")
                     .font(.caption).foregroundStyle(.secondary)
             }.padding(8)
@@ -180,4 +180,52 @@ private struct AIEditingUsageView: View {
     }
 
     private func money(_ dollars: Double) -> String { String(format: "$%.5f", dollars) }
+}
+
+private struct ConcurrencyNumberField: View {
+    private let title: String
+    @Binding private var value: Int
+    @State private var text: String
+    @FocusState private var focused: Bool
+
+    init(_ title: String, value: Binding<Int>) {
+        self.title = title
+        self._value = value
+        self._text = State(initialValue: String(value.wrappedValue))
+    }
+
+    private var validNumber: Int? {
+        guard let number = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              (1...20).contains(number) else { return nil }
+        return number
+    }
+
+    var body: some View {
+        HStack {
+            Text(title).frame(width: 110, alignment: .leading)
+            TextField(title, text: $text)
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 64)
+                .focused($focused)
+                .accessibilityLabel(title)
+                .accessibilityValue(text)
+                .accessibilityHint("输入 1 到 20 的整数")
+                .onChange(of: text) { _, _ in
+                    if let number = validNumber { value = number }
+                }
+                .onSubmit { text = String(value) }
+                .onChange(of: focused) { _, editing in
+                    if !editing { text = String(value) }
+                }
+                .onChange(of: value) { _, number in
+                    if !focused { text = String(number) }
+                }
+            Text(validNumber == nil ? "请输入 1–20 的整数" : "1–20")
+                .font(.caption)
+                .foregroundStyle(validNumber == nil ? Color.red : Color.secondary)
+            Spacer()
+        }
+    }
 }
