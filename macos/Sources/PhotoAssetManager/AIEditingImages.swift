@@ -43,7 +43,14 @@ enum AIEditingImages {
             for (role, limit) in [("standard", 0.0), ("thumbnail", 512.0), ("browse", 64.0)] {
                 try Task.checkCancellation()
                 let scale = limit == 0 ? 1 : min(1, limit / max(image.extent.width, image.extent.height))
-                let resized = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                let normalized = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
+                let scaled = normalized.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                // HEVC pads odd dimensions; an explicit even canvas keeps ImageIO's display
+                // dimensions equal to the encoded dimensions validated by the NAS.
+                let maximum = limit == 0 ? Int.max : Int(limit)
+                let width = min(maximum, max(2, Int((scaled.extent.width / 2).rounded(.up)) * 2))
+                let height = min(maximum, max(2, Int((scaled.extent.height / 2).rounded(.up)) * 2))
+                let resized = scaled.clampedToExtent().cropped(to: CGRect(x: 0, y: 0, width: width, height: height))
                 let url = directory.appendingPathComponent(role + ".heic")
                 let pending = directory.appendingPathComponent(UUID().uuidString + ".heic")
                 defer { try? FileManager.default.removeItem(at: pending) }

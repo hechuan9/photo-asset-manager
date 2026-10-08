@@ -23,6 +23,33 @@ import CryptoKit
         #expect(!failure.localizedDescription.contains("AIEditingFailure("))
     }
 
+    @Test func realToolEventsDescribeInternalSteps() {
+        var steps = AIEditingSteps()
+        #expect(steps.consume("not json") == nil)
+        func event(_ tool: String) -> String { "{\"type\":\"item.started\",\"item\":{\"type\":\"mcp_tool_call\",\"server\":\"keeps_color\",\"tool\":\"" + tool + "\"}}" }
+        #expect(steps.consume(event("inspect_photo"))?.title.contains("初始预览") == true)
+        #expect(steps.consume(event("set_adjustments"))?.title.contains("第 1 轮") == true)
+        #expect(steps.consume(event("set_adjustments"))?.title.contains("第 2 轮") == true)
+        #expect(steps.consume(event("compare_candidates"))?.title.contains("比较") == true)
+        #expect(steps.consume(event("select_candidate"))?.floor == 0.78)
+    }
+
+    @Test func streamedEventsArriveBeforeProcessExit() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var lines: [String] = []
+        var deliveredWhileRunning = false
+        _ = try await AIEditingProcess().run(executable: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "printf 'first'; sleep 0.2; printf '\\nsecond\\n'; sleep 0.3; touch finished"], home: root, directory: root,
+            timeout: 5, onEvent: { line in
+                lines.append(line)
+                deliveredWhileRunning = !FileManager.default.fileExists(atPath: root.appendingPathComponent("finished").path)
+            })
+        #expect(lines == ["first", "second"])
+        #expect(deliveredWhileRunning)
+    }
+
     @Test func nasFailureDoesNotExposeRawResponse() {
         let message = AIEditingFailure.userMessage(KeepsAPIError.http(409, "internal raw response"))
         #expect(message.contains("未覆盖"))

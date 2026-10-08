@@ -202,6 +202,7 @@ struct DirectoryOutlineView: NSViewRepresentable {
         private var generation = -1
         private var galleryLoadingPath: String?
         private var galleryPath: String?
+        private var pendingGallerySelection = false
         private var hiddenPaths: Set<String> = []
         private var updating = false
 
@@ -266,10 +267,15 @@ struct DirectoryOutlineView: NSViewRepresentable {
                 let item = node(path)
                 if outline.row(forItem: item) >= 0, !outline.isItemExpanded(item) { outline.expandItem(item) }
             }
-            if reset || galleryPath != library.query.directory {
+            if reset || galleryPath != library.query.directory { pendingGallerySelection = true }
+            if pendingGallerySelection {
                 if let path = library.query.directory, let item = nodes[path], outline.row(forItem: item) >= 0 {
                     outline.selectRowIndexes(IndexSet(integer: outline.row(forItem: item)), byExtendingSelection: false)
-                } else { outline.deselectAll(nil) }
+                    pendingGallerySelection = false
+                } else {
+                    outline.deselectAll(nil)
+                    if library.query.directory == nil { pendingGallerySelection = false }
+                }
             }
             galleryPath = library.query.directory
             if !reset, let origin, let scroll = outline.enclosingScrollView {

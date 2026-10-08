@@ -134,6 +134,40 @@ import Testing
         #expect(try FileManager.default.contentsOfDirectory(atPath: rejectedJob.path).contains { $0.hasPrefix("rejected-result-") })
     }
 
+    @Test func savedResultCanResumeWithoutAIAccountAndProgressStopsOnCancel() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let full = root.appendingPathComponent("completed.jpg")
+        try Data("preserved result".utf8).write(to: full)
+        let item = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "public.jpg", phase: .uploading,
+            source: .init(negativeContentHash: String(repeating: "a", count: 64), revision: 1, hasEdit: false, sourceFilename: "public.jpg", sourceAvailable: true),
+            result: .init(status: "selected", reason: "done", fullSize: full, recipeJSON: "{}", xmp: "xmp"))
+        var state = AIEditingBatch(id: UUID(), baseURL: "https://waiting.invalid", libraryID: "test", items: [item])
+        state.confirmed = true
+        try JSONEncoder().encode(state).write(to: root.appendingPathComponent("batch.json"))
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [WaitingBatchProtocol.self]
+        let library = LibraryStore(configuration: .init(baseURL: URL(string: state.baseURL)!, libraryID: "test"), session: URLSession(configuration: config), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
+        let editor = AIEditingSettingsStore(root: root.appendingPathComponent("no-account"), runtime: root, defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let store = AIEditingBatchStore(root: root, editor: editor)
+        store.restore(library: library)
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(store.isRunning && store.isAwaitingUpload)
+        #expect(store.errorMessage == nil)
+        #expect(store.pendingResultURL == full)
+        let first = store.overallProgress
+        store.tickProgress(); store.tickProgress()
+        #expect(store.overallProgress > first)
+        #expect(store.overallProgress < 1)
+        store.cancel()
+        for _ in 0..<100 where store.isRunning { try await Task.sleep(for: .milliseconds(5)) }
+        let paused = store.overallProgress
+        store.tickProgress()
+        #expect(store.overallProgress == paused)
+        #expect(store.batch?.items.first?.phase == .uploading)
+        #expect(try Data(contentsOf: full) == Data("preserved result".utf8))
+    }
+
     @Test func onlyTransientNetworkErrorsRetryAutomatically() {
         #expect(AIEditingBatchStore.isTransient(URLError(.notConnectedToInternet)))
         #expect(AIEditingBatchStore.isTransient(KeepsAPIError.http(503, "offline")))
@@ -160,5 +194,12 @@ private final class CommittedBatchProtocol: URLProtocol, @unchecked Sendable {
             client?.urlProtocolDidFinishLoading(self)
         } catch { client?.urlProtocol(self, didFailWithError: error) }
     }
+    override func stopLoading() {}
+}
+
+private final class WaitingBatchProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {}
     override func stopLoading() {}
 }

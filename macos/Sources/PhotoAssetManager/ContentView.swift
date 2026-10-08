@@ -571,7 +571,13 @@ private struct AIBatchProgressView: View {
                 Text("运行期间将暂停客户端的其他操作。你可以随时取消，已完成的照片会保留调整。")
                     .foregroundStyle(.secondary)
             } else {
-                ProgressView(value: Double(batch.completedCount), total: Double(max(batch.totalCount, 1)))
+                ProgressView(value: batch.overallProgress, total: 1)
+                    .animation(.linear(duration: 1), value: batch.overallProgress)
+                HStack {
+                    Text("预计进度 \(Int(batch.overallProgress * 100))% · 已用时 \(batch.elapsedSeconds / 60):\(String(format: "%02d", batch.elapsedSeconds % 60))")
+                    Spacer()
+                    if batch.isRunning { ProgressView().controlSize(.small) }
+                }.font(.caption).foregroundStyle(.secondary)
                 if !batch.currentName.isEmpty { Text(batch.currentName).lineLimit(2) }
             }
             Text(batch.status).font(.callout)
@@ -608,7 +614,10 @@ private struct AIBatchProgressView: View {
                     Button(batch.isFinished ? "关闭" : "放弃剩余并关闭", action: batch.dismiss)
                     if batch.errorMessage != nil && !batch.isFinished {
                         Button("AI 设置") { openSettings() }
-                        Button("重试", action: batch.retry).buttonStyle(.borderedProminent)
+                        if let result = batch.pendingResultURL {
+                            Button("查看本机结果") { NSWorkspace.shared.activateFileViewerSelecting([result]) }
+                        }
+                        Button(batch.isAwaitingUpload ? "重试保存到 NAS" : "重试", action: batch.retry).buttonStyle(.borderedProminent)
                     }
                 }
             }

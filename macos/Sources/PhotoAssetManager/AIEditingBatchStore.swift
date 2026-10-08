@@ -31,6 +31,8 @@ struct AIEditingBatch: Codable {
     @Published private(set) var diagnosticDirectory: URL?
     @Published private(set) var isRunning = false
     var isBlocking: Bool { batch != nil }
+    var isAwaitingUpload: Bool { batch?.items.first(where: { !$0.terminal })?.phase == .uploading }
+    var pendingResultURL: URL? { isAwaitingUpload ? batch?.items.first(where: { !$0.terminal })?.result?.fullSize : nil }
     var isAwaitingConfirmation: Bool { batch != nil && batch?.confirmed == false && batch?.cancelled == false }
     var totalCount: Int { batch?.items.count ?? 0 }
     var completedCount: Int { batch?.items.filter(\.terminal).count ?? 0 }
@@ -39,6 +41,15 @@ struct AIEditingBatch: Codable {
     private var manifest: URL { root.appendingPathComponent("batch.json") }
     private weak var library: LibraryStore?
     private var worker: Task<Void, Never>?
+    @Published private(set) var itemProgress = 0.0
+    @Published private(set) var elapsedSeconds = 0
+    var overallProgress: Double {
+        let activeProgress = batch?.items.first(where: { !$0.terminal })?.id == progressItem ? itemProgress : 0
+        return min(1, (Double(completedCount) + activeProgress) / Double(max(1, totalCount)))
+    }
+    private var progressCeiling = 0.0
+    private var progressTicker: Task<Void, Never>?
+    private var progressItem: UUID?
     private var storageError: Error?
     private var restored = false
     var retryInterval: Duration = .seconds(5)
@@ -87,12 +98,19 @@ struct AIEditingBatch: Codable {
     func start() {
         guard worker == nil, !editor.isBusy, batch != nil, !isFinished else { return }
         do {
-            try editor.validateEditingAccount()
+            if !isAwaitingUpload { try editor.validateEditingAccount() }
             guard let client = library?.client, matches(client) else { throw AIEditingFailure("请使用创建此任务时的资料库连接。") }
             batch!.confirmed = true
             try persist()
             errorMessage = nil; errorDetails = nil; diagnosticDirectory = nil
             isRunning = true
+            elapsedSeconds = 0
+            progressTicker = Task { [weak self] in
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                    self?.tickProgress()
+                }
+            }
             worker = Task { await run(client: client) }
         } catch { recordFailure(error); status = "任务已暂停，请按下方提示处理后重试" }
     }
@@ -149,6 +167,7 @@ struct AIEditingBatch: Codable {
 
     private func run(client: KeepsClient) async {
         defer {
+            progressTicker?.cancel(); progressTicker = nil
             isRunning = false; worker = nil
             if batch?.cancelled == true { status = "已取消；已提交的结果保留" }
         }
@@ -156,9 +175,11 @@ struct AIEditingBatch: Codable {
               let index = batch?.items.firstIndex(where: { !$0.terminal }) {
             var item = batch!.items[index]
             currentName = item.name
+            if progressItem != item.id { itemProgress = 0; progressItem = item.id }
             do {
                 try await advance(&item, client: client)
                 try save(item, index: index)
+                if item.terminal { itemProgress = 0; progressCeiling = 0 }
                 errorMessage = nil; errorDetails = nil; diagnosticDirectory = nil
             } catch {
                 if Task.isCancelled || batch?.cancelled == true {
@@ -166,11 +187,14 @@ struct AIEditingBatch: Codable {
                     return
                 }
                 recordFailure(error, context: status)
+                progressCeiling = itemProgress
                 if Self.isTransient(error) {
                     status = "连接暂时不可用，等待重连（\(completedCount)/\(totalCount)）"
                     do { try await Task.sleep(for: retryInterval) } catch { return }
                 } else {
-                    status = "当前照片未完成，可重试或取消；已完成照片保持保存"
+                    status = item.phase == .uploading
+                        ? "调色已完成，结果已保存在本机。重试只会继续保存到 NAS，不会重新调用 AI。"
+                        : "当前照片未完成，可重试或取消；已完成照片保持保存"
                     return
                 }
             }
@@ -181,11 +205,24 @@ struct AIEditingBatch: Codable {
         }
     }
 
+    private func stage(_ title: String, _ floor: Double, _ ceiling: Double) {
+        status = title
+        itemProgress = max(itemProgress, floor)
+        progressCeiling = max(itemProgress, ceiling)
+    }
+
+    func tickProgress() {
+        guard isRunning else { return }
+        elapsedSeconds += 1
+        // Estimated motion within a real stage; only a successful commit completes the bar.
+        itemProgress += (progressCeiling - itemProgress) * 0.035
+    }
+
     private func advance(_ item: inout AIEditingBatch.Item, client: KeepsClient) async throws {
         let directory = root.appendingPathComponent(item.id.uuidString.lowercased(), isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         if item.phase == .preparing {
-            status = "读取底片（\(completedCount + 1)/\(totalCount)）"
+            stage("读取底片（\(completedCount + 1)/\(totalCount)）", 0.01, 0.04)
             let state = try await client.editState(assetID: item.assetID)
             if state.lastRequestID == item.id.uuidString.lowercased() { item.phase = .done; return }
             guard state.sourceAvailable, state.negativeContentHash != nil, state.sourceFilename != nil else {
@@ -200,28 +237,33 @@ struct AIEditingBatch: Codable {
         let source = directory.appendingPathComponent("source").appendingPathExtension(URL(fileURLWithPath: filename).pathExtension)
         switch item.phase {
         case .downloading:
-            status = "下载底片（\(completedCount + 1)/\(totalCount)）"
+            stage("下载底片（\(completedCount + 1)/\(totalCount)）", 0.04, 0.15)
             try await client.downloadNegative(assetID: item.assetID, contentHash: hash, to: source)
             let info = try await AIEditingImages.inspect(source, image: false)
             guard info.hash == (sourceState.sourceFileHash ?? hash) else { throw AIEditingFailure("底片下载校验失败，请重新扫描后再试。") }
             item.phase = .grading
         case .grading:
-            status = "AI 调色（\(completedCount + 1)/\(totalCount)）"
-            item.result = try await editor.gradePhoto(source, job: directory.appendingPathComponent("ai", isDirectory: true))
+            stage("连接 AI，准备观察照片", 0.15, 0.25)
+            item.result = try await editor.gradePhoto(source, job: directory.appendingPathComponent("ai", isDirectory: true), progress: { [weak self] title, floor, ceiling in
+                self?.stage(title, floor, ceiling)
+            })
             item.phase = item.result?.status == "selected" ? .uploading : .review
         case .uploading:
-            status = "保存结果与缩略图（\(completedCount + 1)/\(totalCount)）"
+            stage("调色已完成，准备保存到 NAS", 0.85, 0.88)
             let state = try await client.editState(assetID: item.assetID)
             if state.lastRequestID == item.id.uuidString.lowercased() { item.phase = .done; return }
             guard state.revision == sourceState.revision else { throw AIEditingFailure("照片已被其它客户端修改，本次结果未覆盖。请取消后重新开始。") }
             guard let result = item.result, let full = result.fullSize, let recipe = result.recipeJSON, let xmp = result.xmp else {
                 throw AIEditingFailure("完整调色结果或配方缺失。")
             }
+            stage("生成展示图和缩略图", 0.87, 0.90)
             let files = try await AIEditingImages.derivatives(from: full, directory: directory)
             let upload = try await client.prepareEditUploads(assetID: item.assetID, requestID: item.id)
             guard Set(upload.objects.map(\.role)) == Set(files.keys), upload.objects.count == 3 else { throw KeepsAPIError.invalidResponse }
             var outputs: [KeepsEditOutput] = []
-            for target in upload.objects {
+            for (index, target) in upload.objects.enumerated() {
+                let names = ["standard": "全尺寸展示图", "thumbnail": "缩略图", "browse": "浏览预览"]
+                stage("保存到 NAS：\(names[target.role] ?? target.role)（\(index + 1)/3）", 0.90 + Double(index) * 0.025, 0.925 + Double(index) * 0.025)
                 try Task.checkCancellation()
                 let file = files[target.role]!
                 let info = try await AIEditingImages.inspect(file, image: true)
@@ -230,6 +272,7 @@ struct AIEditingBatch: Codable {
                     width: info.width, height: info.height, sizeBytes: info.size))
             }
             try Task.checkCancellation()
+            stage("NAS 正在校验并保存调色结果", 0.98, 0.995)
             _ = try await client.commitEdit(assetID: item.assetID, edit: .init(requestID: item.id.uuidString.lowercased(),
                 expectedRevision: sourceState.revision, negativeContentHash: hash,
                 algorithmVersion: "keeps-ai-v1", rendererVersion: "darktable-5.6.2", outputs: outputs,

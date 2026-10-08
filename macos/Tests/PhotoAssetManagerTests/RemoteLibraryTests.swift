@@ -5,9 +5,38 @@ import KeepsAPI
 @testable import PhotoAssetManager
 
 @MainActor struct RemoteLibraryTests {
+    @Test func missingSavedDirectoryFallsBackAfterSuccessfulListing() async throws {
+        let preferences = UserDefaults(suiteName: UUID().uuidString)!
+        let config = KeepsConfiguration(baseURL: URL(string: "https://restore-tree.invalid")!, libraryID: "test")
+        let store = LibraryStore(configuration: config, session: stubSession(), loadSavedSettings: false, preferences: preferences)
+        store.showLibrary(directory: "root/missing/deeper")
+        store.setDirectoryExpanded("root", expanded: true)
+        store.setDirectoryExpanded("root/missing", expanded: true)
+        store.refreshNavigation()
+        try await waitUntil { !store.isLoadingNavigation && store.loadingDirectories.isEmpty }
+        #expect(store.query.directory == "root")
+        #expect(store.expandedPaths == ["root"])
+        let restored = LibraryStore(configuration: config, session: stubSession(), loadSavedSettings: false, preferences: preferences)
+        #expect(restored.query.directory == "root")
+    }
+
+    @Test func failedNavigationDoesNotDiscardSavedLocation() async throws {
+        let preferences = UserDefaults(suiteName: UUID().uuidString)!
+        let config = KeepsConfiguration(baseURL: URL(string: "https://unauthorized.invalid")!, libraryID: "test")
+        let store = LibraryStore(configuration: config, session: stubSession(), loadSavedSettings: false, preferences: preferences)
+        store.showLibrary(directory: "root/travel")
+        store.setDirectoryExpanded("root", expanded: true)
+        store.refreshNavigation()
+        try await waitUntil { !store.isLoadingNavigation }
+        #expect(store.navigationError != nil)
+        let restored = LibraryStore(configuration: config, session: stubSession(), loadSavedSettings: false, preferences: preferences)
+        #expect(restored.query.directory == "root/travel")
+        #expect(restored.expandedPaths == ["root"])
+    }
+
     @Test func directoryTrashMenuTargetsClickedFolderAndRejectsWrongConfirmation() async throws {
         _ = NSApplication.shared
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://tree.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://tree.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.refreshNavigation()
         try await waitUntil { !store.isLoadingNavigation }
         let outline = DirectoryOutlineView.DirectoryOutline()
@@ -81,7 +110,7 @@ import KeepsAPI
         }
     }
     @Test func unconfiguredLaunchHasNoLocalLibraryOrBackgroundWork() {
-        let store = LibraryStore(loadSavedSettings: false)
+        let store = LibraryStore(loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         #expect(store.client == nil)
         store.refresh()
         #expect(!store.isLoading)
@@ -92,7 +121,7 @@ import KeepsAPI
     @Test func browserReadsRemoteAssetsAndSelectionRemainsPresentationState() async throws {
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.protocolClasses = [LibraryStubProtocol.self]
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://nas.invalid")!, libraryID: "test-library"), session: URLSession(configuration: sessionConfiguration), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://nas.invalid")!, libraryID: "test-library"), session: URLSession(configuration: sessionConfiguration), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.refresh()
         store.refreshNavigation()
         try await waitUntil { !store.isLoading && !store.isLoadingNavigation }
@@ -117,7 +146,7 @@ import KeepsAPI
     @Test func connectionTestValidatesAPIWithoutSavingOrSwitching() async {
         var persisted = false
         let old = KeepsConfiguration(baseURL: URL(string: "https://old.invalid")!, libraryID: "old")
-        let store = LibraryStore(configuration: old, session: stubSession(), loadSavedSettings: false, persistConfiguration: { _ in persisted = true })
+        let store = LibraryStore(configuration: old, session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!, persistConfiguration: { _ in persisted = true })
         let success = await store.checkConnection(baseURL: "https://working.invalid", libraryID: "new", accessCredential: "test-value", save: false)
         #expect(success)
         #expect(!persisted)
@@ -128,7 +157,7 @@ import KeepsAPI
 
     @Test func validatedConnectionPersistsThenSwitches() async throws {
         var persisted: KeepsConfiguration?
-        let store = LibraryStore(session: stubSession(), loadSavedSettings: false, persistConfiguration: { persisted = $0 })
+        let store = LibraryStore(session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!, persistConfiguration: { persisted = $0 })
         let success = await store.checkConnection(baseURL: " https://working.invalid ", libraryID: " new ", accessCredential: "test-value", save: true)
         #expect(success)
         #expect(persisted?.libraryID == "new")
@@ -140,7 +169,7 @@ import KeepsAPI
     @Test func rejectedConnectionPreservesSavedServer() async {
         var persisted = false
         let old = KeepsConfiguration(baseURL: URL(string: "https://old.invalid")!, libraryID: "old")
-        let store = LibraryStore(configuration: old, session: stubSession(), loadSavedSettings: false, persistConfiguration: { _ in persisted = true })
+        let store = LibraryStore(configuration: old, session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!, persistConfiguration: { _ in persisted = true })
         for host in ["unauthorized.invalid", "invalid-api.invalid"] {
             let success = await store.checkConnection(baseURL: "https://\(host)", libraryID: "new", accessCredential: "test-value", save: true)
             #expect(!success)
@@ -154,7 +183,7 @@ import KeepsAPI
 
     @Test func persistenceFailureDoesNotActivateCandidateServer() async {
         let old = KeepsConfiguration(baseURL: URL(string: "https://old.invalid")!, libraryID: "old")
-        let store = LibraryStore(configuration: old, session: stubSession(), loadSavedSettings: false, persistConfiguration: { _ in
+        let store = LibraryStore(configuration: old, session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!, persistConfiguration: { _ in
             throw NSError(domain: "SettingsTest", code: 1, userInfo: [NSLocalizedDescriptionKey: "storage unavailable"])
         })
         let success = await store.checkConnection(baseURL: "https://working.invalid", libraryID: "new", accessCredential: "test-value", save: true)
@@ -164,7 +193,7 @@ import KeepsAPI
     }
 
     @Test func scopeSwitchClearsSelectionAndReturnsToUnifiedLibrary() async throws {
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://working.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://working.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.showLibrary(directory: "2026", picked: true)
         try await waitUntil { !store.isLoading }
         store.select(store.assets[0].id, extending: false)
@@ -181,7 +210,7 @@ import KeepsAPI
     }
 
     @Test func sourcesFailureDoesNotBlockHTTPAssetBrowsing() async throws {
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://sources-unavailable.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://sources-unavailable.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.refresh()
         store.refreshNavigation()
         try await waitUntil { !store.isLoading && !store.isLoadingNavigation }
@@ -194,7 +223,7 @@ import KeepsAPI
     }
 
     @Test func unavailableServerReportsFailureWithoutLocalFallback() async throws {
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://unauthorized.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://unauthorized.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.showLibrary()
         try await waitUntil { !store.isLoading }
         #expect(store.lastError != nil)
@@ -203,7 +232,7 @@ import KeepsAPI
     }
 
     @Test func directorySwitchClearsOldScopeAndLoadsChildrenFromServer() async throws {
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://working.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://working.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.query.flagState = "picked"
         store.query.trashed = true
         store.query.recursive = false
@@ -225,7 +254,7 @@ import KeepsAPI
 
     @Test func nativeOutlineRetainsExpansionSelectionAndCachedChildrenOnRefresh() async throws {
         _ = NSApplication.shared
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://tree.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://tree.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.refreshNavigation()
         try await waitUntil { !store.isLoadingNavigation }
         let outline = DirectoryOutlineView.DirectoryOutline()
@@ -302,7 +331,7 @@ import KeepsAPI
     }
 
     @Test func switchingServerRejectsLateNavigationFromOldConnection() async throws {
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://slow-old.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, persistConfiguration: { _ in })
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://slow-old.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!, persistConfiguration: { _ in })
         store.refreshNavigation()
         try await waitUntil { LibraryStubProtocol.treeRequests.count(for: "slow-start") > 0 }
         let saved = await store.checkConnection(baseURL: "https://working.invalid", libraryID: "test", accessCredential: "", save: true)
@@ -316,7 +345,7 @@ import KeepsAPI
 
     @Test func directoryCellShowsLoadingUntilResponseAndClearsOnReuse() async throws {
         _ = NSApplication.shared
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://loading.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://loading.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.refreshNavigation()
         try await waitUntil { !store.isLoadingNavigation }
         let outline = NSOutlineView()
@@ -347,7 +376,7 @@ import KeepsAPI
     }
 
     @Test func visiblePaginationContinuesAfterAnInFlightPageFinishes() async throws {
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://pages.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://pages.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.refresh()
         store.setPaginationVisible(true)
         try await waitUntil { !store.isLoading }
@@ -357,7 +386,7 @@ import KeepsAPI
     }
 
     @Test func paginationWaitsUntilFooterBecomesVisible() async throws {
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://pages.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://pages.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.refresh()
         try await waitUntil { !store.isLoading }
         #expect(store.assets.count == 1)
@@ -369,7 +398,7 @@ import KeepsAPI
     }
 
     @Test func hiddenDirectoryMarkInheritsWithoutMatchingSiblingPrefixes() async throws {
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://working.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://working.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.refreshNavigation()
         try await waitUntil { !store.isLoadingNavigation }
         #expect(store.isDirectoryHidden("root/private"))
@@ -405,7 +434,7 @@ import KeepsAPI
     }
 
     @Test func revisionPollingRefreshesOnlyWhenChangedAndStopsWhileInactive() async throws {
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://revision.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://revision.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.setActive(true)
         defer { store.setActive(false) }
         try await waitUntil { store.assets.count == 2 && !store.isLoading }
@@ -424,7 +453,7 @@ import KeepsAPI
     }
 
     @Test func returningToDirectoryRestoresAllLoadedPagesWithoutAssetOrCountRequests() async throws {
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://cache-pages.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://cache-pages.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.showLibrary(directory: "A")
         try await waitUntil { !store.isLoading }
         store.loadMore()
@@ -446,7 +475,7 @@ import KeepsAPI
     }
 
     @Test func updatingWindowRefreshesOnceAndFinalVersionRefreshesImmediately() async throws {
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://updating.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://updating.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.showLibrary(directory: "A")
         try await waitUntil { !store.isLoading }
         store.select(store.assets[0].id, extending: false)
@@ -466,7 +495,7 @@ import KeepsAPI
     }
 
     @Test func changedRevisionDuringPaginationRestartsWithoutCachingMixedPages() async throws {
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://mixed-pages.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://mixed-pages.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.refresh()
         try await waitUntil { !store.isLoading }
         #expect(store.assets.count == 1)
@@ -482,7 +511,7 @@ import KeepsAPI
     }
 
     @Test func refreshedPaginationDeduplicatesOverlappingServerPages() async throws {
-        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://overlap-pages.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://overlap-pages.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         store.refresh()
         try await waitUntil { !store.isLoading }
         store.loadMore()
@@ -602,9 +631,9 @@ private final class LibraryStubProtocol: URLProtocol, @unchecked Sendable {
         else if path.hasSuffix("/revision") { body = "{\"revision\":1,\"isUpdating\":false}" }
         else if path.hasSuffix("/hidden-directories") { body = "{\"paths\":[\"root/private\"]}" }
         else if path.hasSuffix("/counts") { body = "{\"all\":2,\"picked\":0,\"trashed\":0}" }
-        else if path.hasSuffix("/navigation"), request.url?.host == "tree.invalid" {
+        else if path.hasSuffix("/navigation"), ["tree.invalid", "restore-tree.invalid"].contains(request.url?.host ?? "") {
             let requestedPath = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "path" }?.value ?? ""
-            Self.treeRequests.record(requestedPath)
+            if request.url?.host == "tree.invalid" { Self.treeRequests.record(requestedPath) }
             let folders: [[String: Any]]
             switch requestedPath {
             case "root": folders = [["path": "root/child", "name": "child", "photoCount": 0, "hasChildren": true]]

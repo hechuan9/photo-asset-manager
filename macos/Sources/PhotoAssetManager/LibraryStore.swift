@@ -48,11 +48,11 @@ final class LibraryStore: ObservableObject {
     private var selectionAnchor: UUID?
     private var selectionFocus: UUID?
     @Published var query = KeepsAssetQuery() {
-        didSet { if query != oldValue { isSelectingAll = false } }
+        didSet { if query != oldValue { isSelectingAll = false; saveNavigationState() } }
     }
     @Published private(set) var counts: KeepsCounts?
     @Published private(set) var directories: [KeepsNavigationDirectory] = []
-    @Published private(set) var expandedPaths: Set<String> = []
+    @Published private(set) var expandedPaths: Set<String> = [] { didSet { saveNavigationState() } }
     @Published private(set) var directoryChildren: [String: [KeepsNavigationDirectory]] = [:]
     @Published private(set) var directoryErrors: [String: String] = [:]
     @Published private(set) var loadingDirectories: Set<String> = []
@@ -78,6 +78,33 @@ final class LibraryStore: ObservableObject {
     private var rootRequestGeneration = 0
     private static let navigationLogger = Logger(subsystem: "local.keeps", category: "navigation")
     let preferences: UserDefaults
+    private var restoringNavigation = false
+    private struct NavigationState: Codable {
+        var expanded: Set<String>
+        var directory: String?
+        var trashed: Bool
+        var picked: Bool
+    }
+    private var navigationStateKey: String? {
+        configuration.map { "keeps.navigation." + $0.baseURL.absoluteString + "|" + $0.libraryID }
+    }
+    private func saveNavigationState() {
+        guard !restoringNavigation, let key = navigationStateKey else { return }
+        let state = NavigationState(expanded: expandedPaths, directory: query.directory, trashed: query.trashed, picked: query.flagState == "picked")
+        if let data = try? JSONEncoder().encode(state) { preferences.set(data, forKey: key) }
+    }
+    private func restoreNavigationState() {
+        restoringNavigation = true
+        defer { restoringNavigation = false }
+        expandedPaths = []
+        query = KeepsAssetQuery()
+        guard let key = navigationStateKey, let data = preferences.data(forKey: key),
+              let state = try? JSONDecoder().decode(NavigationState.self, from: data) else { return }
+        expandedPaths = state.expanded
+        query.directory = state.directory
+        query.trashed = state.trashed
+        query.flagState = state.picked ? "picked" : nil
+    }
     private let session: URLSession
     private let persistConfiguration: (KeepsConfiguration) throws -> Void
 
@@ -124,6 +151,7 @@ final class LibraryStore: ObservableObject {
             self.configuration = settings
             client = settings.map { KeepsClient(configuration: $0, session: session) }
         } catch { lastError = Self.describe(error) }
+        restoreNavigationState()
         restoreDirectoryTrash()
         restoreDirectoryMove()
         restorePhotoMove()
@@ -214,11 +242,12 @@ final class LibraryStore: ObservableObject {
 
     func showLibrary(directory: String? = nil, trashed: Bool = false, picked: Bool = false) {
         guard !isOperationBlocking else { return }
-        query = KeepsAssetQuery()
-        query.directory = directory
-        query.recursive = true
-        query.trashed = trashed
-        query.flagState = picked ? "picked" : nil
+        var location = KeepsAssetQuery()
+        location.directory = directory
+        location.recursive = true
+        location.trashed = trashed
+        location.flagState = picked ? "picked" : nil
+        query = location
         refresh()
     }
 
@@ -250,7 +279,10 @@ final class LibraryStore: ObservableObject {
                 removeMissingDirectories(old: directories, new: navigation.directories)
                 hiddenDirectoryPaths = Set(hidden.paths)
                 directories = navigation.directories
-                for path in expandedPaths { loadChildren(of: path, refresh: true) }
+                reconcileSavedNavigation(with: navigation.directories, parent: nil)
+                for directory in navigation.directories where shouldLoadChildren(directory.path) {
+                    loadChildren(of: directory.path, refresh: true)
+                }
             } catch {
                 if generation == navigationGeneration && requestGeneration == rootRequestGeneration { navigationError = Self.describe(error) }
             }
@@ -276,8 +308,9 @@ final class LibraryStore: ObservableObject {
                 guard directories.contains(where: { path == $0.path }) || directoryChildren.values.contains(where: { $0.contains(where: { $0.path == path }) }) else { return }
                 removeMissingDirectories(old: directoryChildren[path] ?? [], new: navigation.directories)
                 directoryChildren[path] = navigation.directories
-                for child in navigation.directories where expandedPaths.contains(child.path) {
-                    loadChildren(of: child.path)
+                reconcileSavedNavigation(with: navigation.directories, parent: path)
+                for child in navigation.directories where shouldLoadChildren(child.path) {
+                    loadChildren(of: child.path, refresh: refresh)
                 }
             } catch {
                 let elapsed = started.duration(to: .now).components
@@ -286,6 +319,19 @@ final class LibraryStore: ObservableObject {
                 if generation == navigationGeneration { directoryErrors[path] = Self.describe(error) }
             }
         }
+    }
+
+    private func shouldLoadChildren(_ path: String) -> Bool {
+        expandedPaths.contains(path) || (query.directory?.hasPrefix(path + "/") ?? false)
+    }
+
+    private func reconcileSavedNavigation(with children: [KeepsNavigationDirectory], parent: String?) {
+        func survives(_ path: String) -> Bool {
+            if let parent, !path.hasPrefix(parent + "/") { return true }
+            return children.contains { path == $0.path || path.hasPrefix($0.path + "/") }
+        }
+        expandedPaths = expandedPaths.filter(survives)
+        if let selected = query.directory, !survives(selected) { showLibrary(directory: parent) }
     }
 
     private func removeMissingDirectories(old: [KeepsNavigationDirectory], new: [KeepsNavigationDirectory]) {
@@ -315,7 +361,7 @@ final class LibraryStore: ObservableObject {
         navigationGeneration += 1
         rootRequestGeneration += 1
         directories = []; directoryChildren = [:]; directoryErrors = [:]
-        expandedPaths = []; loadingDirectories = []
+        loadingDirectories = []
         navigationError = nil
         hiddenDirectoryPaths = []
     }
@@ -358,7 +404,7 @@ final class LibraryStore: ObservableObject {
                 setActive(isActive)
                 assets = []; selectedIDs = []; counts = nil
                 resetNavigation()
-                query = KeepsAssetQuery()
+                restoreNavigationState()
                 refreshNavigation()
                 refresh()
                 connectionMessage = "已连接并保存 Keeps Server。"

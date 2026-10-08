@@ -40,12 +40,14 @@ struct AIEditingFailure: LocalizedError {
         if let network = error as? URLError {
             return network.code == .cancelled ? "操作已取消。" : "无法连接 NAS。请检查网络和 NAS 状态，恢复连接后继续。"
         }
-        if case KeepsAPIError.http(let code, _) = error {
+        if case KeepsAPIError.http(let code, let body) = error {
             switch code {
             case 401, 403: return "NAS 连接凭证无效或没有访问权限。请结束当前任务，在连接设置中检查凭证后重试。"
             case 404: return "找不到这张照片或底片。请刷新资料库，确认原文件仍然可用后重试。"
             case 409: return "照片或底片已发生变化，本次结果未覆盖。请结束当前任务，刷新资料库后重新调色。"
             case 413: return "调色结果超过 NAS 接收限制，未能保存。请提供诊断日志。"
+            case 422 where body.contains("invalid output image dimensions"):
+                return "展示图尺寸未通过 NAS 校验。调色结果保留在本机；请更新 Keeps 后重试保存，无需重新调色。"
             case 429: return "NAS 暂时繁忙，正在等待重试。"
             case 500...599: return "NAS 暂时无法保存或读取照片，正在等待服务恢复。"
             default: return "NAS 请求失败（HTTP \(code)）。请重试；仍然失败时请提供诊断日志。"
@@ -70,11 +72,26 @@ private final class AIProcessOutput: @unchecked Sendable {
     private let lock = NSLock()
     private var bytes = Data()
     private var ended = false
+    private let captureLines: Bool
+    private var pendingLine = Data()
+    private var lines: [String] = []
+    init(captureLines: Bool = false) { self.captureLines = captureLines }
+    func drainLines() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        let result = lines; lines.removeAll(keepingCapacity: true); return result
+    }
     func finish() { lock.lock(); ended = true; lock.unlock() }
     func isFinished() -> Bool { lock.lock(); defer { lock.unlock() }; return ended }
     func append(_ data: Data) {
         lock.lock(); defer { lock.unlock() }
         bytes.append(data)
+        if captureLines {
+            pendingLine.append(data)
+            while let end = pendingLine.firstIndex(of: 10) {
+                lines.append(String(decoding: pendingLine[..<end], as: UTF8.self))
+                pendingLine.removeSubrange(...end)
+            }
+        }
         if bytes.count > 32 * 1024 * 1024 { bytes.removeFirst(bytes.count - 32 * 1024 * 1024) }
     }
     func text() -> String {
@@ -100,12 +117,12 @@ private final class AIProcessOutput: @unchecked Sendable {
     }
 
     func run(executable: URL, arguments: [String], home: URL, directory: URL, input: String? = nil,
-             timeout: TimeInterval, progress: ((String) -> Void)? = nil) async throws -> Result {
+             timeout: TimeInterval, progress: ((String) -> Void)? = nil, onEvent: ((String) -> Void)? = nil) async throws -> Result {
         guard process == nil else { throw AIEditingFailure("已有 AI 进程正在运行。") }
         cancelled = false
         lastOutput = ""; lastErrors = ""
         let child = Process(), outputPipe = Pipe(), errorPipe = Pipe(), inputPipe = Pipe()
-        let output = AIProcessOutput(), errors = AIProcessOutput()
+        let output = AIProcessOutput(captureLines: onEvent != nil), errors = AIProcessOutput()
         child.executableURL = executable
         child.arguments = arguments
         child.currentDirectoryURL = directory
@@ -135,6 +152,7 @@ private final class AIProcessOutput: @unchecked Sendable {
         try inputPipe.fileHandleForWriting.close()
         let deadline = Date().addingTimeInterval(timeout)
         while child.isRunning {
+            for line in output.drainLines() { onEvent?(line) }
             progress?(output.text() + "\n" + errors.text())
             if cancelled || Task.isCancelled || Date() >= deadline {
                 let wasCancelled = cancelled || Task.isCancelled
@@ -152,6 +170,7 @@ private final class AIProcessOutput: @unchecked Sendable {
             guard Date() < drainDeadline else { throw AIEditingFailure("子进程输出未能结束。") }
             try? await Task.sleep(for: .milliseconds(20))
         }
+        for line in output.drainLines() { onEvent?(line) }
         progress?(output.text() + "\n" + errors.text())
         return Result(exitCode: child.terminationStatus, output: output.text(), errors: errors.text())
     }

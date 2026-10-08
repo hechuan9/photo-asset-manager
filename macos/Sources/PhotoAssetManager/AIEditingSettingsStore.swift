@@ -130,7 +130,7 @@ import CryptoKit
         try prepareDirectories(); try checkRuntime(); try readAccount(); try requireAccount()
     }
 
-    func gradePhoto(_ source: URL, job: URL) async throws -> AIGradeResult {
+    func gradePhoto(_ source: URL, job: URL, progress: ((String, Double, Double) -> Void)? = nil) async throws -> AIGradeResult {
         guard !isBusy else { throw AIEditingFailure("已有 AI 操作正在执行。") }
         isBusy = true
         defer { isBusy = false }
@@ -144,13 +144,13 @@ import CryptoKit
                 try FileManager.default.moveItem(at: result, to: rejected)
             }
         }
-        try await runPhoto(source, job: job)
+        try await runPhoto(source, job: job, progress: progress)
         return try Self.gradeResult(in: job)
     }
 
     func stopForExit() { runner.stopForExit() }
 
-    private func runPhoto(_ source: URL, job requestedJob: URL? = nil) async throws {
+    private func runPhoto(_ source: URL, job requestedJob: URL? = nil, progress: ((String, Double, Double) -> Void)? = nil) async throws {
         self.resultPreview = nil; self.resultSummary = nil
         try self.prepareDirectories(); try self.checkRuntime(); try self.readAccount(); try self.requireAccount()
         guard requestedJob != nil || self.connectionVerified else { throw AIEditingFailure("请先完成模型连接测试。") }
@@ -191,8 +191,11 @@ import CryptoKit
             }
         }
         let prompt = String(decoding: skill, as: UTF8.self) + "\nComplete this photo independently using only Keeps tools. Return the specified result, with reason in Chinese."
+        var steps = AIEditingSteps()
         let result = try await self.runner.run(executable: self.executable, arguments: arguments + ["-"],
-            home: self.home, directory: job, input: prompt, timeout: 600)
+            home: self.home, directory: job, input: prompt, timeout: 600, onEvent: { line in
+                if let step = steps.consume(line) { progress?(step.title, step.floor, step.ceiling) }
+            })
         try self.writeLog(result, job: job)
         runExitCode = result.exitCode
         guard result.exitCode == 0 else { throw AIEditingFailure.process(result, job: job) }
@@ -367,4 +370,29 @@ struct AIGradeResult: Codable, Sendable {
     var fullSize: URL? = nil
     var recipeJSON: String? = nil
     var xmp: String? = nil
+}
+
+
+struct AIEditingSteps {
+    private var adjustments = 0
+    mutating func consume(_ line: String) -> (title: String, floor: Double, ceiling: Double)? {
+        guard let data = line.data(using: .utf8),
+              let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let kind = event["type"] as? String else { return nil }
+        if kind == "turn.started" { return ("AI 正在观察照片", 0.17, 0.28) }
+        guard kind == "item.started", let item = event["item"] as? [String: Any],
+              item["type"] as? String == "mcp_tool_call", item["server"] as? String == "keeps_color",
+              let tool = item["tool"] as? String else { return nil }
+        switch tool {
+        case "inspect_photo": return ("生成初始预览，分析曝光与色彩", 0.20, 0.32)
+        case "set_adjustments":
+            adjustments += 1
+            let floor = 0.34 + Double(min(adjustments - 1, 3)) * 0.09
+            return ("第 \(adjustments) 轮：调整曝光与色彩", floor, min(0.77, floor + 0.09))
+        case "render_preview": return ("第 \(max(1, adjustments)) 轮：渲染调色预览", 0.42, 0.74)
+        case "compare_candidates", "preview_region": return ("AI 正在比较效果、检查细节", 0.51, 0.78)
+        case "select_candidate": return ("已选定效果，生成全尺寸结果", 0.78, 0.85)
+        default: return nil
+        }
+    }
 }

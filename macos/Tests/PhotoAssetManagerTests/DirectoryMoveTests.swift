@@ -130,6 +130,36 @@ import KeepsAPI
         #expect(store.query.directory == "/photos/destination")
     }
 
+    @Test func restoredDirectorySelectionWaitsForLazyTreeLoading() async throws {
+        _ = NSApplication.shared
+        let (store, _) = makeStore()
+        store.showLibrary(directory: "/photos/source/child")
+        store.setDirectoryExpanded("/photos", expanded: true)
+        store.setDirectoryExpanded("/photos/source", expanded: true)
+        let outline = DirectoryOutlineView.DirectoryOutline()
+        let column = NSTableColumn(identifier: .init("directory"))
+        outline.addTableColumn(column)
+        outline.outlineTableColumn = column
+        let coordinator = DirectoryOutlineView.Coordinator(library: store)
+        coordinator.outline = outline
+        outline.dataSource = coordinator
+        outline.delegate = coordinator
+        coordinator.update()
+        #expect(outline.selectedRow == -1)
+        store.refreshNavigation()
+        try await waitUntil { !store.isLoadingNavigation && store.loadingDirectories.isEmpty }
+        coordinator.update()
+        #expect(outline.selectedRow >= 0)
+        #expect(store.query.directory == "/photos/source/child")
+        store.resetNavigation()
+        coordinator.update()
+        store.refreshNavigation()
+        try await waitUntil { !store.isLoadingNavigation && store.loadingDirectories.isEmpty }
+        coordinator.update()
+        #expect(outline.selectedRow >= 0)
+        #expect(store.expandedPaths.contains("/photos/source"))
+    }
+
     @Test func directoryRangeSelectionSurvivesRefreshAndControlASelectsVisibleRows() async throws {
         _ = NSApplication.shared
         let (store, _) = makeStore()
