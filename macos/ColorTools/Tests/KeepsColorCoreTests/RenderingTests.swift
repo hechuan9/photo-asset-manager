@@ -12,7 +12,7 @@ final class RenderingTests: XCTestCase {
         }
         let sourceURL = URL(fileURLWithPath: source)
         let before = try contentHash(sourceURL)
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("keeps-render-\(UUID().uuidString)")
+        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(".build/real-render-\(UUID().uuidString)")
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         var engine: DarktableProcess? = try DarktableProcess(executable: URL(fileURLWithPath: executable), source: sourceURL, directory: directory)
         func render(_ engine: DarktableProcess, _ recipe: ColorRecipe, _ operation: String, full: Bool = false) throws -> URL {
