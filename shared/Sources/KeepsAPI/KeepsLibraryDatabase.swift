@@ -2,6 +2,29 @@ import CryptoKit
 import Foundation
 import SQLite3
 
+public struct KeepsTimelineEntry: Identifiable, Equatable, Sendable {
+    public var id: UUID
+    public var date: String
+    public var flagState: String
+    public var filename: String
+    public var browseThumbnail: KeepsPreview?
+    public var thumbnail: KeepsPreview?
+    public var preview: KeepsPreview?
+    public var standard: KeepsPreview?
+    public var gridPreview: KeepsPreview? { thumbnail ?? preview }
+
+    public init(id: UUID, date: String, thumbnail: KeepsPreview?, preview: KeepsPreview?, flagState: String, filename: String, browseThumbnail: KeepsPreview? = nil, standard: KeepsPreview? = nil) {
+        self.id = id
+        self.date = date
+        self.flagState = flagState
+        self.filename = filename
+        self.browseThumbnail = browseThumbnail
+        self.thumbnail = thumbnail
+        self.preview = preview
+        self.standard = standard
+    }
+}
+
 /// The local catalog is the browsing source; only a completed stable scan removes stale rows.
 public final class KeepsLibraryDatabase {
     // Each owner uses its own connection; this non-Sendable instance never crosses actors.
@@ -242,46 +265,96 @@ public final class KeepsLibraryDatabase {
         try strings("SELECT snapshot FROM navigation WHERE path=?", [path ?? ""]).first.map { try decoder.decode(KeepsNavigation.self, from: Data($0.utf8)) }
     }
 
+    /// All positions are available before scrolling; cursor and page size do not constrain the index.
+    public func timeline(query: KeepsAssetQuery) throws -> [KeepsTimelineEntry] {
+        let (filter, bindings) = try assetFilter(query)
+        let sql = "SELECT id,sort_time,json_extract(snapshot,'$.thumbnail'),json_extract(snapshot,'$.preview'),flag,filename,json_extract(snapshot,'$.browseThumbnail'),json_extract(snapshot,'$.standard') FROM assets a WHERE \(filter) ORDER BY sort_time DESC,id ASC"
+        let statement = try statement(sql, bindings)
+        defer { sqlite3_finalize(statement) }
+        var entries: [KeepsTimelineEntry] = []
+        var result = sqlite3_step(statement)
+        while result == SQLITE_ROW {
+            let idString = String(cString: sqlite3_column_text(statement, 0))
+            guard let id = UUID(uuidString: idString) else { throw DatabaseError(message: "Invalid catalog asset ID: \(idString)") }
+            func descriptor(_ column: Int32) throws -> KeepsPreview? {
+                guard let text = sqlite3_column_text(statement, column) else { return nil }
+                return try decoder.decode(KeepsPreview.self, from: Data(String(cString: text).utf8))
+            }
+            entries.append(KeepsTimelineEntry(id: id, date: String(cString: sqlite3_column_text(statement, 1)),
+                                              thumbnail: try descriptor(2), preview: try descriptor(3),
+                                              flagState: String(cString: sqlite3_column_text(statement, 4)),
+                                              filename: String(cString: sqlite3_column_text(statement, 5)),
+                                              browseThumbnail: try descriptor(6), standard: try descriptor(7)))
+            result = sqlite3_step(statement)
+        }
+        guard result == SQLITE_DONE else { throw failure(sql) }
+        return entries
+    }
+
+    /// Preserve viewport order while keeping SQLite parameter counts bounded.
+    public func assets(ids: [UUID]) throws -> [KeepsAsset] {
+        guard !ids.isEmpty else { return [] }
+        return try transaction(readOnly: true) {
+            var loaded: [UUID: KeepsAsset] = [:]
+            for start in stride(from: 0, to: ids.count, by: 500) {
+                let batch = ids[start..<min(start + 500, ids.count)]
+                let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+                let rows = try strings("SELECT snapshot FROM assets WHERE id IN (\(placeholders))", batch.map { $0.uuidString })
+                for row in rows {
+                    let asset = try decoder.decode(KeepsAsset.self, from: Data(row.utf8))
+                    loaded[asset.id] = asset
+                }
+            }
+            return ids.compactMap { loaded[$0] }
+        }
+    }
+
+    private func assetFilter(_ query: KeepsAssetQuery) throws -> (String, [String?]) {
+        guard query.folderID == nil else { throw DatabaseError(message: "Local catalog does not support folderID; use directory") }
+        guard query.sort == "capture_desc" else { throw DatabaseError(message: "Unsupported local catalog sort: \(query.sort)") }
+        guard (0...5).contains(query.minRating) else { throw DatabaseError(message: "Invalid local catalog rating") }
+        var filter = "a.trashed=?"
+        var bindings: [String?] = [query.trashed ? "1" : "0"]
+        if query.minRating > 0 {
+            filter += " AND a.rating>=?"
+            bindings.append(String(query.minRating))
+        }
+        if !query.q.isEmpty {
+            filter += " AND (a.filename LIKE ? ESCAPE '\\' OR a.camera LIKE ? ESCAPE '\\')"
+            let pattern = "%" + query.q.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "%", with: "\\%").replacingOccurrences(of: "_", with: "\\_") + "%"
+            bindings += [pattern, pattern]
+        }
+        for (column, value) in [("flag", query.flagState), ("color", query.colorLabel)] {
+            if let value { filter += " AND a.\(column)=?"; bindings.append(value) }
+        }
+        if let tag = query.tag {
+            filter += " AND EXISTS(SELECT 1 FROM json_each(a.snapshot,'$.tags') WHERE value=?)"
+            bindings.append(tag)
+        }
+        if let directory = query.directory {
+            let root = directory.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let prefix = root.isEmpty ? "/" : "/" + root + "/"
+            filter += " AND a.id IN (SELECT asset_id FROM paths WHERE path>=? AND path<?"
+            bindings += [prefix, String(prefix.dropLast()) + "0"]
+            if !query.recursive {
+                filter += " AND instr(substr(path,?),'/')=0"
+                bindings.append(String(prefix.unicodeScalars.count + 1))
+            }
+            filter += ")"
+        }
+        if !query.showHidden {
+            let directory = query.directory.map { $0 == "/" ? "/" : "/" + $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) } ?? ""
+            filter += " AND a.id NOT IN (SELECT p.asset_id FROM hidden h JOIN paths p ON p.path>=rtrim(h.path,'/') || '/' AND p.path<rtrim(h.path,'/') || '0' WHERE NOT (?=h.path OR substr(?,1,length(rtrim(h.path,'/'))+1)=rtrim(h.path,'/') || '/'))"
+            bindings += [directory, directory]
+        }
+        return (filter, bindings)
+    }
+
     public func assets(query: KeepsAssetQuery, includingThrough asset: KeepsAsset? = nil, olderThan boundary: KeepsAsset? = nil, newerThan newer: KeepsAsset? = nil, startingAt first: KeepsAsset? = nil, maximumLimit: Int? = nil, knownTotal: Int? = nil) throws -> KeepsAssetPage {
         try transaction(readOnly: true) {
-            guard query.folderID == nil else { throw DatabaseError(message: "Local catalog does not support folderID; use directory") }
-            guard query.sort == "capture_desc" else { throw DatabaseError(message: "Unsupported local catalog sort: \(query.sort)") }
-            guard query.limit > 0, (0...5).contains(query.minRating) else { throw DatabaseError(message: "Invalid local catalog limit or rating") }
+            guard query.limit > 0 else { throw DatabaseError(message: "Invalid local catalog limit") }
             guard let offset = Int(query.cursor ?? "0"), offset >= 0 else { throw DatabaseError(message: "Invalid local catalog cursor") }
-            var filter = "a.trashed=?"
-            var bindings: [String?] = [query.trashed ? "1" : "0"]
-            if query.minRating > 0 {
-                filter += " AND a.rating>=?"
-                bindings.append(String(query.minRating))
-            }
-            if !query.q.isEmpty {
-                filter += " AND (a.filename LIKE ? ESCAPE '\\' OR a.camera LIKE ? ESCAPE '\\')"
-                let pattern = "%" + query.q.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "%", with: "\\%").replacingOccurrences(of: "_", with: "\\_") + "%"
-                bindings += [pattern, pattern]
-            }
-            for (column, value) in [("flag", query.flagState), ("color", query.colorLabel)] {
-                if let value { filter += " AND a.\(column)=?"; bindings.append(value) }
-            }
-            if let tag = query.tag {
-                filter += " AND EXISTS(SELECT 1 FROM json_each(a.snapshot,'$.tags') WHERE value=?)"
-                bindings.append(tag)
-            }
-            if let directory = query.directory {
-                let root = directory.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                let prefix = root.isEmpty ? "/" : "/" + root + "/"
-                filter += " AND a.id IN (SELECT asset_id FROM paths WHERE path>=? AND path<?"
-                bindings += [prefix, String(prefix.dropLast()) + "0"]
-                if !query.recursive {
-                    filter += " AND instr(substr(path,?),'/')=0"
-                    bindings.append(String(prefix.unicodeScalars.count + 1))
-                }
-                filter += ")"
-            }
-            if !query.showHidden {
-                let directory = query.directory.map { $0 == "/" ? "/" : "/" + $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) } ?? ""
-                filter += " AND a.id NOT IN (SELECT p.asset_id FROM hidden h JOIN paths p ON p.path>=rtrim(h.path,'/') || '/' AND p.path<rtrim(h.path,'/') || '0' WHERE NOT (?=h.path OR substr(?,1,length(rtrim(h.path,'/'))+1)=rtrim(h.path,'/') || '/'))"
-                bindings += [directory, directory]
-            }
+            var (filter, bindings) = try assetFilter(query)
             let total = try knownTotal ?? Int(strings("SELECT count(*) FROM assets a WHERE \(filter)", bindings).first!)!
             // The explicit time bound lets SQLite seek assets_sort with bound parameters.
             if let boundary {

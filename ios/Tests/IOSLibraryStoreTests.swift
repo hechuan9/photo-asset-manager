@@ -6,6 +6,30 @@ import KeepsAPI
 
 @MainActor
 struct IOSLibraryStoreTests {
+    @Test func fullTimelineSupportsDirectDistantPhotoLookupWithoutPagingOrNetwork() async throws {
+        let fixture = ReplicaFixture()
+        let store = await fixture.store()
+        try store.database?.ingest((1...30_000).map { try fixture.asset($0) })
+        await store.refresh()
+        #expect(store.timeline.count == 30_000)
+        #expect(store.assets.count == 200)
+        let distant = store.timeline[25_000]
+        let photo = await store.asset(id: distant.id)
+        #expect(photo?.originalFilename == "photo-25001")
+        #expect(store.assets.count == 200)
+        #expect(fixture.requests.isEmpty)
+        #expect(await store.restoreWindow(around: try #require(photo)))
+        #expect(store.assets.contains { $0.id == distant.id })
+        #expect(store.assets.count <= 1000)
+        #expect(store.timeline.count == 30_000)
+        store.search = "photo-30000"
+        await store.refresh()
+        #expect(store.timeline.map(\.filename) == ["photo-30000"])
+        #expect(await store.asset(id: distant.id) == nil)
+        store.configure(nil)
+        #expect(store.timeline.isEmpty)
+    }
+
     @Test func newlyDiscoveredDirectoriesStillReportActualProgress() {
         var progress = IOSOfflineProgress()
         progress.record(.navigation, completed: 1, total: 1)
@@ -290,6 +314,20 @@ struct IOSLibraryStoreTests {
         await store.synchronize()
         #expect(store.syncError == nil)
         #expect(store.assets.map(\.originalFilename) == ["photo-1"])
+    }
+
+    @Test func firstSynchronizationCanBuildTimelineWithoutBundledThumbnails() async throws {
+        let fixture = ReplicaFixture()
+        let store = await fixture.store()
+        #expect(try store.database?.revision == nil)
+        try await store.synchronizeChecked(includeThumbnails: false)
+        #expect(fixture.thumbnailModes == [false])
+        #expect(try store.database?.revision == 1)
+        #expect(store.timeline.map(\.id) == [try fixture.asset(1).id])
+        #expect(store.timeline.first?.thumbnail == nil)
+        #expect(store.timeline.first?.browseThumbnail == nil)
+        #expect(store.assets.map(\.originalFilename) == ["photo-1"])
+        #expect(!store.isSyncing)
     }
 
     @Test func onlyInitializationRequestsBundledThumbnails() async throws {

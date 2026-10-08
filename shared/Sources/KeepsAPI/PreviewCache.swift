@@ -6,9 +6,10 @@ import OSLog
 public actor PreviewCache {
     public static let shared = PreviewCache(role: .preview)
     public static let thumbnails = PreviewCache(diskLimit: Int.max, role: .thumbnail)
+    public static let browsing = PreviewCache(diskLimit: Int.max, role: .browse)
     public static let standards = PreviewCache(role: .standard)
     public static func cache(for role: KeepsMediaRole) -> PreviewCache {
-        switch role { case .thumbnail: thumbnails; case .standard: standards; case .preview: shared }
+        switch role { case .browse: browsing; case .thumbnail: thumbnails; case .standard: standards; case .preview: shared }
     }
     private let role: KeepsMediaRole
     private let migrateLegacy: Bool
@@ -49,15 +50,16 @@ public actor PreviewCache {
         return SHA256.hash(data: Data(encoded.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
-    public func image(assetID: UUID, preview: KeepsPreview, configuration: KeepsConfiguration, maxPixelSize: Int) async throws -> CGImage {
+    public func image(assetID: UUID, preview: KeepsPreview, configuration: KeepsConfiguration, maxPixelSize: Int, allowDownload: Bool = true) async throws -> CGImage {
+        try Task.checkCancellation()
         let key = Self.key(assetID: assetID, preview: preview, configuration: configuration, role: role)
         let pixels = max(1, maxPixelSize)
         let memoryKey = "\(key):\(pixels)" as NSString
         if let image = images.object(forKey: memoryKey) {
-            try touch(key)
+            if role != .thumbnail && role != .browse { try touch(key) }
             return image
         }
-        let (data, actualKey) = try await bytes(key: key, assetID: assetID, preview: preview, configuration: configuration)
+        let (data, actualKey) = try await bytes(key: key, assetID: assetID, preview: preview, configuration: configuration, allowDownload: allowDownload)
         try Task.checkCancellation()
         let image = try Self.decode(data, pixels: pixels)
         images.setObject(image, forKey: "\(actualKey):\(pixels)" as NSString, cost: image.bytesPerRow * image.height)
@@ -118,36 +120,43 @@ public actor PreviewCache {
 
     public var isDownloading: Bool { !pending.isEmpty }
 
-    public func prefetch(assetID: UUID, preview: KeepsPreview, configuration: KeepsConfiguration) async throws -> Bool {
+    public func prefetch(assetID: UUID, preview: KeepsPreview, configuration: KeepsConfiguration, skipWhenBusy: Bool = true) async throws -> Bool {
+        try Task.checkCancellation()
         try prepare()
         let free = try directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage ?? 0
         guard free > 2 * 1024 * 1024 * 1024 else { return false }
-        guard pending.isEmpty else { return false }
+        guard !skipWhenBusy || pending.isEmpty else { return false }
         let key = Self.key(assetID: assetID, preview: preview, configuration: configuration, role: role)
         let (_, actualKey) = try await bytes(key: key, assetID: assetID, preview: preview, configuration: configuration)
         return FileManager.default.fileExists(atPath: directory.appendingPathComponent(actualKey).path)
     }
 
-    private func bytes(key: String, assetID: UUID, preview: KeepsPreview, configuration: KeepsConfiguration) async throws -> (Data, String) {
+    private func bytes(key: String, assetID: UUID, preview: KeepsPreview, configuration: KeepsConfiguration, allowDownload: Bool = true) async throws -> (Data, String) {
+        try Task.checkCancellation()
         try prepare()
         let file = directory.appendingPathComponent(key)
         do {
+            try Task.checkCancellation()
             let data = try Data(contentsOf: file)
+            try Task.checkCancellation()
             guard Self.isImage(data) else {
                 try FileManager.default.removeItem(at: file)
                 entries[key] = nil
+                guard allowDownload else { throw URLError(.fileDoesNotExist) }
                 return try await download(key: key, assetID: assetID, preview: preview, configuration: configuration)
             }
             entries[key] = Entry(size: data.count, accessed: Date())
-            try touch(key)
+            if role != .thumbnail && role != .browse { try touch(key) }
             return (data, key)
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             entries[key] = nil
         }
+        guard allowDownload else { throw URLError(.fileDoesNotExist) }
         return try await download(key: key, assetID: assetID, preview: preview, configuration: configuration)
     }
 
     private func download(key: String, assetID: UUID, preview: KeepsPreview, configuration: KeepsConfiguration) async throws -> (Data, String) {
+        try Task.checkCancellation()
         if let task = pending[key] { return try await task.value }
         let session = self.session
         let task = Task<(Data, String), Error> {
@@ -182,6 +191,7 @@ public actor PreviewCache {
         return CGImageSourceGetCount(source) > 0 && CGImageSourceGetStatus(source) == .statusComplete
     }
     static func decode(_ data: Data, pixels: Int) throws -> CGImage {
+        try Task.checkCancellation()
         guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,

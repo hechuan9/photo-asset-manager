@@ -5,87 +5,108 @@ public struct KeepsPreviewImage: View {
     public let configuration: KeepsConfiguration?
     private let contentMode: ContentMode
     private let loadStandard: Bool
+    private let previewScale: CGFloat
     @Environment(\.displayScale) private var displayScale
     @State private var image: CGImage?
+    @State private var imageQuality = 0
+    @State private var imageIdentity: String?
+    @State private var imageConfiguration: KeepsConfiguration?
     @State private var error: String?
     @State private var retry = 0
 
-    public init(asset: KeepsAsset, configuration: KeepsConfiguration?, contentMode: ContentMode = .fit, loadStandard: Bool = false) {
+    public init(asset: KeepsAsset, configuration: KeepsConfiguration?, contentMode: ContentMode = .fit, loadStandard: Bool = false, previewScale: CGFloat = 1) {
         self.asset = asset
         self.configuration = configuration
         self.contentMode = contentMode
         self.loadStandard = loadStandard
+        self.previewScale = previewScale
+    }
+
+    private var identity: String {
+        "\(asset.id)|\(asset.gridPreview?.version ?? "")|\(asset.standard?.version ?? "")"
     }
 
     public var body: some View {
         GeometryReader { geometry in
             let maxPixelSize = max(1, Int(ceil(max(geometry.size.width, geometry.size.height) * displayScale)))
+            let standardSize = asset.standard.map { max($0.width, $0.height) } ?? maxPixelSize
+            let standardPixels = previewScale >= 5 ? standardSize : min(standardSize, Int(ceil(CGFloat(maxPixelSize) * max(1, previewScale))))
             ZStack {
-                Color.secondary.opacity(0.12)
-                if let image {
+                Image(decorative: KeepsThumbnailPlaceholder.image, scale: 1)
+                    .resizable().frame(width: geometry.size.width, height: geometry.size.height)
+                if let image, imageIdentity == identity, imageConfiguration == configuration {
                     Image(decorative: image, scale: displayScale)
                         .resizable().aspectRatio(contentMode: contentMode)
                         .frame(width: geometry.size.width, height: geometry.size.height).clipped()
-                        .overlay(alignment: .bottom) {
-                            if let error {
-                                VStack {
-                                    Button("重新载入照片") { retry += 1 }
-                                    Text(error).font(.caption2).lineLimit(3)
-                                }.padding(8).background(.regularMaterial)
-                            }
-                        }
-                } else if let error {
-                    VStack(spacing: 6) {
-                        Image(systemName: "photo.badge.exclamationmark")
-                        Button("重新载入预览") { retry += 1 }.buttonStyle(.plain)
-                        Text(error).font(.caption2).lineLimit(3)
-                    }.font(.caption).padding(8)
-                } else if asset.gridPreview == nil && (!loadStandard || asset.standard == nil) {
-                    VStack {
-                        Image(systemName: "photo")
-                        Text("预览尚未生成").font(.caption)
-                    }.foregroundStyle(.secondary)
-                } else if configuration == nil {
-                    Text("请先连接资料库").font(.caption).foregroundStyle(.secondary)
-                } else {
-                    ProgressView()
                 }
             }
-            .task(id: taskID(maxPixelSize: maxPixelSize)) {
-                await load(maxPixelSize: maxPixelSize)
+            .transaction { $0.animation = nil }
+            .overlay(alignment: .bottom) {
+                if loadStandard, let error {
+                    VStack {
+                        Button("重新载入照片") { retry += 1 }
+                        Text(error).font(.caption2).lineLimit(3)
+                    }.padding(8).background(.regularMaterial)
+                }
+            }
+            .accessibilityLabel(error ?? (asset.gridPreview == nil ? "缩略图尚未生成" : asset.originalFilename))
+            .accessibilityAction(named: "重新载入缩略图") { retry += 1 }
+            .task(id: "\(identity)|\(asset.browseThumbnail?.version ?? "")|\(configuration?.baseURL.absoluteString ?? "")|\(configuration?.libraryID ?? "")|\(configuration?.accessCredential ?? "")|\(loadStandard)|\(maxPixelSize)|\(standardPixels)|\(retry)") {
+                await load(maxPixelSize: maxPixelSize, standardPixels: standardPixels)
             }
         }
     }
 
-    private func taskID(maxPixelSize: Int) -> String {
-        guard let preview = asset.gridPreview ?? (loadStandard ? asset.standard : nil), let configuration else { return asset.id.uuidString }
-        return "\(PreviewCache.key(assetID: asset.id, preview: preview, configuration: configuration))|\(asset.standard?.version ?? "")|\(loadStandard)|\(maxPixelSize)|\(retry)"
-    }
-
     @MainActor
-    private func load(maxPixelSize: Int) async {
-        image = nil
+    private func load(maxPixelSize: Int, standardPixels: Int) async {
+        if imageIdentity != identity || imageConfiguration != configuration {
+            image = nil
+            imageQuality = 0
+        }
+        imageIdentity = identity
+        imageConfiguration = configuration
         error = nil
         guard let configuration else { return }
-        if let preview = asset.gridPreview {
-            await display(preview, role: asset.thumbnail == nil ? .preview : .thumbnail, configuration: configuration, pixels: maxPixelSize)
+        if loadStandard, let standard = asset.standard {
+            async let highResolution: Void = display(standard, role: .standard, configuration: configuration,
+                                                     pixels: standardPixels, quality: 3)
+            await loadThumbnails(configuration: configuration, maxPixelSize: maxPixelSize)
+            await highResolution
+        } else {
+            await loadThumbnails(configuration: configuration, maxPixelSize: maxPixelSize)
         }
-        guard !Task.isCancelled, loadStandard, let standard = asset.standard else { return }
-        await display(standard, role: .standard, configuration: configuration, pixels: maxPixelSize)
     }
 
     @MainActor
-    private func display(_ descriptor: KeepsPreview, role: KeepsMediaRole, configuration: KeepsConfiguration, pixels: Int) async {
+    private func loadThumbnails(configuration: KeepsConfiguration, maxPixelSize: Int) async {
+        if image == nil, let browse = asset.browseThumbnail {
+            await display(browse, role: .browse, configuration: configuration, pixels: 64, quality: 1)
+        }
+        guard !Task.isCancelled, imageQuality < 3 else { return }
+        if let preview = asset.gridPreview {
+            await display(preview, role: asset.thumbnail == nil ? .preview : .thumbnail,
+                          configuration: configuration, pixels: maxPixelSize, quality: 2)
+        }
+    }
+
+    @MainActor
+    private func display(_ descriptor: KeepsPreview, role: KeepsMediaRole, configuration: KeepsConfiguration, pixels: Int, quality: Int) async {
         do {
             let loaded = try await PreviewCache.cache(for: role).image(
                 assetID: asset.id, preview: descriptor, configuration: configuration, maxPixelSize: pixels
             )
             try Task.checkCancellation()
+            guard quality >= imageQuality else { return }
+            if quality == imageQuality, let image,
+               max(loaded.width, loaded.height) < max(image.width, image.height) { return }
             image = loaded
-            error = nil
+            imageQuality = quality
+            if !loadStandard || quality == 3 { error = nil }
         } catch {
             guard !Task.isCancelled, !(error is CancellationError) else { return }
-            self.error = String(reflecting: error)
+            if quality == 3 || (!loadStandard && quality >= imageQuality) {
+                self.error = String(reflecting: error)
+            }
         }
     }
 }

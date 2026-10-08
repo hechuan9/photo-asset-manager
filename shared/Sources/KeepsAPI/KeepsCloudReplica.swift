@@ -8,14 +8,16 @@ public actor KeepsCloudReplica {
     public static let shared = KeepsCloudReplica()
     private let cloudRoot: URL?
     private let cache: PreviewCache
+    private let browsingCache: PreviewCache
 
-    public init(cloudRoot: URL? = nil, cache: PreviewCache = .thumbnails) {
+    public init(cloudRoot: URL? = nil, cache: PreviewCache = .thumbnails, browsingCache: PreviewCache = .browsing) {
         self.cloudRoot = cloudRoot
         self.cache = cache
+        self.browsingCache = browsingCache
     }
 
     @discardableResult
-    public func restore(configuration: KeepsConfiguration, databaseRoot: URL? = nil,
+    public func restore(configuration: KeepsConfiguration, databaseRoot: URL? = nil, includeThumbnails: Bool = true,
                         progress: (@Sendable (String) async -> Void)? = nil,
                         workProgress: (@Sendable (Int64, Int64) async -> Void)? = nil) async throws -> Bool {
         guard let root = replicaRoot(configuration) else {
@@ -24,7 +26,7 @@ public actor KeepsCloudReplica {
         }
         try Task.checkCancellation()
         await progress?("正在查找 iCloud 图库副本…")
-        let inventory = try await inventory(root)
+        let inventory = try await inventory(root, snapshotOnly: !includeThumbnails)
         let snapshot = root.appendingPathComponent("catalog.snapshot", isDirectory: false)
         guard inventory.contains(snapshot) else { return false }
         let temporary = try temporaryDirectory()
@@ -36,16 +38,26 @@ public actor KeepsCloudReplica {
         let database = try KeepsLibraryDatabase(configuration: configuration,
                                                 rootDirectory: temporary.appendingPathComponent("catalog", isDirectory: true))
         guard try database.restoreSnapshot(from: localSnapshot) else { return false }
+        if !includeThumbnails {
+            try Task.checkCancellation()
+            let local = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: databaseRoot)
+            let restored = try local.restoreSnapshot(from: localSnapshot)
+            await workProgress?(1, 1)
+            return restored
+        }
         let work = ReplicaWorkProgress(total: try thumbnailWorkTotal(database), callback: workProgress)
         await work.advance(1, force: true)
         var processed = 0
         var cached = try await cache.cachedKeys()
+        cached.formUnion(try await browsingCache.cachedKeys())
         let clock = ContinuousClock()
         var lastProgress = clock.now
         try await forEachThumbnailPage(database: database, configuration: configuration) { keys, itemCount in
-            let missing = keys.filter { !cached.contains($0) && inventory.contains(thumbnailURL($0, root: root)) }
+            let missing = keys.filter { !cached.contains($0.key) && inventory.contains(thumbnailURL($0.key, root: root)) }
             await work.advance(Int64(itemCount - missing.count))
-            for key in missing {
+            for item in missing {
+                let key = item.key
+                let targetCache = item.browsing ? browsingCache : cache
                 try Task.checkCancellation()
                 do {
                     let source = thumbnailURL(key, root: root)
@@ -55,7 +67,7 @@ public actor KeepsCloudReplica {
                     try await makeAvailable(source, downloadRequested: true)
                     let localFile = temporary.appendingPathComponent(key, isDirectory: false)
                     try coordinatedRead(source, to: localFile)
-                    try await cache.importCachedFile(from: localFile, key: key)
+                    try await targetCache.importCachedFile(from: localFile, key: key)
                     try FileManager.default.removeItem(at: localFile)
                     cached.insert(key)
                     processed += 1
@@ -114,10 +126,12 @@ public actor KeepsCloudReplica {
         var lastProgress = clock.now
         try await forEachThumbnailPage(database: stable, configuration: configuration) { keys, itemCount in
             await work.advance(Int64(itemCount - keys.count))
-            for key in keys {
+            for item in keys {
+                let key = item.key
+                let sourceCache = item.browsing ? browsingCache : cache
                 try Task.checkCancellation()
                 let destination = thumbnailURL(key, root: root)
-                guard !existing.contains(destination), let source = try await cache.cachedFileURL(forKey: key) else {
+                guard !existing.contains(destination), let source = try await sourceCache.cachedFileURL(forKey: key) else {
                     await work.advance(1)
                     continue
                 }
@@ -149,8 +163,12 @@ public actor KeepsCloudReplica {
         root.appendingPathComponent("thumbnails/\(key.prefix(2))/\(key)", isDirectory: false)
     }
 
-    private func inventory(_ root: URL) async throws -> Set<URL> {
+    private func inventory(_ root: URL, snapshotOnly: Bool = false) async throws -> Set<URL> {
         if cloudRoot != nil {
+            if snapshotOnly {
+                let snapshot = root.appendingPathComponent("catalog.snapshot")
+                return FileManager.default.fileExists(atPath: snapshot.path) ? [snapshot.resolvingSymlinksInPath()] : []
+            }
             guard let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else { return [] }
             var result: Set<URL> = []
             while let url = files.nextObject() as? URL {
@@ -159,7 +177,7 @@ public actor KeepsCloudReplica {
             }
             return result
         }
-        let discovered = try await CloudReplicaMetadata.urls(in: root)
+        let discovered = try await CloudReplicaMetadata.urls(in: root, snapshotOnly: snapshotOnly)
         var result: Set<URL> = []
         for url in discovered {
             try Task.checkCancellation()
@@ -193,11 +211,11 @@ public actor KeepsCloudReplica {
         query.limit = 1
         let active = try database.assets(query: query).total
         query.trashed = true
-        return 1 + Int64(active) + Int64(try database.assets(query: query).total)
+        return 1 + 2 * (Int64(active) + Int64(try database.assets(query: query).total))
     }
 
     private func forEachThumbnailPage(database: KeepsLibraryDatabase, configuration: KeepsConfiguration,
-                                  visit: ([String], Int) async throws -> Void) async throws {
+                                  visit: ([(key: String, browsing: Bool)], Int) async throws -> Void) async throws {
         for trashed in [false, true] {
             var query = KeepsAssetQuery()
             query.showHidden = true
@@ -209,11 +227,19 @@ public actor KeepsCloudReplica {
                 try Task.checkCancellation()
                 let page = try database.assets(query: query, olderThan: boundary, knownTotal: total)
                 total = page.total
-                let keys = page.items.compactMap { asset in
-                    asset.thumbnail.map { PreviewCache.key(assetID: asset.id, preview: $0,
-                                                            configuration: configuration, role: .thumbnail) }
+                let keys: [(key: String, browsing: Bool)] = page.items.flatMap { asset in
+                    var keys: [(key: String, browsing: Bool)] = []
+                    if let preview = asset.thumbnail {
+                        keys.append((PreviewCache.key(assetID: asset.id, preview: preview,
+                                                      configuration: configuration, role: .thumbnail), false))
+                    }
+                    if let preview = asset.browseThumbnail {
+                        keys.append((PreviewCache.key(assetID: asset.id, preview: preview,
+                                                      configuration: configuration, role: .browse), true))
+                    }
+                    return keys
                 }
-                try await visit(keys, page.items.count)
+                try await visit(keys, page.items.count * 2)
                 guard page.nextCursor != nil, let last = page.items.last else { break }
                 boundary = last
             }
@@ -317,8 +343,8 @@ private final class CloudReplicaMetadata: @unchecked Sendable {
     private var observer: NSObjectProtocol?
     private var gathered = false
 
-    static func urls(in root: URL) async throws -> Set<URL> {
-        try await CloudReplicaMetadata().gather(root)
+    static func urls(in root: URL, snapshotOnly: Bool) async throws -> Set<URL> {
+        try await CloudReplicaMetadata().gather(root, snapshotOnly: snapshotOnly)
     }
 
     private func perform<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
@@ -329,7 +355,7 @@ private final class CloudReplicaMetadata: @unchecked Sendable {
         }
     }
 
-    private func gather(_ root: URL) async throws -> Set<URL> {
+    private func gather(_ root: URL, snapshotOnly: Bool) async throws -> Set<URL> {
         do {
             try Task.checkCancellation()
             try await perform { [self] in
@@ -337,6 +363,11 @@ private final class CloudReplicaMetadata: @unchecked Sendable {
                 self.query = query
                 query.searchScopes = [NSMetadataQueryUbiquitousDataScope]
                 query.predicate = NSPredicate(format: "%K CONTAINS %@", NSMetadataItemPathKey, "/" + root.lastPathComponent + "/")
+                if snapshotOnly {
+                    query.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                        query.predicate!, NSPredicate(format: "%K == %@", NSMetadataItemFSNameKey, "catalog.snapshot")
+                    ])
+                }
                 query.operationQueue = queue
                 observer = NotificationCenter.default.addObserver(forName: .NSMetadataQueryDidFinishGathering,
                                                                    object: query, queue: queue) { [weak self] _ in

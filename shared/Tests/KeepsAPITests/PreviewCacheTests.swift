@@ -17,13 +17,103 @@ struct PreviewCacheTests {
         let session = URLSession(configuration: config)
         return (PreviewCache(directory: directory, diskLimit: limit, session: session), directory, session)
     }
-    private func png() throws -> Data {
-        let context = CGContext(data: nil, width: 32, height: 16, bitsPerComponent: 8, bytesPerRow: 128, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    private func png(width: Int = 32, height: Int = 16) throws -> Data {
+        let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         let data = NSMutableData()
         let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil)!
         CGImageDestinationAddImage(destination, context.makeImage()!, nil)
         #expect(CGImageDestinationFinalize(destination))
         return data as Data
+    }
+
+    @Test func browsingImagesReuseServerFileWithoutChangingRecency() async throws {
+        let (_, directory, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory); session.invalidateAndCancel() }
+        let cache = PreviewCache(directory: directory, diskLimit: Int.max, session: session, role: .browse)
+        let key = PreviewCache.key(assetID: id, preview: preview, configuration: configuration, role: .browse)
+        let data = try png(width: 64, height: 32)
+        try await cache.store(data, key: key)
+        let file = directory.appendingPathComponent(key)
+        let date = Date(timeIntervalSince1970: 100)
+        try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: file.path)
+        let storedDate = try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date
+        CacheProtocol.reset { _ in Issue.record("Cached browse image must not use the network"); return (500, Data()) }
+        let small = try await cache.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 64, allowDownload: false)
+        let reused = try await cache.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 64, allowDownload: false)
+        #expect(small === reused)
+        #expect(small.width == 64 && small.height == 32)
+        #expect(try Data(contentsOf: file) == data)
+        #expect(try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date == storedDate)
+        let restarted = PreviewCache(directory: directory, diskLimit: Int.max, session: session, role: .browse)
+        #expect(try await restarted.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 64, allowDownload: false).width == 64)
+        #expect(try await restarted.cachedKeys() == [key])
+        #expect(CacheProtocol.count == 0)
+    }
+
+    @Test func localBrowsingNeverDownloadsMissingOrCorruptThumbnails() async throws {
+        let (cache, directory, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory); session.invalidateAndCancel() }
+        CacheProtocol.reset { _ in Issue.record("Local browsing must not download"); return (500, Data()) }
+        await #expect(throws: URLError(.fileDoesNotExist)) {
+            _ = try await cache.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 64, allowDownload: false)
+        }
+        let key = PreviewCache.key(assetID: id, preview: preview, configuration: configuration)
+        try await cache.store(Data("broken".utf8), key: key)
+        await #expect(throws: URLError(.fileDoesNotExist)) {
+            _ = try await cache.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 64, allowDownload: false)
+        }
+        try await cache.store(png(width: 128, height: 64), key: key)
+        let image = try await cache.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 64, allowDownload: false)
+        #expect(image.width == 64)
+        try FileManager.default.removeItem(at: directory.appendingPathComponent(key))
+        let restarted = PreviewCache(directory: directory, session: session)
+        await #expect(throws: URLError(.fileDoesNotExist)) {
+            _ = try await restarted.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 64, allowDownload: false)
+        }
+        #expect(CacheProtocol.count == 0)
+    }
+
+    @Test func browsingCacheSeparatesVersionsAndConnections() async throws {
+        let (cache, directory, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory); session.invalidateAndCancel() }
+        let data = try png(width: 128, height: 64)
+        CacheProtocol.reset { _ in (200, data) }
+        _ = try await cache.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 64)
+        var changed = preview
+        changed.version = "v2"
+        _ = try await cache.image(assetID: id, preview: changed, configuration: configuration, maxPixelSize: 64)
+        var connection = configuration
+        connection.libraryID = "other"
+        _ = try await cache.image(assetID: id, preview: preview, configuration: connection, maxPixelSize: 64)
+        connection.baseURL = URL(string: "https://other.invalid")!
+        _ = try await cache.image(assetID: id, preview: preview, configuration: connection, maxPixelSize: 64)
+        #expect(CacheProtocol.count == 4)
+    }
+
+    @Test func cancelledRequestsSkipMemoryDiskAndNetworkWork() async throws {
+        let (cache, directory, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory); session.invalidateAndCancel() }
+        let data = try png()
+        CacheProtocol.reset { _ in (200, data) }
+        _ = try await cache.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 64)
+        _ = try await cache.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 8)
+        let result = await Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            await #expect(throws: CancellationError.self) {
+                _ = try await cache.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 64)
+            }
+            await #expect(throws: CancellationError.self) {
+                _ = try await cache.image(assetID: id, preview: preview, configuration: configuration, maxPixelSize: 8)
+            }
+            await #expect(throws: CancellationError.self) {
+                _ = try await cache.image(assetID: UUID(), preview: preview, configuration: configuration, maxPixelSize: 64)
+            }
+            await #expect(throws: CancellationError.self) {
+                _ = try await cache.prefetch(assetID: UUID(), preview: preview, configuration: configuration)
+            }
+        }.result
+        _ = result
+        #expect(CacheProtocol.count == 1)
     }
 
     @Test func importedImageIsValidatedAndRetryReusesPersistedCopy() async throws {

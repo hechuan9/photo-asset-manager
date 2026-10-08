@@ -70,9 +70,6 @@ struct IOSRootView: View {
                 galleryPage().overlay(alignment: .bottom) { bottomBar }
             }
         }
-        .allowsHitTesting(galleryReady || library.configuration == nil)
-        .accessibilityHidden(!galleryReady && library.configuration != nil)
-        .overlay { if !galleryReady, library.configuration != nil { startupScreen } }
         .preferredColorScheme(.dark)
         .tint(.white)
         .sheet(isPresented: $showingSettings) {
@@ -129,8 +126,8 @@ struct IOSRootView: View {
         .onChange(of: collectionPath) { _, _ in
             if collections { applyCollectionScope() }
         }
-        .onChange(of: library.assets) { _, assets in
-            if assets.isEmpty { visibleDates = "" }
+        .onChange(of: library.timeline) { _, entries in
+            if entries.isEmpty { visibleDates = "" }
         }
     }
 
@@ -149,8 +146,8 @@ struct IOSRootView: View {
         await library.waitForLocalLoad()
         guard !Task.isCancelled else { return }
         if let error = library.lastError { startupError = error; return }
-        await thumbnailDownload.prepare(configuration: configuration, refreshLocal: { await library.refresh() }) { progress in
-            try await library.synchronizeChecked(progress: progress)
+        await thumbnailDownload.prepare(configuration: configuration, refreshLocal: { await library.refresh() }) { forceRebuild, progress in
+            try await library.synchronizeChecked(forceRebuild: forceRebuild, includeThumbnails: false, progress: progress)
         }
         guard !Task.isCancelled, library.configuration == configuration else { return }
         if thumbnailDownload.isComplete { galleryReady = true }
@@ -176,7 +173,7 @@ struct IOSRootView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             VStack(spacing: 20) {
-                Text("正在准备离线图库").font(.title2.bold())
+                Text("正在打开图库").font(.title2.bold())
                 IOSOfflineProgressView(download: thumbnailDownload)
                 if let error = startupError ?? thumbnailDownload.error {
                     Text(error).font(.caption).multilineTextAlignment(.center)
@@ -190,7 +187,7 @@ struct IOSRootView: View {
                         Task { await prepareLibrary() }
                     }
                 }
-                Text("数据库准备好后自动进入，缺少的缩略图留空。可以暂停，继续时保留已完成的进度。")
+                Text("照片目录准备好后即可浏览和滚动；缩略图自动在后台下载，缺图时显示占位图。")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("连接设置") { showingSettings = true }
             }.padding(32)
@@ -198,12 +195,13 @@ struct IOSRootView: View {
     }
 
     private func galleryPage(route: IOSCollectionRoute? = nil) -> some View {
-        let configuration = library.configuration
         return VStack(spacing: 0) {
             ZStack {
                 if library.configuration == nil {
                     ContentUnavailableView("连接 NAS 图库", systemImage: "externaldrive", description: Text("在连接设置中填写服务地址和访问令牌。"))
-                } else if library.assets.isEmpty {
+                } else if !galleryReady && library.timeline.isEmpty {
+                    startupScreen
+                } else if library.timeline.isEmpty {
                     ScrollView {
                         Group {
                             if library.isLoadingLocal { ProgressView("正在打开图库…") }
@@ -311,7 +309,7 @@ struct IOSRootView: View {
             HStack(spacing: 16) {
                 if selecting {
                     HStack(spacing: 22) {
-                        Button("全选已加载") { selectedIDs = Set(library.assets.map(\.id)) }
+                        Button("全选当前屏幕") { selectedIDs = library.visibleIDs }
                         Spacer(minLength: 0)
                         Button { Task { await changeSelection(trash: false) } } label: {
                             Image(systemName: library.showingTrash ? "arrow.uturn.backward" : "heart")

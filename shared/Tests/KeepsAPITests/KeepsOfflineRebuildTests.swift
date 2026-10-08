@@ -44,6 +44,7 @@ struct KeepsOfflineRebuildTests {
         }
         let result = try await service.run(configuration: configuration, databaseRoot: destination)
         #expect(result.revision == 42)
+        #expect(result.browseThumbnailCount == nil)
         let requests = OfflineBundleProtocol.state.requests
         #expect(requests.filter { $0.httpMethod == "POST" }.count == 1)
         let downloads = requests.filter { $0.url!.path.hasSuffix("download") }
@@ -146,6 +147,40 @@ struct KeepsOfflineRebuildTests {
         #expect(try reader.assets(query: .init()).items.first?.id == asset.id)
     }
 
+    @Test func browseBundleImportsBothRolesAndRejectsWrongCounts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: root.appendingPathComponent("source"))
+        let preview = KeepsPreview(downloadURL: URL(string: "https://nas.invalid/thumbnail")!, width: 1, height: 1, version: "v2")
+        var asset = KeepsAsset(id: UUID(), captureTime: nil, cameraMake: "", cameraModel: "", lensModel: "", originalFilename: "test.jpg", contentFingerprint: "c", metadataFingerprint: "m", rating: 0, flagState: "none", colorLabel: nil, tags: [], createdAt: "2026-01-01", updatedAt: "2026-01-01", trashed: false, preview: nil, thumbnail: preview)
+        asset.browseThumbnail = preview
+        try source.ingest([asset]); try source.completeSync(revision: 55, isStable: true)
+        let snapshot = root.appendingPathComponent("snapshot.sqlite")
+        try source.exportSnapshot(to: snapshot)
+        var manifest = KeepsOfflineManifest(formatVersion: 1, libraryID: "main", revision: 55, assetCount: 1, thumbnailCount: 1, missingThumbnailCount: 0, browseThumbnailCount: 1, missingBrowseThumbnailCount: 0)
+        let image = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aEl0AAAAASUVORK5CYII=")!
+        let previewCache = PreviewCache(directory: root.appendingPathComponent("preview"), role: .thumbnail)
+        let browseCache = PreviewCache(directory: root.appendingPathComponent("browse"), role: .browse)
+        let service = KeepsOfflineRebuild(cache: previewCache, browsingCache: browseCache)
+        let archive = root.appendingPathComponent("bundle.tar")
+        let entries = [("catalog.sqlite", try Data(contentsOf: snapshot)), ("thumbnails/\(asset.id.uuidString).image", image), ("browse-thumbnails/\(asset.id.uuidString).image", image)]
+        try tar([("manifest.json", try JSONEncoder().encode(manifest))] + entries).write(to: archive)
+        let result = try await service.unpack(archive, root: root, configuration: configuration, databaseRoot: root.appendingPathComponent("target"), progress: { _ in })
+        #expect(result.browseThumbnailCount == 1)
+        #expect(try await previewCache.cachedKeys().count == 1)
+        #expect(try await browseCache.cachedKeys().count == 1)
+        manifest.browseThumbnailCount = 0; manifest.missingBrowseThumbnailCount = 1
+        try tar([("manifest.json", try JSONEncoder().encode(manifest))] + entries).write(to: archive)
+        let rejected = root.appendingPathComponent("rejected")
+        await #expect(throws: (any Error).self) {
+            _ = try await service.unpack(archive, root: root, configuration: configuration, databaseRoot: rejected, progress: { _ in })
+        }
+        #expect(try KeepsLibraryDatabase(configuration: configuration, rootDirectory: rejected).revision == nil)
+        try tar([("manifest.json", try JSONEncoder().encode(manifest))] + entries.dropLast()).write(to: archive)
+        let missing = try await service.unpack(archive, root: root, configuration: configuration, databaseRoot: rejected, progress: { _ in })
+        #expect(missing.missingBrowseThumbnailCount == 1)
+    }
+
     @Test(.enabled(if: ProcessInfo.processInfo.environment["KEEPS_OFFLINE_BUNDLE_FIXTURE"] != nil))
     func importsRustGeneratedContractFixture() async throws {
         let archive = URL(fileURLWithPath: ProcessInfo.processInfo.environment["KEEPS_OFFLINE_BUNDLE_FIXTURE"]!)
@@ -154,8 +189,11 @@ struct KeepsOfflineRebuildTests {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let configuration = KeepsConfiguration(baseURL: URL(string: "https://fixture.invalid")!, libraryID: "photos")
         let cache = PreviewCache(directory: root.appendingPathComponent("cache"), role: .thumbnail)
-        let result = try await KeepsOfflineRebuild(cache: cache).unpack(archive, root: root, configuration: configuration, databaseRoot: root.appendingPathComponent("db"), progress: { _ in })
+        let browseCache = PreviewCache(directory: root.appendingPathComponent("browse-cache"), role: .browse)
+        let result = try await KeepsOfflineRebuild(cache: cache, browsingCache: browseCache).unpack(archive, root: root, configuration: configuration, databaseRoot: root.appendingPathComponent("db"), progress: { _ in })
         #expect(result.assetCount == 3 && result.thumbnailCount == 1 && result.missingThumbnailCount == 2)
+        #expect(result.browseThumbnailCount == 1 && result.missingBrowseThumbnailCount == 2)
+        #expect(try await browseCache.cachedKeys().count == 1)
         let db = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: root.appendingPathComponent("db"))
         #expect(try db.revision == 5)
         #expect(try db.assets(query: .init()).total == 1)

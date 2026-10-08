@@ -41,6 +41,33 @@ struct KeepsCloudReplicaTests {
         try database.completeSync(revision: revision, isStable: true)
     }
 
+    @Test func catalogOnlyRestoreSkipsAvailableCloudImagesAndCacheInventory() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = root.appendingPathComponent("original"), cloud = root.appendingPathComponent("cloud")
+        let value = asset(1)
+        try populate(original, assets: [value])
+        let source = cache(root.appendingPathComponent("source-cache"))
+        try await source.store(image, key: key(value))
+        try await KeepsCloudReplica(cloudRoot: cloud, cache: source).backup(configuration: configuration, databaseRoot: original)
+        // A file at the cache directory makes any attempted cache inventory fail.
+        let unavailableCache = root.appendingPathComponent("unavailable-cache")
+        try Data().write(to: unavailableCache)
+        let target = cache(unavailableCache)
+        let destination = root.appendingPathComponent("restored")
+        let recorder = CloudReplicaProgress()
+        #expect(try await KeepsCloudReplica(cloudRoot: cloud, cache: target).restore(
+            configuration: configuration, databaseRoot: destination, includeThumbnails: false,
+            workProgress: { await recorder.appendWork($0, $1) }))
+        let database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: destination)
+        #expect(try database.revision == 42)
+        var query = KeepsAssetQuery()
+        query.showHidden = true
+        #expect(try database.timeline(query: query).map(\.id) == [value.id])
+        #expect(await recorder.work.last?.0 == 1)
+        #expect(await recorder.work.last?.1 == 1)
+    }
+
     @Test func workProgressCountsMissingExistingAndAbsentThumbnailChecks() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -58,7 +85,7 @@ struct KeepsCloudReplicaTests {
                 workProgress: { await recorder.appendWork($0, $1) })
             let work = await recorder.work
             #expect(work.first?.0 == 1)
-            #expect(work.last?.0 == 5 && work.last?.1 == 5)
+            #expect(work.last?.0 == 9 && work.last?.1 == 9)
             #expect(zip(work, work.dropFirst()).allSatisfy { $0.0 <= $1.0 && $0.1 == $1.1 })
         }
         let recorder = CloudReplicaProgress()
@@ -67,7 +94,7 @@ struct KeepsCloudReplicaTests {
             workProgress: { await recorder.appendWork($0, $1) })
         #expect(restored)
         let work = await recorder.work
-        #expect(work.last?.0 == 5 && work.last?.1 == 5)
+        #expect(work.last?.0 == 9 && work.last?.1 == 9)
         #expect(zip(work, work.dropFirst()).allSatisfy { $0.0 <= $1.0 && $0.1 == $1.1 })
     }
 
@@ -104,6 +131,27 @@ struct KeepsCloudReplicaTests {
         query.trashed = true
         #expect(try restored.assets(query: query).items.map(\.id) == [values.last!.id])
         #expect(try await newCache.cachedKeys() == Set(values.map(key)))
+    }
+
+    @Test func browseThumbnailsRoundTripAndMissingBrowseRemainsAbsent() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cloud = root.appendingPathComponent("cloud")
+        var first = asset(1)
+        first.browseThumbnail = KeepsPreview(downloadURL: URL(string: "https://cloud-replica.invalid/browse/1")!, width: 1, height: 1, version: "browse-1")
+        var second = asset(2)
+        second.browseThumbnail = KeepsPreview(downloadURL: URL(string: "https://cloud-replica.invalid/browse/2")!, width: 1, height: 1, version: "browse-1")
+        let database = root.appendingPathComponent("source")
+        try populate(database, assets: [first, second])
+        let browse = PreviewCache(directory: root.appendingPathComponent("browse"), role: .browse)
+        let firstKey = PreviewCache.key(assetID: first.id, preview: first.browseThumbnail!, configuration: configuration, role: .browse)
+        try await browse.store(image, key: firstKey)
+        try await KeepsCloudReplica(cloudRoot: cloud, cache: cache(root.appendingPathComponent("preview")), browsingCache: browse)
+            .backup(configuration: configuration, databaseRoot: database)
+        let restoredBrowse = PreviewCache(directory: root.appendingPathComponent("restored-browse"), role: .browse)
+        #expect(try await KeepsCloudReplica(cloudRoot: cloud, cache: cache(root.appendingPathComponent("restored-preview")), browsingCache: restoredBrowse)
+            .restore(configuration: configuration, databaseRoot: root.appendingPathComponent("restored")))
+        #expect(try await restoredBrowse.cachedKeys() == [firstKey])
     }
 
     @Test func missingCloudThumbnailsDoNotPreventDatabaseRecoveryOrOverwriteExistingLocalCatalog() async throws {

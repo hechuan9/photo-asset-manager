@@ -9,6 +9,8 @@ public struct KeepsOfflineManifest: Codable, Sendable {
     public var assetCount: Int
     public var thumbnailCount: Int
     public var missingThumbnailCount: Int
+    public var browseThumbnailCount: Int? = nil
+    public var missingBrowseThumbnailCount: Int? = nil
 }
 
 public actor KeepsOfflineRebuild {
@@ -34,8 +36,9 @@ public actor KeepsOfflineRebuild {
     }
     private let session: URLSession
     private let cache: PreviewCache
-    public init(session: URLSession = KeepsClient.apiSession, cache: PreviewCache = .thumbnails) {
-        self.session = session; self.cache = cache
+    private let browsingCache: PreviewCache
+    public init(session: URLSession = KeepsClient.apiSession, cache: PreviewCache = .thumbnails, browsingCache: PreviewCache = .browsing) {
+        self.session = session; self.cache = cache; self.browsingCache = browsingCache
     }
     public func run(configuration: KeepsConfiguration, databaseRoot: URL? = nil, includeThumbnails: Bool = true,
                     progress: @escaping @Sendable (Progress) async -> Void = { _ in }) async throws -> KeepsOfflineManifest {
@@ -124,6 +127,12 @@ public actor KeepsOfflineRebuild {
         guard manifest.formatVersion == 1, manifest.libraryID == configuration.libraryID,
               manifest.assetCount >= 0, manifest.thumbnailCount >= 0, manifest.missingThumbnailCount >= 0,
               manifest.thumbnailCount + manifest.missingThumbnailCount == manifest.assetCount else { throw failure("离线包清单不匹配") }
+        if let count = manifest.browseThumbnailCount, let missing = manifest.missingBrowseThumbnailCount {
+            guard count >= 0, missing >= 0, count <= manifest.assetCount,
+                  missing == manifest.assetCount - count else { throw failure("离线包快速浏览图清单不匹配") }
+        } else if manifest.browseThumbnailCount != nil || manifest.missingBrowseThumbnailCount != nil {
+            throw failure("离线包快速浏览图清单不完整")
+        }
         guard let second = try reader.next(), second.name == "catalog.sqlite" else { throw failure("离线包缺少数据库") }
         let catalog = root.appendingPathComponent("staged.sqlite")
         let archiveBytes = Int64(try archive.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
@@ -133,30 +142,35 @@ public actor KeepsOfflineRebuild {
         try Task.checkCancellation()
         let snapshot = try KeepsLibraryDatabase.SnapshotReader(url: catalog)
         var count = 0
+        var browseCount = 0
         let image = root.appendingPathComponent("image.tmp")
         var last = Date.distantPast
         while let entry = try reader.next() {
             try Task.checkCancellation()
             let name = entry.name
-            guard name.hasPrefix("thumbnails/"), name.hasSuffix(".image"), entry.size <= 64 * 1024 * 1024,
-                  let id = UUID(uuidString: String(name.dropFirst(11).dropLast(6))),
-                  name == "thumbnails/\(id.uuidString).image",
-                  let asset = try snapshot.asset(id: id), let preview = asset.thumbnail else { throw failure("离线包缩略图与数据库不匹配") }
+            let browsing = name.hasPrefix("browse-thumbnails/")
+            let directory = browsing ? "browse-thumbnails/" : "thumbnails/"
+            guard name.hasPrefix(directory), name.hasSuffix(".image"), entry.size <= 64 * 1024 * 1024,
+                  let id = UUID(uuidString: String(name.dropFirst(directory.count).dropLast(6))),
+                  name == "\(directory)\(id.uuidString).image",
+                  let asset = try snapshot.asset(id: id),
+                  let preview = browsing ? asset.browseThumbnail : asset.thumbnail else { throw failure("离线包缩略图与数据库不匹配") }
+            let targetCache = browsing ? browsingCache : cache
             try await reader.copy(entry.size, to: image) { _ in }
             do {
-                try await cache.importCachedFile(from: image, key: PreviewCache.key(assetID: id, preview: preview, configuration: configuration, role: .thumbnail))
+                try await targetCache.importCachedFile(from: image, key: PreviewCache.key(assetID: id, preview: preview, configuration: configuration, role: browsing ? .browse : .thumbnail))
             } catch {
                 try Task.checkCancellation()
                 if error is CancellationError { throw error }
                 Logger(subsystem: "local.keeps", category: "offline-rebuild").error("Optional thumbnail \(id) import failed: \(String(reflecting: error), privacy: .public)")
             }
-            count += 1
+            if browsing { browseCount += 1 } else { count += 1 }
             if Date().timeIntervalSince(last) >= 1 {
                 last = Date()
                 await progress(Progress(phase: .importing, completed: try reader.position, total: archiveBytes + 1, message: "导入离线图库"))
             }
         }
-        guard count == manifest.thumbnailCount else { throw failure("离线包缩略图数量错误") }
+        guard count == manifest.thumbnailCount, browseCount == (manifest.browseThumbnailCount ?? 0) else { throw failure("离线包缩略图数量错误") }
         try Task.checkCancellation()
         let database = try KeepsLibraryDatabase(configuration: configuration, rootDirectory: databaseRoot)
         try database.replaceSnapshot(from: catalog, revision: manifest.revision, assetCount: manifest.assetCount)
