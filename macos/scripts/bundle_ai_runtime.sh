@@ -52,7 +52,7 @@ rm -rf "$HELPERS_DIR/darktable.app"
 chmod +x "$HELPERS_DIR/codex-code-mode-host" "$HELPERS_DIR/codex" "$HELPERS_DIR/keeps-color-mcp"
 
 # Preserve the full dependency layout, then sign nested code before its containing bundles.
-python3 - "$RUNTIME_DIR" "$CODEX_BINARY" "$DARKTABLE_APP" "$HELPERS_DIR" "$SIGNING_IDENTITY" "$ROOT_DIR/AIHelper.entitlements" <<'PY'
+python3 - "$RUNTIME_DIR" "$CODEX_BINARY" "$DARKTABLE_APP" "$HELPERS_DIR" "$SIGNING_IDENTITY" "$ROOT_DIR/AIHelper.entitlements" "$ROOT_DIR/AICodeModeHost.entitlements" <<'PY'
 import hashlib
 import json
 import os
@@ -62,7 +62,7 @@ import subprocess
 import sys
 
 runtime, codex_source, darktable_source, helpers = map(Path, sys.argv[1:5])
-identity, entitlements = sys.argv[5:7]
+identity, entitlements, host_entitlements = sys.argv[5:8]
 macho_magic = {bytes.fromhex(value) for value in (
     "feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca"
 )}
@@ -89,7 +89,7 @@ for path in sorted(helpers.rglob("*"), key=lambda item: len(item.parts), reverse
         header = subprocess.check_output(["otool", "-hv", str(path)], text=True)
         subprocess.run(["lipo", "-verify_arch", "arm64", str(path)], check=True)
         if "EXECUTE" in header and identity != "-":
-            command += ["--entitlements", entitlements]
+            command += ["--entitlements", host_entitlements if path == helpers / "codex-code-mode-host" else entitlements]
         subprocess.run(command + [str(path)], check=True)
 
 bundles = [path for path in helpers.rglob("*") if path.is_dir() and not path.is_symlink()

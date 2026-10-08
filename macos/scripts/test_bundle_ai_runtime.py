@@ -1,4 +1,5 @@
 import os
+import plistlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -18,6 +19,17 @@ class AIRuntimePackagingTests(unittest.TestCase):
         environment.update(inputs)
         return subprocess.run(["bash", str(SCRIPT), str(destination)], env=environment,
                               capture_output=True, text=True)
+
+    def test_code_mode_host_has_isolated_jit_entitlement(self):
+        root = SCRIPT.parent.parent
+        with (root / "AICodeModeHost.entitlements").open("rb") as stream:
+            host = plistlib.load(stream)
+        with (root / "AIHelper.entitlements").open("rb") as stream:
+            helper = plistlib.load(stream)
+        self.assertEqual(host, {**helper, "com.apple.security.cs.allow-jit": True})
+        self.assertTrue(host["com.apple.security.app-sandbox"])
+        self.assertTrue(host["com.apple.security.inherit"])
+        self.assertNotIn("com.apple.security.cs.allow-jit", helper)
 
     def test_no_explicit_inputs_leaves_runtime_absent(self):
         with tempfile.TemporaryDirectory() as temporary:
