@@ -89,7 +89,7 @@ import Testing
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let runtime = root.appendingPathComponent("runtime")
-        for name in ["codex", "keeps-color-mcp", "darktable.app/Contents/MacOS/darktable-cli"] {
+        for name in ["codex", "codex-code-mode-host", "keeps-color-mcp", "darktable.app/Contents/MacOS/darktable-cli"] {
             let url = runtime.appendingPathComponent(name)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data("#!/bin/sh\nexit 91\n".utf8).write(to: url)

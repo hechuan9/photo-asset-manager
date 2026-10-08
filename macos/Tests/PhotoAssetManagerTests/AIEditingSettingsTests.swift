@@ -72,7 +72,7 @@ import CryptoKit
         defer { try? FileManager.default.removeItem(at: root) }
         let runtime = root.appendingPathComponent("runtime")
         let started = root.appendingPathComponent("started")
-        for file in ["codex", "keeps-color-mcp", "darktable.app/Contents/MacOS/darktable-cli"] {
+        for file in ["codex", "codex-code-mode-host", "keeps-color-mcp", "darktable.app/Contents/MacOS/darktable-cli"] {
             let url = runtime.appendingPathComponent(file)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data("#!/bin/sh\necho started > '\(started.path)'\n".utf8).write(to: url)

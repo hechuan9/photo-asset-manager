@@ -39,7 +39,7 @@ class AIRuntimePackagingTests(unittest.TestCase):
             darktable = root / "darktable.app"
             cli = darktable / "Contents/MacOS/darktable-cli"
             cli.parent.mkdir(parents=True)
-            for binary in (codex, cli):
+            for binary in (codex, root / "codex-code-mode-host", cli):
                 binary.write_text("#!/bin/sh\nexit 0\n")
                 binary.chmod(0o755)
             (darktable / "Contents/Info.plist").write_text("test")
@@ -47,6 +47,23 @@ class AIRuntimePackagingTests(unittest.TestCase):
                                      KEEPS_CODEX_BINARY=str(codex), KEEPS_DARKTABLE_APP=str(darktable))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("requires a code signing identity", result.stderr)
+
+    def test_missing_code_mode_host_fails_before_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex = root / "codex"
+            darktable = root / "darktable.app"
+            cli = darktable / "Contents/MacOS/darktable-cli"
+            cli.parent.mkdir(parents=True)
+            for binary in (codex, cli):
+                binary.write_text("#!/bin/sh\nexit 0\n")
+                binary.chmod(0o755)
+            (darktable / "Contents/Info.plist").write_text("test")
+            result = self.run_bundle(root / "Resources", CONFIGURATION="Release",
+                                     KEEPS_CODEX_BINARY=str(codex), KEEPS_DARKTABLE_APP=str(darktable))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("codex-code-mode-host in the same directory", result.stderr)
+            self.assertFalse((root / "Resources").exists())
 
     def test_incomplete_configuration_fails_without_creating_runtime(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -97,8 +97,16 @@ fn source(db: &Connection, lib: &str, id: &str, hash: &str) -> Result<PathBuf> {
         .find(|p| p.is_file() && !crate::media::is_video(p))
         .ok_or_else(|| error(409, "底片不存在或不可用，请重新选择底片"))
 }
+type EditStateRow = (Option<String>, i64, Option<String>, Option<f64>);
+type MediaSnapshotRow = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 fn state(db: &Connection, lib: &str, id: &str) -> Result<Value> {
-    let row:Option<(Option<String>,i64,Option<String>,Option<f64>)>=db.query_row("SELECT a.negative_hash,a.edit_revision,a.last_edit_request,e.exposure_ev FROM catalog_assets a LEFT JOIN photo_edits e ON e.library_id=a.library_id AND e.asset_id=a.id WHERE a.library_id=? AND a.id=?",params![lib,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    let row:Option<EditStateRow>=db.query_row("SELECT a.negative_hash,a.edit_revision,a.last_edit_request,e.exposure_ev FROM catalog_assets a LEFT JOIN photo_edits e ON e.library_id=a.library_id AND e.asset_id=a.id WHERE a.library_id=? AND a.id=?",params![lib,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
     let (hash, revision, last, ev) = row.ok_or_else(|| error(404, "照片不存在"))?;
     let recipe: Option<String> = db
         .query_row(
@@ -139,7 +147,7 @@ impl Store {
     }
     pub fn media_snapshot(&self, lib: &str, id: &str) -> Result<Value> {
         let db = self.lock()?;
-        let row:Option<(Option<String>,Option<String>,Option<String>,Option<String>)>=db.query_row("SELECT coalesce(e.thumbnail,c.thumbnail),coalesce(e.standard,c.standard),coalesce(e.browse,CASE WHEN c.browse_source_version=json_extract(c.thumbnail,'$.version') AND c.browse_spec=?4 AND json_extract(c.browse_thumbnail,'$.sourceThumbnailVersion')=c.browse_source_version AND json_extract(c.browse_thumbnail,'$.spec')=c.browse_spec THEN c.browse_thumbnail END),a.negative_hash FROM catalog_assets a LEFT JOIN photo_edits e ON e.library_id=a.library_id AND e.asset_id=a.id LEFT JOIN catalog_defaults d ON d.library_id=a.library_id AND d.asset_id=a.id LEFT JOIN media_cache c ON c.library_id=a.library_id AND c.asset_id=a.id AND c.status='ready' AND c.source_hash=coalesce(d.content_hash,a.content_hash) AND c.spec=?3 WHERE a.library_id=?1 AND a.id=?2",params![lib,id,crate::cache_pipeline::spec()?,crate::browse_cache::SPEC],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+        let row:Option<MediaSnapshotRow>=db.query_row("SELECT coalesce(e.thumbnail,c.thumbnail),coalesce(e.standard,c.standard),coalesce(e.browse,CASE WHEN c.browse_source_version=json_extract(c.thumbnail,'$.version') AND c.browse_spec=?4 AND json_extract(c.browse_thumbnail,'$.sourceThumbnailVersion')=c.browse_source_version AND json_extract(c.browse_thumbnail,'$.spec')=c.browse_spec THEN c.browse_thumbnail END),a.negative_hash FROM catalog_assets a LEFT JOIN photo_edits e ON e.library_id=a.library_id AND e.asset_id=a.id LEFT JOIN catalog_defaults d ON d.library_id=a.library_id AND d.asset_id=a.id LEFT JOIN media_cache c ON c.library_id=a.library_id AND c.asset_id=a.id AND c.status='ready' AND c.source_hash=coalesce(d.content_hash,a.content_hash) AND c.spec=?3 WHERE a.library_id=?1 AND a.id=?2",params![lib,id,crate::cache_pipeline::spec()?,crate::browse_cache::SPEC],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
         let Some((thumb, standard, browse, negative)) = row else {
             return Ok(Value::Null);
         };

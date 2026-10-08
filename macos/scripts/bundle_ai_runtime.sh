@@ -23,6 +23,12 @@ if [[ ! -f "$CODEX_BINARY" || ! -x "$CODEX_BINARY" || ! -x "$DARKTABLE_APP/Conte
     exit 1
 fi
 
+CODE_MODE_HOST="$(dirname "$CODEX_BINARY")/codex-code-mode-host"
+if [[ ! -f "$CODE_MODE_HOST" || ! -x "$CODE_MODE_HOST" ]]; then
+    echo "Codex requires executable codex-code-mode-host in the same directory." >&2
+    exit 1
+fi
+
 SIGNING_IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:--}"
 if [[ "${CONFIGURATION:-Debug}" == Release && "$SIGNING_IDENTITY" == - ]]; then
     echo "Release AI runtime requires a code signing identity." >&2
@@ -34,6 +40,7 @@ RUNTIME_DIR="$RESOURCES_DIR/AIEditing"
 HELPERS_DIR="$(dirname "$RESOURCES_DIR")/Helpers"
 mkdir -p "$RUNTIME_DIR" "$HELPERS_DIR"
 cp "$CODEX_BINARY" "$HELPERS_DIR/codex"
+cp "$CODE_MODE_HOST" "$HELPERS_DIR/codex-code-mode-host"
 cp "$HELPER_BIN_DIR/keeps-color-mcp" "$HELPERS_DIR/keeps-color-mcp"
 cp "$ROOT_DIR/ColorTools/Skills/keeps-color/SKILL.md" "$RUNTIME_DIR/SKILL.md"
 cp "$ROOT_DIR/scripts/runtime-licenses/"*.txt "$RUNTIME_DIR/"
@@ -42,7 +49,7 @@ cp "$ROOT_DIR/scripts/runtime-sample/SampleLicense.txt" "$RUNTIME_DIR/SampleLice
 # Build output only: discard stale engine files before copying the pinned bundle.
 rm -rf "$HELPERS_DIR/darktable.app"
 /usr/bin/ditto "$DARKTABLE_APP" "$HELPERS_DIR/darktable.app"
-chmod +x "$HELPERS_DIR/codex" "$HELPERS_DIR/keeps-color-mcp"
+chmod +x "$HELPERS_DIR/codex-code-mode-host" "$HELPERS_DIR/codex" "$HELPERS_DIR/keeps-color-mcp"
 
 # Preserve the full dependency layout, then sign nested code before its containing bundles.
 python3 - "$RUNTIME_DIR" "$CODEX_BINARY" "$DARKTABLE_APP" "$HELPERS_DIR" "$SIGNING_IDENTITY" "$ROOT_DIR/AIHelper.entitlements" <<'PY'
@@ -69,6 +76,7 @@ def digest(path):
 
 source_hashes = {
     "codex": digest(codex_source),
+    "codex-code-mode-host": digest(codex_source.parent / "codex-code-mode-host"),
     "darktable-cli": digest(darktable_source / "Contents/MacOS/darktable-cli"),
 }
 for path in sorted(helpers.rglob("*"), key=lambda item: len(item.parts), reverse=True):
@@ -92,7 +100,7 @@ for path in sorted(bundles, key=lambda item: len(item.parts), reverse=True):
         command += ["--entitlements", entitlements]
     subprocess.run(command + [str(path)], check=True)
 subprocess.run(["codesign", "--verify", "--deep", "--strict", str(helpers / "darktable.app")], check=True)
-for name in ("codex", "keeps-color-mcp"):
+for name in ("codex", "codex-code-mode-host", "keeps-color-mcp"):
     subprocess.run(["codesign", "--verify", "--strict", str(helpers / name)], check=True)
 
 with (helpers / "darktable.app/Contents/Info.plist").open("rb") as stream:
@@ -102,11 +110,15 @@ codex_version = subprocess.run([str(codex_source), "--version"], check=True,
 if os.environ.get("CONFIGURATION") == "Release":
     if codex_version != "codex-cli 0.161.0" or darktable_info.get("CFBundleShortVersionString") != "5.6.2":
         raise RuntimeError("Release requires Codex 0.161.0 and darktable 5.6.2")
+    # The host has no --version flag; pin the verified official arm64 release bytes.
+    if source_hashes["codex-code-mode-host"] != "35f1c633130f7b214fc568b6f643f6831aac0c6f25e3cf78287ebadb7820ddf9":
+        raise RuntimeError("Release requires official Codex 0.161.0 arm64 codex-code-mode-host")
 manifest = {
     "schemaVersion": 1,
     "distribution": "embedded",
     "architecture": "arm64",
     "codex": {"version": codex_version, "sourceURL": "https://github.com/openai/codex/tree/rust-v0.161.0", "sourceSHA256": source_hashes["codex"]},
+    "codexCodeModeHost": {"version": "0.161.0", "sourceURL": "https://github.com/openai/codex/tree/rust-v0.161.0", "sourceSHA256": source_hashes["codex-code-mode-host"]},
     "darktable": {"version": darktable_info.get("CFBundleShortVersionString"),
                   "sourceURL": "https://github.com/darktable-org/darktable/tree/release-5.6.2", "sourceCLISHA256": source_hashes["darktable-cli"]},
     "files": {str(path.relative_to(helpers)): digest(path) for path in sorted(helpers.rglob("*"))
@@ -114,7 +126,7 @@ manifest = {
 
 }
 (runtime / "ThirdPartyNotices.txt").write_text(
-    "Codex 0.161.0 — Apache-2.0\n"
+    "Codex and codex-code-mode-host 0.161.0 — Apache-2.0\n"
     "https://github.com/openai/codex/blob/rust-v0.161.0/LICENSE\n"
     "Corresponding source: https://github.com/openai/codex/tree/rust-v0.161.0\n\n"
     "darktable 5.6.2 — GPL-3.0-or-later\n"

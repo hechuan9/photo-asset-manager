@@ -227,7 +227,7 @@ import CryptoKit
     }
     private func checkRuntime() throws {
         runtimeReady = false
-        for relative in ["codex", "keeps-color-mcp", "darktable.app/Contents/MacOS/darktable-cli"] {
+        for relative in ["codex", "codex-code-mode-host", "keeps-color-mcp", "darktable.app/Contents/MacOS/darktable-cli"] {
             guard FileManager.default.isExecutableFile(atPath: codeRuntime.appendingPathComponent(relative).path) else {
                 throw AIEditingFailure("当前应用缺少内置 AI 修图组件：\(relative)。请安装包含 AI 修图运行时的 Keeps。")
             }
