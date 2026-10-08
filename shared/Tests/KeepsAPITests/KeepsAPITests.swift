@@ -28,6 +28,25 @@ struct KeepsAPITests {
         let old = Data("{\"engine\":\"darktable\",\"engineVersion\":\"5.6.2\",\"recipeJSON\":\"{}\",\"xmp\":\"xmp\"}".utf8)
         #expect(try JSONDecoder().decode(KeepsEditRecipe.self, from: old).metadata == nil)
     }
+    @Test func rejectedTrashUsesPreviewIdentityAndNumericConfirmation() async throws {
+        let id = UUID()
+        let fixture = Fixture { request in
+            let preview = request.url!.path.hasSuffix("/preview")
+            #expect(request.url!.path == "/api/libraries/library/rejected-trash/" + (preview ? "preview" : id.uuidString.lowercased()))
+            if request.httpMethod == "POST" && !preview {
+                let body = try JSONSerialization.jsonObject(with: request.bodyData) as! [String: Int]
+                #expect(body == ["confirmationCount": 2])
+            }
+            return (preview ? 200 : 202, """
+            {"id":"\(id)","count":2,"status":"\(preview ? "draft" : "pending")","phase":"waiting","completedFiles":0,"totalFiles":3,"createdAt":1,"updatedAt":1}
+            """)
+        }
+        let preview = try await fixture.client.previewRejectedTrash()
+        #expect(preview.count == 2)
+        #expect(try await fixture.client.submitRejectedTrash(id: preview.id, confirmationCount: 2).id == id)
+        #expect(try await fixture.client.rejectedTrashTask(id: id).totalFiles == 3)
+    }
+
 
     @Test func originalDownloadUsesAuthenticatedVersionRouteAndPreservesExistingDestination() async throws {
         let id = UUID()
@@ -141,6 +160,7 @@ struct KeepsAPITests {
         let fixture = Fixture { request in
             let body = try JSONSerialization.jsonObject(with: request.bodyData) as! [String: Any]
             #expect(body["deduplicate"] as? Bool == false)
+            #expect(body["preserveStructure"] as? Bool == false)
             let files = body["files"] as! [[String: Any]]
             #expect(files.first?["sha256"] == nil)
             return (200, "{\"id\":\"\(batchID)\",\"targetPath\":\"incoming\",\"finished\":false,\"files\":[]}")

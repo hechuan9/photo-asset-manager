@@ -90,6 +90,12 @@ struct ContentView: View {
             DirectoryTrashSheet(library: library, directory: directory)
                 .disabled(library.isAIEditingBlocking || library.isAISettingsBusy)
         }
+        .sheet(isPresented: $library.showsRejectedTrash) {
+            RejectedTrashSheet(library: library)
+        }
+        .onChange(of: library.isDirectoryOperationBlocking) { _, blocking in
+            if !blocking { batch.restore(library: library) }
+        }
         .task { batch.restore(library: library); library.refresh(); library.refreshNavigation(force: false) }
         .prefetchKeepsThumbnails(configuration: library.configuration)
         .onChange(of: library.query) { _, _ in library.refresh() }

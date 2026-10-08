@@ -271,6 +271,7 @@ fn validate_recipe(value: &Value) -> Result<Option<String>> {
 }
 
 fn mutate(s: &AppState, lib: &str, id: &str, v: Value, action: &str) -> Result<Value> {
+    let _directory_guard = s.jobs.directory_mutation.read().unwrap();
     let (request, revision) = validate_request(&v)?;
     let payload = json!({"action":action,"body":v}).to_string();
     {

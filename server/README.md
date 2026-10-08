@@ -42,6 +42,14 @@ SIGTERM 停止领取任务并等待当前处理阶段结束。未完成的运行
 
 扫描、身份核对与导入发布同目录移动互斥，原生删除后核对并移除已消失的原路径索引、更新修订并停用被移动的追踪根；没有其他可用原片路径的资产从普通列表和计数排除，按 ID 的资产历史保留，不加入 Keeps 软件回收站；仍有其他路径的资产保留。通过 File Station 恢复后重新扫描（若追踪根已停用则重新追踪）才恢复可用。原生程序失败也会核对已消失的路径，避免部分完成后索引不一致；错误提醒检查 NAS 回收站，不能将错误理解为文件均仍在原目录。此接口只支持可读取真实 DSM 共享配置的 NAS 原生部署；Docker 默认未挂载该配置时不可用。
 
+## 显式回收所有弃用照片
+
+`POST /libraries/{library}/rejected-trash/preview` 保存待确认清单，返回 `{id,count,status,phase,completedFiles,totalFiles,error,createdAt,updatedAt,finishedAt}`。按全库 `flag=rejected AND trashed=0` 且有原片路径的照片去重计数，包括隐藏目录；清单包含全部有效原片路径、关联版本及 XMP。未弃用照片共用的文件或 sidecar、跨图库和非追踪文件均拒绝。
+
+`POST /libraries/{library}/rejected-trash/{id}` 接收 `{confirmationCount}`，必须与非零预览数量一致，并再次核对精确照片 ID、路径与文件身份；同一 ID 重复提交返回原任务，不重试失败任务。返回 202，由目录回收 worker 执行，`GET` 同路径查询。任务和逐文件进度存于 `jobs.sqlite`；实际执行前再核对清单与 DSM 回收配置，使用 `/usr/syno/bin/synorecycle --unlink share=<共享名> rpath=<相对文件>`，不存在永久删除降级路径。该参数已通过 DSM 7.3.2 的 `synorecycle --help` 只读核实。
+
+执行与扫描、目录移动、照片标记修改及曝光提交互斥。中断的原生调用若原文件仍存在则停止并提示核实，不盲目重放；原文件消失则继续剩余清单。原生部分失败也会对账消失路径、更新图库修订与缓存；对账中断可重启继续。失败任务不自动重试，需检查 NAS 回收站后重新预览。照片历史保留，不转入 Keeps 软件回收站；恢复通过 File Station，随后扫描重新索引。客户端显示的照片数与实际文件数分别计量。
+
 ## Mac 显式导入
 
 `POST /libraries/{library}/directories` 接收 `{parentPath,name}`，在当前资料库已追踪的父目录中创建单层子目录，返回 `201 {path}`。名称不能是隐藏或系统目录、多层路径或包含控制字符；重名返回 409，不覆盖现有文件或目录。

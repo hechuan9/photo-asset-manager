@@ -5,6 +5,26 @@ import Testing
 @testable import PhotoAssetManager
 
 @MainActor struct AIEditingBatchTests {
+    @Test func recoveryWaitsForPendingPhotoRecycling() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let batch = AIEditingBatch(id: UUID(), baseURL: "https://batch.invalid", libraryID: "test",
+            items: [.init(id: UUID(), assetID: UUID(), name: "photo.jpg")])
+        try JSONEncoder().encode(batch).write(to: root.appendingPathComponent("batch.json"))
+        let library = LibraryStore(configuration: .init(baseURL: URL(string: "https://batch.invalid")!, libraryID: "test"),
+            loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
+        library.rejectedTrash = PendingRejectedTrash(id: UUID(), count: 1, baseURL: "https://batch.invalid", libraryID: "test")
+        let restored = AIEditingBatchStore(root: root)
+        restored.restore(library: library)
+        #expect(!library.isAIEditingBlocking)
+        #expect(!restored.isRunning)
+        library.rejectedTrash = nil
+        restored.restore(library: library)
+        #expect(library.isAIEditingBlocking)
+        #expect(restored.isAwaitingConfirmation)
+    }
+
     @Test func confirmationFreezesSelectionAndSurvivesRestart() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

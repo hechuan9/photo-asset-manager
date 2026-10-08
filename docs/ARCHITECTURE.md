@@ -62,6 +62,8 @@ macOS 查询、两端修改及 iOS 修订号检查经过 `shared/Sources/KeepsAP
 
 macOS 来源目录树支持在应用内把单个文件夹拖到目标文件夹中。客户端通过 `POST /libraries/{library}/directories/move-tasks` 提交 `path`、`parentPath` 与 `requestID`，由 NAS 持久任务完成移动及索引路径更新；通过 `GET /libraries/{library}/directories/move-tasks/{requestID}` 查询等待、校验、移动、索引和追踪阶段。macOS 保存任务 ID，断线或重启后继续查询同一任务，成功后重载目录并跟随新的选中路径。右键菜单支持重命名文件夹：同一任务接口追加 `name` 并保持原 `parentPath`，沿用进度、断线恢复和索引同步；名称必须是非空单个路径分量，来源根目录禁止重命名。已有同步 `/directories/move` 接口保留供已发布客户端使用。来源根目录不可拖动，不能移入自身、后代或原父目录；NAS 使用不覆盖目标的同文件系统 rename，拒绝同名覆盖和跨文件系统移动；持久移动记录用于服务重启时恢复索引同步。Finder 不参与此操作，日常照片目录整理优先在应用内进行。
 
+macOS 照片菜单提供“删除所有弃用照片…”。NAS 预览并持久保存全库弃用照片清单，用户输入照片总数后提交同一任务 ID；服务端确认清单与文件身份未变后，逐文件调用 DSM 原生回收并保存进度、对账索引。重启不重放结果不确定的原生调用，客户端断网或重启继续查询同一任务；NAS 回收与图库软件回收站分开，恢复使用 File Station。接口及边界见 [服务端说明](../server/README.md#显式回收所有弃用照片)。
+
 macOS 图库支持 Command/Ctrl+A 全选当前筛选结果（自动补齐分页）、Command 点选、Shift 连选、Shift 配合键盘左右方向键扩选与 Esc 取消选择；目录树保留 AppKit 的多选语义，Ctrl+A 选择已展开的可见目录。全选尚在加载时禁止移动或批量修改，切换查询会取消全选。照片可从全部照片、筛选结果或当前目录拖入目录树的目标文件夹，经 `POST /libraries/{library}/assets/move-tasks` 提交 `requestID`、`assetIDs`、`sourcePath`、`parentPath`，通过同路径 `/{requestID}` 查询持久任务。`sourcePath` 省略时按明确照片 ID 解析当前库已追踪范围内的来源，有值时限定来源目录。NAS 只移动所选范围内照片的有效文件、关联版本和 sidecar，其它目录的副本保留；批量移动先检查所有重名和跨文件系统冲突，逐文件使用不覆盖 rename 与恢复日志，同步照片索引及追踪归属。客户端持久保存任务并在重启后恢复查询，展示阶段、用时与完整失败信息。
 
 客户端不存在“NAS / 本地”双资料库模式。默认浏览统一资料库；服务器来源目录属于按需展开的辅助视图和服务端管理配置。主图库查询不依赖目录导航成功。客户端无需 SMB 挂载，不能把服务器路径作为本机文件 URL 打开；预览和业务交互均走 HTTP。
@@ -121,9 +123,9 @@ macOS 目录树使用 `NSViewRepresentable` 包装原生 `NSOutlineView`，由 A
 
 ## macOS 文件夹导入
 
-Mac 顶栏“导入”（⌘⇧I）选择本机来源文件夹和已有的 NAS 追踪目录。来源可含子目录；RAW、JPG/JPEG、HEIF/HEIC/HIF 及同目录关联 XMP 全部平铺到一个目标目录，不按日期建目录，不复制来源目录结构。客户端只读来源，按块计算 SHA256；排除隐藏项、符号链接、`@eaDir`、`#recycle` 和无关联 XMP。App Sandbox 使用用户所选文件的只读权限。
+Mac 顶栏“导入”（⌘⇧I）选择本机来源文件夹和已有的 NAS 追踪目录。来源可含子目录；RAW、JPG/JPEG、HEIF/HEIC/HIF 及同目录关联 XMP 默认全部平铺到一个目标目录，不按日期建目录。“保持导入结构”默认关闭；开启后在目标目录保留来源内部的相对子目录层级，不额外套一层来源目录。客户端只读来源，仅开启去重时按块计算 SHA256；排除隐藏项、符号链接、`@eaDir`、`#recycle` 和无关联 XMP。App Sandbox 使用用户所选文件的只读权限。
 
-`POST /libraries/{library}/imports` 接受 `{id,targetPath,files:[{id,relativePath,size,sha256}]}`，服务器按来源目录与文件主干为 RAW/JPEG/HEIF/XMP 分配不会覆盖已有文件的名称。`PUT .../imports/{batch}/files/{file}` 从请求流写入隐藏暂存并验证字节数和哈希；`POST .../imports/{batch}/finish` 在所有文件上传完成后以无覆盖方式发布 XMP 和照片，并返回 `{job}`，接入现有扫描、身份登记、版本判断及媒体处理。导入后按同目录、同主干及完整拍摄元数据规则归组 RAW 与 HEIF。
+`POST /libraries/{library}/imports` 接受 `{id,targetPath,preserveStructure,deduplicate,files:[{id,relativePath,size,sha256}]}`，服务器按来源目录与文件主干为 RAW/JPEG/HEIF/XMP 分配不会覆盖已有文件的名称。`PUT .../imports/{batch}/files/{file}` 从请求流写入隐藏暂存并验证字节数和哈希；`POST .../imports/{batch}/finish` 在所有文件上传完成后以无覆盖方式发布 XMP 和照片，并返回 `{job}`，接入现有扫描、身份登记、版本判断及媒体处理。导入后按同目录、同主干及完整拍摄元数据规则归组 RAW 与 HEIF。
 
 批次及上传状态保存在 NAS jobs 数据库；同一 manifest ID 重试返回当前状态，已上传文件跳过。Mac 展示文件/字节进度、失败文件和错误，可在当前应用会话继续批次，关闭导入面板后重开仍保留进度；退出应用后不自动恢复本地来源授权和批次。上传期间应用须运行，提交后的整理任务由 NAS 独立执行。完成提示区分“上传提交成功”与后台整理完成。单批次最多 10,000 个文件，每个文件 1 B–8 GiB。
 
@@ -260,7 +262,7 @@ GitHub Actions 在 main push、PR 和手动触发时验证 Rust 服务、Apple �
 
 schema 3 显式迁移只创建版本/默认/修订表，不合并、拆分或回填历史资产；已有路径和内容哈希的资产关联保留。历史资产没有版本证据时继续使用原预览。生产升级前停服并备份 catalog 与 jobs 两个 SQLite 数据库，catalog 使用 migrate 显式升级；jobs 打开时添加队列字段并恢复中断任务。schema 3 机制的 NAS 部署证据见部署文档；历史库整理仍单独执行。
 
-文件监听与媒体 worker 在同一服务进程的独立后台任务运行，SQLite 是持久化队列。默认文件不变：原片 size/mtime 与 XMP sidecar 状态签名未变化且既有索引有效时直接跳过，不重新哈希或提取元数据，内容通知本身不强制重读整个目录。任务区分 `file`（单文件）、`directory`（当前层）和 `recursive`（子树）；照片创建、修改、删除、重命名只提交对应文件，XMP 变化核对当前层配套照片，导入完成只核对目标目录当前层，目录新增/移动/删除才处理对应子树。
+文件监听与媒体 worker 在同一服务进程的独立后台任务运行，SQLite 是持久化队列。默认文件不变：原片 size/mtime 与 XMP sidecar 状态签名未变化且既有索引有效时直接跳过，不重新哈希或提取元数据，内容通知本身不强制重读整个目录。任务区分 `file`（单文件）、`directory`（当前层）和 `recursive`（子树）；照片创建、修改、删除、重命名只提交对应文件，XMP 变化核对当前层配套照片，平铺导入完成只核对目标目录当前层，保留结构导入及目录新增/移动/删除处理对应子树。
 
 队列持久化 `work_class`：`automatic` 为文件变化，`manual` 为显式核对、导入和重试，`reconcile` 为启动/监听补漏。手动和自动分别排队，按照片组交替获得执行机会；同类内部按 file、directory、recursive 排序。没有高优先级待办时执行有限维护，再执行最低优先级全库补漏。不同类别不合并，同类别内保留范围去重与运行时重跑标记。
 

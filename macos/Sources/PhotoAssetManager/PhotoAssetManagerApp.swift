@@ -33,6 +33,8 @@ struct PhotoAssetManagerApp: App {
             }
             CommandMenu("照片") {
                 Button("打开 AI 调色工作台") { openWindow(id: "ai-editing-workspace") }
+                Button("删除所有弃用照片…") { library.showsRejectedTrash = true }
+                    .disabled(library.client == nil || library.isOperationBlocking || library.isMutating || library.isCheckingConnection || library.isImportingPhotos || batch.isRunning || batch.editor.isBusy)
                 Divider()
                 Group {
                 Button("上一张") { library.selectAdjacent(-1) }

@@ -33,3 +33,4 @@ pub mod asset_move;
 pub mod edits;
 
 pub mod ai_editing;
+pub mod rejected_trash;

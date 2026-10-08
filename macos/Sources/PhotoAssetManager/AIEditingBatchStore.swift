@@ -162,7 +162,7 @@ struct AIEditingBatch: Codable {
     }
 
     func restore(library: LibraryStore) {
-        guard !restored else { return }
+        guard !restored, !library.isDirectoryOperationBlocking else { return }
         restored = true
         self.library = library
         guard let batch else { return }
@@ -173,7 +173,7 @@ struct AIEditingBatch: Codable {
     }
 
     func start() {
-        guard worker == nil, !editor.isBusy, batch != nil,
+        guard worker == nil, !editor.isBusy, library?.isDirectoryOperationBlocking != true, batch != nil,
               batch!.items.contains(where: { !$0.terminal }) else { return }
         isRunning = true
         worker = Task {

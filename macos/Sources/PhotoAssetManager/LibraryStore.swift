@@ -5,6 +5,15 @@ import OSLog
 
 @MainActor
 final class LibraryStore: ObservableObject {
+    @Published var showsRejectedTrash = false
+    @Published var rejectedTrashPreview: KeepsRejectedTrashTask?
+    var rejectedTrashPreviewConfiguration: KeepsConfiguration?
+    @Published var rejectedTrash: PendingRejectedTrash?
+    @Published var rejectedTrashMessage: String?
+    @Published var rejectedTrashFinished = false
+    @Published var isPreparingRejectedTrash = false
+    var rejectedTrashTracking: Task<Void, Never>?
+    var rejectedTrashPollInterval: Duration = .seconds(1)
     @Published var directoryToRename: KeepsNavigationDirectory?
     @Published var directoryToTrash: KeepsNavigationDirectory?
     @Published var directoryTrash: PendingDirectoryTrash?
@@ -31,7 +40,7 @@ final class LibraryStore: ObservableObject {
     var isImportingPhotos: Bool { !openImportWindows.isEmpty }
     @Published var isAIEditingBlocking = false
     @Published var isAISettingsBusy = false
-    var isDirectoryOperationBlocking: Bool { isDirectoryTrashBlocking || isMovingDirectory || photoMove != nil }
+    var isDirectoryOperationBlocking: Bool { isDirectoryTrashBlocking || isMovingDirectory || photoMove != nil || rejectedTrash != nil || isPreparingRejectedTrash }
     var isOperationBlocking: Bool { isDirectoryOperationBlocking || isAIEditingBlocking || isAISettingsBusy }
     @Published private(set) var hiddenDirectoryPaths: Set<String> = []
     @Published private(set) var isUpdatingHiddenDirectory = false
@@ -155,6 +164,7 @@ final class LibraryStore: ObservableObject {
         restoreDirectoryTrash()
         restoreDirectoryMove()
         restorePhotoMove()
+        restoreRejectedTrash()
     }
 
     var selectedAsset: KeepsAsset? { return assets.first { selectedIDs.contains($0.id) } }

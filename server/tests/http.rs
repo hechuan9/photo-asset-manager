@@ -2409,3 +2409,119 @@ async fn version_download_checks_membership_tracking_and_source_identity() {
         StatusCode::CONFLICT
     );
 }
+
+#[tokio::test]
+async fn rejected_trash_requires_auth_frozen_inventory_and_matching_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    state
+        .jobs
+        .add_folder("photos", state.jobs.root().to_str().unwrap())
+        .unwrap();
+    let id = seed(&state, &dir.path().canonicalize().unwrap(), "rejected.jpg");
+    state
+        .store
+        .patch_asset("photos", &id, &json!({"flagState":"rejected"}))
+        .unwrap();
+    let app = router(state.clone());
+    let preview_path = "/libraries/photos/rejected-trash/preview";
+    let unauthenticated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(preview_path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        call(
+            app.clone(),
+            "POST",
+            "/libraries/other/rejected-trash/preview",
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, preview) = call(app.clone(), "POST", preview_path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["count"], 1);
+    assert_eq!(preview["status"], "draft");
+    assert_eq!(preview["completedFiles"], 0);
+    let task_path = format!(
+        "/libraries/photos/rejected-trash/{}",
+        preview["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        call(
+            app.clone(),
+            "POST",
+            &task_path,
+            json!({"confirmationCount":2})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        call(app.clone(), "GET", &task_path, Value::Null).await.1["status"],
+        "draft"
+    );
+    let (status, submitted) = call(
+        app.clone(),
+        "POST",
+        &task_path,
+        json!({"confirmationCount":1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{submitted}");
+    assert_eq!(submitted["status"], "pending");
+    assert_eq!(
+        call(
+            app.clone(),
+            "POST",
+            &task_path,
+            json!({"confirmationCount":1})
+        )
+        .await
+        .1["id"],
+        preview["id"]
+    );
+    let (_, second) = call(app.clone(), "POST", preview_path, Value::Null).await;
+    let second_path = format!(
+        "/libraries/photos/rejected-trash/{}",
+        second["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        call(
+            app.clone(),
+            "POST",
+            &second_path,
+            json!({"confirmationCount":1})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    state
+        .store
+        .patch_asset("photos", &id, &json!({"flagState":"picked"}))
+        .unwrap();
+    assert_eq!(
+        call(
+            app.clone(),
+            "POST",
+            &second_path,
+            json!({"confirmationCount":1})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert!(dir.path().join("originals/rejected.jpg").exists());
+}

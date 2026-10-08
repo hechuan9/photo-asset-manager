@@ -217,6 +217,7 @@ CREATE TABLE IF NOT EXISTS worker_photo_files(path TEXT PRIMARY KEY);
         let trash_db = Connection::open(path)?;
         trash_db.busy_timeout(std::time::Duration::from_secs(5))?;
         crate::directory_trash::initialize(&trash_db)?;
+        crate::rejected_trash::initialize(&trash_db)?;
         let jobs = Self {
             trash_db: Mutex::new(trash_db),
             directory_mutation: RwLock::new(()),
