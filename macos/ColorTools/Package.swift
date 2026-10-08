@@ -7,6 +7,6 @@ let package = Package(
     targets: [
         .target(name: "KeepsColorCore"),
         .executableTarget(name: "KeepsColorMCP", dependencies: ["KeepsColorCore"]),
-        .testTarget(name: "KeepsColorCoreTests", dependencies: ["KeepsColorCore"])
+        .testTarget(name: "KeepsColorCoreTests", dependencies: ["KeepsColorCore", "KeepsColorMCP"])
     ]
 )

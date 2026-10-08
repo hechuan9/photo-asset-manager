@@ -5,13 +5,24 @@ import KeepsColorCore
     private let engine: DarktableProcess
     private let encoder: JSONEncoder
     private let initial: ColorCandidate
+    private let original: ColorCandidate
+    private let candidateLimit: Int
     private var reviewed: Set<String> = []
 
-    init(engine: DarktableProcess) throws {
+    init(engine: DarktableProcess, baseRecipe: Data? = nil) throws {
         self.engine = engine
         encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        initial = try engine.store.add(operationID: "baseline", parentID: nil, recipe: encoder.encode(ColorRecipe()))
+        original = try engine.store.add(operationID: "baseline", parentID: nil, recipe: encoder.encode(ColorRecipe()))
+        if let baseRecipe {
+            let recipe = try DarktableRecipe.decode(baseRecipe)
+            guard recipe.localAdjustments.isEmpty || engine.supportsLocalMasks else { throw ColorToolError("Local masks currently require source orientation 1") }
+            _ = try DarktableRecipe.apply(recipe, to: engine.baseline)
+            initial = try engine.store.add(operationID: "iteration-base", parentID: original.id, recipe: encoder.encode(recipe))
+        } else {
+            initial = original
+        }
+        candidateLimit = baseRecipe == nil ? 5 : 6
     }
 
     private func preview(_ id: String, full: Bool = false) throws -> URL {
@@ -30,9 +41,10 @@ import KeepsColorCore
         }
         switch name {
         case "inspect_photo":
+            _ = try preview(original.id)
             let image = try imageBlock(preview(initial.id))
             reviewed.insert(initial.id)
-            return [try textBlock(["initialCandidateID": initial.id, "candidates": engine.store.candidates.map(\.id), "engine": "darktable 5.6.2", "supportsLocalMasks": engine.supportsLocalMasks, "supportedAdjustments": engine.isDisplayReferred ? ["exposureEV", "saturation"] : ["exposureEV", "whiteBalanceRGB", "contrast", "skew", "saturation", "localAdjustments"], "remainingAdjustments": max(0, 5 - engine.store.candidates.count)]), image]
+            return [try textBlock(["initialCandidateID": initial.id, "candidates": engine.store.candidates.map(\.id), "engine": "darktable 5.6.2", "supportsLocalMasks": engine.supportsLocalMasks, "supportedAdjustments": engine.isDisplayReferred ? ["exposureEV", "saturation"] : ["exposureEV", "whiteBalanceRGB", "contrast", "skew", "saturation", "localAdjustments"], "remainingAdjustments": max(0, candidateLimit - engine.store.candidates.count)]), image]
         case "get_recipe":
             let candidate = try engine.store.candidate(string("candidateID"))
             return [try textBlock(["candidateID": candidate.id, "recipe": JSONSerialization.jsonObject(with: candidate.recipe)])]
@@ -45,7 +57,7 @@ import KeepsColorCore
             let recipe = try DarktableRecipe.decode(JSONSerialization.data(withJSONObject: merged))
             guard recipe.localAdjustments.isEmpty || engine.supportsLocalMasks else { throw ColorToolError("Local masks currently require source orientation 1") }
             _ = try DarktableRecipe.apply(recipe, to: engine.baseline)
-            guard engine.store.candidates.count < 5 || engine.store.candidates.contains(where: { $0.operationID == operation }) else { throw ColorToolError("Adjustment budget exhausted") }
+            guard engine.store.candidates.count < candidateLimit || engine.store.candidates.contains(where: { $0.operationID == operation }) else { throw ColorToolError("Adjustment budget exhausted") }
             let candidate = try engine.store.add(operationID: operation, parentID: parent.id, recipe: encoder.encode(recipe))
             return [try textBlock(["candidateID": candidate.id])]
         case "preview_region":

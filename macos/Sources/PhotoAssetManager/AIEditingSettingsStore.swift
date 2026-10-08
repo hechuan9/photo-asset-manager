@@ -138,7 +138,7 @@ import CryptoKit
         try prepareDirectories(); try checkRuntime(); try readAccount(); try requireAccount()
     }
 
-    func gradePhoto(_ source: URL, job: URL, progress: ((String, Double, Double) -> Void)? = nil) async throws -> AIGradeResult {
+    func gradePhoto(_ source: URL, job: URL, context: AIGradeContext? = nil, progress: ((String, Double, Double) -> Void)? = nil) async throws -> AIGradeResult {
         let id = UUID(), gradingRunner = AIEditingProcess()
         gradingRunners[id] = gradingRunner
         activeGrades = gradingRunners.count
@@ -154,7 +154,7 @@ import CryptoKit
             }
         }
         try validateEditingAccount()
-        try await runPhoto(source, job: job, runner: gradingRunner, progress: progress)
+        try await runPhoto(source, job: job, runner: gradingRunner, context: context, progress: progress)
         return try Self.gradeResult(in: job)
     }
 
@@ -163,7 +163,7 @@ import CryptoKit
         for runner in gradingRunners.values { runner.stopForExit() }
     }
 
-    private func runPhoto(_ source: URL, job requestedJob: URL? = nil, runner suppliedRunner: AIEditingProcess? = nil, progress: ((String, Double, Double) -> Void)? = nil) async throws {
+    private func runPhoto(_ source: URL, job requestedJob: URL? = nil, runner suppliedRunner: AIEditingProcess? = nil, context: AIGradeContext? = nil, progress: ((String, Double, Double) -> Void)? = nil) async throws {
         let runner = suppliedRunner ?? self.runner
         if requestedJob == nil { self.resultPreview = nil; self.resultSummary = nil }
         try self.prepareDirectories(); try self.checkRuntime(); try self.readAccount(); try self.requireAccount()
@@ -183,12 +183,17 @@ import CryptoKit
         let schemaURL = job.appendingPathComponent("result.schema.json")
         try JSONSerialization.data(withJSONObject: schema).write(to: schemaURL, options: .atomic)
         var arguments = self.execArguments(job: job) + ["--output-schema", schemaURL.path]
+        var helperArguments = ["--darktable", self.codeRuntime.appendingPathComponent("darktable.app/Contents/MacOS/darktable-cli").path, "--source", source.path, "--job", job.appendingPathComponent("render").path]
+        if let recipe = context?.baseRecipeJSON {
+            let recipeURL = job.appendingPathComponent("base-recipe.json")
+            try Data(recipe.utf8).write(to: recipeURL, options: .atomic)
+            helperArguments += ["--base-recipe", recipeURL.path]
+        }
         let settings: [String: Any] = [
             "mcp_servers.keeps_color.required": true,
             "mcp_servers.keeps_color.default_tools_approval_mode": "auto",
             "mcp_servers.keeps_color.command": self.codeRuntime.appendingPathComponent("keeps-color-mcp").path,
-            "mcp_servers.keeps_color.args": ["--darktable", self.codeRuntime.appendingPathComponent("darktable.app/Contents/MacOS/darktable-cli").path,
-                "--source", source.path, "--job", job.appendingPathComponent("render").path],
+            "mcp_servers.keeps_color.args": helperArguments,
             "mcp_servers.keeps_color.env.KEEPS_RENDER_LIMIT": String(limits.renders),
             "mcp_servers.keeps_color.env.KEEPS_RENDER_SLOTS": root.appendingPathComponent("render-slots").path,
             "mcp_servers.keeps_color.startup_timeout_sec": 7200,
@@ -227,9 +232,10 @@ import CryptoKit
             }
         }
         let prompt = String(decoding: skill, as: UTF8.self) + "\nComplete this photo independently using only Keeps tools. Return the specified result, with reason in Chinese."
+        let contextualPrompt = prompt + (try context.map { "\nUser grading context (specific instruction takes precedence over batch and long-term preferences):\n" + String(decoding: try JSONEncoder().encode($0), as: UTF8.self) + "\nThe initial candidate already applies the exact base recipe to the original source. Iterate from its candidate ID; do not approximate or reset existing adjustments." } ?? "")
         var steps = AIEditingSteps()
         let result = try await self.runTracked(runner: runner, job: job, arguments: arguments + ["-"],
-            input: prompt, timeout: 14400, onEvent: { line in
+            input: contextualPrompt, timeout: 14400, onEvent: { line in
                 if let data = line.data(using: .utf8),
                    let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let item = event["item"] as? [String: Any], item["type"] as? String == "mcp_tool_call",
@@ -404,7 +410,7 @@ import CryptoKit
         let checked = try validateResult(in: job)
         let result = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("result.json"))) as! [String: Any]
         guard checked.selected else {
-            return AIGradeResult(status: result["status"] as! String, reason: checked.reason, timing: AIGradeTiming.read(job))
+            return AIGradeResult(status: result["status"] as! String, reason: checked.reason, timing: AIGradeTiming.read(job), preview: checked.preview, originalPreview: checked.originalPreview)
         }
         let selection = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("render/selection.json"))) as! [String: Any]
         let state = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("render/candidates.json"))) as! [String: Any]
@@ -419,10 +425,10 @@ import CryptoKit
         let fullURL = URL(fileURLWithPath: full)
         let xmpURL = fullURL.deletingPathExtension().appendingPathExtension("xmp")
         return AIGradeResult(status: "selected", reason: checked.reason, fullSize: fullURL,
-            recipeJSON: String(decoding: recipe, as: UTF8.self), xmp: try String(contentsOf: xmpURL, encoding: .utf8), timing: AIGradeTiming.read(job))
+            recipeJSON: String(decoding: recipe, as: UTF8.self), xmp: try String(contentsOf: xmpURL, encoding: .utf8), timing: AIGradeTiming.read(job), preview: checked.preview, originalPreview: checked.originalPreview)
     }
 
-    struct ValidatedResult { let selected: Bool; let preview: URL?; let reason: String }
+    struct ValidatedResult { let selected: Bool; let preview: URL?; let originalPreview: URL?; let reason: String }
     static func validateResult(in job: URL) throws -> ValidatedResult {
         func object(_ path: String) throws -> [String: Any] {
             guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent(path))) as? [String: Any] else {
@@ -436,20 +442,39 @@ import CryptoKit
               let candidates = store["candidates"] as? [[String: Any]], candidates.contains(where: { $0["id"] as? String == id }) else {
             throw AIEditingFailure("AI 返回了未知候选或无效状态，结果未被接受。")
         }
-        guard status == "selected" else { return ValidatedResult(selected: false, preview: nil, reason: reason) }
+        let directory = job.appendingPathComponent("render").resolvingSymlinksInPath().path + "/"
+        func verifiedPreview(_ candidateID: String) throws -> URL {
+            let url = job.appendingPathComponent("render/" + candidateID + "-preview.jpg").resolvingSymlinksInPath()
+            guard url.path.hasPrefix(directory), FileManager.default.isReadableFile(atPath: url.path) else {
+                throw AIEditingFailure("候选预览缺失或位于任务目录之外。")
+            }
+            return url
+        }
+        let baseline = candidates.first { $0["operationID"] as? String == "baseline" }?["id"] as? String
+        let original = try baseline.map { try verifiedPreview($0) }
+        guard status == "selected" else {
+            return ValidatedResult(selected: false, preview: try verifiedPreview(id), originalPreview: original, reason: reason)
+        }
         let selection = try object("render/selection.json")
         guard selection["candidateID"] as? String == id, let preview = selection["preview"] as? String, let full = selection["fullSize"] as? String else {
             throw AIEditingFailure("AI 选择与已渲染结果不一致。")
         }
-        let directory = job.appendingPathComponent("render").resolvingSymlinksInPath().path + "/"
         for path in [preview, full] {
             let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
             guard url.path.hasPrefix(directory), FileManager.default.isReadableFile(atPath: url.path) else {
                 throw AIEditingFailure("候选图像缺失或位于任务目录之外。")
             }
         }
-        return ValidatedResult(selected: true, preview: URL(fileURLWithPath: preview), reason: reason)
+        return ValidatedResult(selected: true, preview: URL(fileURLWithPath: preview), originalPreview: original, reason: reason)
     }
+}
+
+struct AIGradeContext: Codable, Sendable {
+    var preferences: String = ""
+    var batchInstruction: String = ""
+    var instruction: String = ""
+    var baseRecipeJSON: String? = nil
+    var history: [String] = []
 }
 
 struct AIGradeResult: Codable, Sendable {
@@ -459,6 +484,8 @@ struct AIGradeResult: Codable, Sendable {
     var recipeJSON: String? = nil
     var xmp: String? = nil
     var timing: AIGradeTiming? = nil
+    var preview: URL? = nil
+    var originalPreview: URL? = nil
 }
 
 struct AIGradeTiming: Codable, Sendable {

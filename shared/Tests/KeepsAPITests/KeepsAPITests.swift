@@ -7,6 +7,28 @@ private let assetJSON = """
 """
 
 struct KeepsAPITests {
+    @Test func aiWorkspaceClearSendsExplicitNullAndRevision() async throws {
+        let fixture = Fixture { request in
+            #expect(request.httpMethod == "PUT")
+            #expect(request.url!.path == "/api/libraries/library/ai-editing/workspace")
+            let value = try JSONSerialization.jsonObject(with: request.bodyData) as! [String: Any]
+            #expect(value["document"] is NSNull)
+            #expect(value["expectedRevision"] as? Int == 4)
+            return (200, "{\"revision\":5,\"document\":null}")
+        }
+        let workspace = try await fixture.client.saveAIWorkspace(document: nil, expectedRevision: 4)
+        #expect(workspace.revision == 5)
+        #expect(workspace.document == nil)
+    }
+
+    @Test func editRecipeMetadataPreservesOpinionWithParameters() throws {
+        let recipe = KeepsEditRecipe(recipeJSON: "{}", xmp: "xmp", metadata: "{\"opinion\":\"保留暖光\"}")
+        let data = try JSONEncoder().encode(recipe)
+        #expect(try JSONDecoder().decode(KeepsEditRecipe.self, from: data) == recipe)
+        let old = Data("{\"engine\":\"darktable\",\"engineVersion\":\"5.6.2\",\"recipeJSON\":\"{}\",\"xmp\":\"xmp\"}".utf8)
+        #expect(try JSONDecoder().decode(KeepsEditRecipe.self, from: old).metadata == nil)
+    }
+
     @Test func originalDownloadUsesAuthenticatedVersionRouteAndPreservesExistingDestination() async throws {
         let id = UUID()
         let hash = String(repeating: "a", count: 64)

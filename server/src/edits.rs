@@ -119,6 +119,13 @@ fn state(db: &Connection, lib: &str, id: &str) -> Result<Value> {
     let recipe = recipe
         .map(|r| serde_json::from_str::<Value>(&r))
         .transpose()?;
+    let decision: Option<String> = db
+        .query_row(
+            "SELECT metadata FROM photo_edit_decisions WHERE library_id=? AND asset_id=?",
+            params![lib, id],
+            |r| r.get(0),
+        )
+        .optional()?;
     let path = match hash.as_deref().map(|h| source(db, lib, id, h)).transpose() {
         Ok(path) => path,
         Err(e)
@@ -130,7 +137,7 @@ fn state(db: &Connection, lib: &str, id: &str) -> Result<Value> {
         Err(e) => return Err(e),
     };
     Ok(
-        json!({"negativeContentHash":hash,"revision":revision,"lastRequestID":last,"hasEdit":ev.is_some() || recipe.is_some(),"recipe":recipe,"exposureEV":ev,"sourceAvailable":path.is_some(),"sourceFilename":path.as_ref().and_then(|p|p.file_name()).and_then(|v|v.to_str()),"sourceSizeBytes":path.as_ref().map(std::fs::metadata).transpose()?.map(|m|m.len()),"sourceFileHash":hash}),
+        json!({"decisionMetadata":decision,"negativeContentHash":hash,"revision":revision,"lastRequestID":last,"hasEdit":ev.is_some() || recipe.is_some(),"recipe":recipe,"exposureEV":ev,"sourceAvailable":path.is_some(),"sourceFilename":path.as_ref().and_then(|p|p.file_name()).and_then(|v|v.to_str()),"sourceSizeBytes":path.as_ref().map(std::fs::metadata).transpose()?.map(|m|m.len()),"sourceFileHash":hash}),
     )
 }
 impl Store {
@@ -250,6 +257,15 @@ fn validate_recipe(value: &Value) -> Result<Option<String>> {
         .ok_or_else(|| error(422, "xmp required (maximum 1 MiB)"))?;
     if !xmp.contains("darktable:xmp_version") {
         return Err(error(422, "darktable XMP required"));
+    }
+    if !value["metadata"].is_null() {
+        let metadata = value["metadata"]
+            .as_str()
+            .filter(|s| s.len() <= 256 * 1024)
+            .ok_or_else(|| error(422, "metadata must be JSON text (maximum 256 KiB)"))?;
+        if !serde_json::from_str::<Value>(metadata).is_ok_and(|v| v.is_object()) {
+            return Err(error(422, "metadata must encode an object"));
+        }
     }
     Ok(Some(value.to_string()))
 }
@@ -379,6 +395,10 @@ fn mutate(s: &AppState, lib: &str, id: &str, v: Value, action: &str) -> Result<V
         }
     }
     tx.execute("UPDATE catalog_assets SET edit_revision=edit_revision+1,negative_selected=1,last_edit_request=?,snapshot=json_set(snapshot,'$.updatedAt',?) WHERE library_id=? AND id=?",params![request,chrono::Utc::now().to_rfc3339(),lib,id])?;
+    tx.execute(
+        "DELETE FROM photo_edit_decisions WHERE library_id=? AND asset_id=?",
+        params![lib, id],
+    )?;
     let response = state(&tx, lib, id)?;
     tx.execute(
         "INSERT INTO photo_edit_requests VALUES(?,?,?,?,?)",
@@ -388,8 +408,50 @@ fn mutate(s: &AppState, lib: &str, id: &str, v: Value, action: &str) -> Result<V
     tx.commit()?;
     Ok(response)
 }
+fn confirm_original(s: &AppState, lib: &str, id: &str, v: Value) -> Result<Value> {
+    let (request, revision) = validate_request(&v)?;
+    let metadata = v["metadata"]
+        .as_str()
+        .filter(|s| s.len() <= 256 * 1024)
+        .ok_or_else(|| error(422, "metadata required (maximum 256 KiB)"))?;
+    if !serde_json::from_str::<Value>(metadata).is_ok_and(|v| v.is_object()) {
+        return Err(error(422, "metadata must encode an object"));
+    }
+    let payload = json!({"action":"confirm-original","body":v}).to_string();
+    let mut db = s.store.lock()?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let receipt: Option<(String,String)> = tx.query_row("SELECT payload,response FROM photo_edit_requests WHERE library_id=? AND asset_id=? AND request_id=?",params![lib,id,request],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    if let Some((old, response)) = receipt {
+        if old != payload {
+            return Err(error(409, "requestID 已用于不同操作"));
+        }
+        return Ok(serde_json::from_str(&response)?);
+    }
+    if state(&tx, lib, id)?["revision"] != revision {
+        return Err(error(409, "照片调整已变化，请刷新后重试"));
+    }
+    tx.execute("INSERT INTO photo_edit_decisions(library_id,asset_id,metadata) VALUES(?,?,?) ON CONFLICT(library_id,asset_id) DO UPDATE SET metadata=excluded.metadata",params![lib,id,metadata])?;
+    let result = state(&tx, lib, id)?;
+    tx.execute("INSERT INTO photo_edit_requests(library_id,asset_id,request_id,payload,response) VALUES(?,?,?,?,?)",params![lib,id,request,payload,result.to_string()])?;
+    tx.commit()?;
+    Ok(result)
+}
+async fn decision(
+    State(s): State<Arc<AppState>>,
+    Path((lib, id)): Path<(String, String)>,
+    Json(v): Json<Value>,
+) -> Result<Response, ApiError> {
+    let id = uuid::Uuid::parse_str(&id)
+        .map_err(|_| error(422, "invalid asset UUID"))?
+        .to_string();
+    run(move || confirm_original(&s, &lib, &id, v)).await
+}
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
+        .route(
+            "/libraries/{library}/assets/{asset}/edit/decisions",
+            post(decision).layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
         .route(
             "/libraries/{library}/assets/{asset}/edit",
             get(get_edit)
@@ -626,7 +688,7 @@ mod tests {
     #[test]
     fn darktable_recipe_roundtrips_and_rejects_invalid_payloads() -> Result<()> {
         let (_dir, s, id) = setup()?;
-        let recipe = json!({"engine":"darktable","engineVersion":"5.6.2","recipeJSON":"{\"exposureEV\":0.5}","xmp":"<rdf:Description darktable:xmp_version=\"5\"/>"});
+        let recipe = json!({"engine":"darktable","engineVersion":"5.6.2","recipeJSON":"{\"exposureEV\":0.5}","xmp":"<rdf:Description darktable:xmp_version=\"5\"/>","metadata":"{\"opinion\":\"保留暖光\"}"});
         let stored = validate_recipe(&recipe)?.unwrap();
         s.store.lock()?.execute("INSERT INTO photo_edits VALUES('lib',?,'hash',NULL,'ai-v1','darktable-5.6.2','{}','{}','{}',?)", params![id,stored])?;
         let state = s.store.edit_state("lib", &id)?;
@@ -639,9 +701,67 @@ mod tests {
         invalid = recipe.clone();
         invalid["recipeJSON"] = json!("[]");
         assert!(validate_recipe(&invalid).is_err());
+        invalid = recipe.clone();
+        invalid["metadata"] = json!("[]");
+        assert!(validate_recipe(&invalid).is_err());
         invalid = recipe;
         invalid["xmp"] = json!("");
         assert!(validate_recipe(&invalid).is_err());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn original_confirmation_route_accepts_opinion_history_above_global_limit() -> Result<()>
+    {
+        let (_dir, s, id) = setup()?;
+        let before = s.store.edit_state("lib", &id)?;
+        let metadata = json!({"opinion":"x".repeat(128*1024)}).to_string();
+        let body=json!({"requestID":uuid::Uuid::new_v4().to_string(),"expectedRevision":before["revision"],"metadata":metadata}).to_string();
+        let response = crate::api::router(s.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/libraries/lib/assets/{id}/edit/decisions"))
+                    .header("authorization", "Bearer test")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))?,
+            )
+            .await?;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            s.store.edit_state("lib", &id)?["decisionMetadata"],
+            metadata
+        );
+        Ok(())
+    }
+    #[test]
+    fn original_confirmation_persists_opinion_without_changing_published_edit() -> Result<()> {
+        let (_dir, s, id) = setup()?;
+        let before = s.store.edit_state("lib", &id)?;
+        let revision = s.store.library_revision("lib")?;
+        let input = json!({"requestID":uuid::Uuid::new_v4().to_string(),"expectedRevision":before["revision"],"metadata":"{\"opinion\":\"保留原图\"}"});
+        let result = confirm_original(&s, "lib", &id, input.clone())?;
+        assert_eq!(result["decisionMetadata"], input["metadata"]);
+        assert_eq!(result["recipe"], before["recipe"]);
+        assert_eq!(result["revision"], before["revision"]);
+        assert_eq!(s.store.library_revision("lib")?, revision);
+        assert_eq!(confirm_original(&s, "lib", &id, input.clone())?, result);
+        assert_eq!(s.store.edit_state("lib", &id)?, result);
+        let mut conflict = input.clone();
+        conflict["metadata"] = json!("{}");
+        assert!(confirm_original(&s, "lib", &id, conflict).is_err());
+        let mut stale = input;
+        stale["requestID"] = json!(uuid::Uuid::new_v4().to_string());
+        stale["expectedRevision"] = json!(99);
+        assert!(confirm_original(&s, "lib", &id, stale).is_err());
+        let reset = mutate(
+            &s,
+            "lib",
+            &id,
+            json!({"requestID":uuid::Uuid::new_v4().to_string(),"expectedRevision":before["revision"]}),
+            "reset",
+        )?;
+        assert!(reset["decisionMetadata"].is_null());
+
         Ok(())
     }
     fn setup() -> Result<(tempfile::TempDir, Arc<AppState>, String)> {

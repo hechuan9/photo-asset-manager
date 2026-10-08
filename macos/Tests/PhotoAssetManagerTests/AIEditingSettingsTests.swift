@@ -208,6 +208,30 @@ import CryptoKit
         #expect(throws: (any Error).self) { try AIEditingSettingsStore.validateResult(in: job) }
     }
 
+    @Test func unselectedResultsRetainVerifiedComparisonPreviews() throws {
+        let job = FileManager.default.temporaryDirectory.appendingPathComponent("keeps-comparison-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: job) }
+        let render = job.appendingPathComponent("render")
+        try FileManager.default.createDirectory(at: render, withIntermediateDirectories: true)
+        func write(_ value: [String: Any], _ path: String) throws {
+            try JSONSerialization.data(withJSONObject: value).write(to: job.appendingPathComponent(path))
+        }
+        try write(["candidates": [["id": "raw", "operationID": "baseline"], ["id": "candidate"]]], "render/candidates.json")
+        let original = render.appendingPathComponent("raw-preview.jpg")
+        let preview = render.appendingPathComponent("candidate-preview.jpg")
+        try Data([1]).write(to: original)
+        try Data([2]).write(to: preview)
+        for status in ["unchanged", "needs_review"] {
+            try write(["status": status, "candidateID": "candidate", "reason": "保留氛围"], "result.json")
+            let result = try AIEditingSettingsStore.gradeResult(in: job)
+            #expect(result.preview?.resolvingSymlinksInPath() == preview.resolvingSymlinksInPath())
+            #expect(result.originalPreview?.resolvingSymlinksInPath() == original.resolvingSymlinksInPath())
+            #expect(result.fullSize == nil)
+        }
+        try FileManager.default.removeItem(at: preview)
+        #expect(throws: (any Error).self) { try AIEditingSettingsStore.gradeResult(in: job) }
+    }
+
     @Test func missingOrDifferentAccountNeverStartsCodex() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("keeps-auth-test-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

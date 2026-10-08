@@ -16,7 +16,7 @@ import Testing
         batch.prepare(library: library)
         #expect(batch.isAwaitingConfirmation)
         #expect(batch.totalCount == 3)
-        #expect(library.isOperationBlocking)
+        #expect(!library.isOperationBlocking)
         library.selectedIDs = [UUID()]
         #expect(Set(batch.batch!.items.map(\.assetID)) == selected)
         let restored = AIEditingBatchStore(root: root)
@@ -27,7 +27,7 @@ import Testing
         #expect(!restored.isRunning)
         restored.cancel()
         #expect(restored.isFinished)
-        #expect(library.isOperationBlocking)
+        #expect(!library.isOperationBlocking)
         restored.dismiss()
         #expect(!library.isOperationBlocking)
         #expect(AIEditingBatchStore(root: root).batch == nil)
@@ -41,14 +41,14 @@ import Testing
         let batch = AIEditingBatchStore(root: root)
         library.openImportWindows = [UUID()]
         batch.prepare(library: library)
-        #expect(!batch.isBlocking)
+        #expect(batch.batch == nil)
         library.openImportWindows = []
         library.isAISettingsBusy = true
         batch.prepare(library: library)
-        #expect(!batch.isBlocking)
+        #expect(batch.batch == nil)
     }
 
-    @Test func recoveryKeepsPendingUploadAndIdempotencyIdentity() throws {
+    @Test func legacyUnconfirmedUploadReturnsToReviewWithIdentityPreserved() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -60,11 +60,11 @@ import Testing
         try JSONEncoder().encode(batch).write(to: root.appendingPathComponent("batch.json"))
         let restored = AIEditingBatchStore(root: root)
         #expect(restored.batch?.items[0].id == item.id)
-        #expect(restored.batch?.items[0].phase == .uploading)
+        #expect(restored.batch?.items[0].phase == .review)
         #expect(restored.batch?.items[0].source?.revision == 12)
         #expect(restored.batch?.items[0].result?.recipeJSON == "{}")
         #expect(!restored.isAwaitingConfirmation)
-        #expect(!restored.isFinished)
+        #expect(restored.isFinished)
     }
 
     @Test func createsAllThreeDisplaySizesFromPublicImage() async throws {
@@ -108,7 +108,7 @@ import Testing
         let id = UUID()
         let item = AIEditingBatch.Item(id: id, assetID: id, name: "sample.jpg", phase: .uploading,
             source: .init(negativeContentHash: String(repeating: "a", count: 64), revision: 1, hasEdit: false,
-                          sourceFilename: "sample.jpg", sourceAvailable: true))
+                          sourceFilename: "sample.jpg", sourceAvailable: true), confirmedAt: "2026-10-08T12:00:00Z")
         var manifest = AIEditingBatch(id: UUID(), baseURL: "https://committed.invalid", libraryID: "test", items: [item])
         manifest.confirmed = true
         try JSONEncoder().encode(manifest).write(to: root.appendingPathComponent("batch.json"))
@@ -119,7 +119,7 @@ import Testing
         #expect(restored.isFinished)
         #expect(restored.completedCount == 1)
         #expect(restored.batch?.items[0].phase == .done)
-        #expect(library.isOperationBlocking)
+        #expect(!library.isOperationBlocking)
 
         let rejectedJob = root.appendingPathComponent("rejected")
         try FileManager.default.createDirectory(at: rejectedJob, withIntermediateDirectories: true)
@@ -142,7 +142,7 @@ import Testing
         try Data("preserved result".utf8).write(to: full)
         let item = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "public.jpg", phase: .uploading,
             source: .init(negativeContentHash: String(repeating: "a", count: 64), revision: 1, hasEdit: false, sourceFilename: "public.jpg", sourceAvailable: true),
-            result: .init(status: "selected", reason: "done", fullSize: full, recipeJSON: "{}", xmp: "xmp"))
+            result: .init(status: "selected", reason: "done", fullSize: full, recipeJSON: "{}", xmp: "xmp"), confirmedAt: "2026-10-08T12:00:00Z")
         var state = AIEditingBatch(id: UUID(), baseURL: "https://waiting.invalid", libraryID: "test", items: [item])
         state.confirmed = true
         try JSONEncoder().encode(state).write(to: root.appendingPathComponent("batch.json"))
@@ -160,7 +160,7 @@ import Testing
         #expect(store.pendingResultURL == full)
         let first = store.overallProgress
         store.tickProgress(); store.tickProgress()
-        #expect(store.overallProgress > first)
+        #expect(store.overallProgress == first)
         #expect(store.overallProgress < 1)
         store.cancel()
         for _ in 0..<100 where store.isRunning { try await Task.sleep(for: .milliseconds(5)) }
@@ -169,6 +169,14 @@ import Testing
         #expect(store.overallProgress == paused)
         #expect(store.batch?.items.first?.phase == .uploading)
         #expect(try Data(contentsOf: full) == Data("preserved result".utf8))
+        store.retry()
+        let resumeDeadline = Date().addingTimeInterval(3)
+        while store.activeCount == 0, store.isRunning, Date() < resumeDeadline { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(store.isRunning)
+        #expect(store.batch?.cancelled == false)
+        #expect(store.isAwaitingUpload)
+        store.cancel()
+        for _ in 0..<100 where store.isRunning { try await Task.sleep(for: .milliseconds(5)) }
     }
 
     @Test func concurrentUploadsRespectLimitAndOneFailureDoesNotBlockOthers() async throws {
@@ -180,7 +188,7 @@ import Testing
         let items = ids.map { id in
             AIEditingBatch.Item(id: id, assetID: id, name: "sample.jpg", phase: .uploading,
                 source: .init(negativeContentHash: String(repeating: "a", count: 64), revision: 1,
-                              hasEdit: false, sourceFilename: "sample.jpg", sourceAvailable: true))
+                              hasEdit: false, sourceFilename: "sample.jpg", sourceAvailable: true), confirmedAt: "2026-10-08T12:00:00Z")
         }
         var manifest = AIEditingBatch(id: UUID(), baseURL: "https://parallel.invalid", libraryID: "test", items: items)
         manifest.confirmed = true
@@ -211,6 +219,84 @@ import Testing
         #expect(restored.failedItems.map(\.id) == [failedID])
     }
 
+    @Test func candidateSelectionPersistsAndNeverPublishesBeforeConfirmation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = AIEditingBatch.Candidate(id: UUID(), result: .init(status: "selected", reason: "保留暖光", recipeJSON: "{}"), instruction: "", parentID: nil)
+        let second = AIEditingBatch.Candidate(id: UUID(), result: .init(status: "selected", reason: "提亮人物", recipeJSON: "{}"), instruction: "人物亮一点", parentID: first.id)
+        let item = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "sample.jpg", phase: .review,
+            result: second.result, candidates: [first, second], selectedCandidateID: second.id)
+        var manifest = AIEditingBatch(id: UUID(), baseURL: "https://review.invalid", libraryID: "test", items: [item])
+        manifest.confirmed = true
+        try JSONEncoder().encode(manifest).write(to: root.appendingPathComponent("batch.json"))
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ReviewBatchProtocol.self]
+        let library = LibraryStore(configuration: .init(baseURL: URL(string: manifest.baseURL)!, libraryID: "test"),
+            session: URLSession(configuration: config), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
+        let store = AIEditingBatchStore(root: root)
+        store.restore(library: library)
+        await store.loadWorkspace(library: library)
+        store.selectCandidate(itemID: item.id, candidateID: first.id)
+        let restored = AIEditingBatchStore(root: root)
+        #expect(restored.batch?.items[0].selectedCandidateID == first.id)
+        #expect(restored.batch?.items[0].result?.reason == "保留暖光")
+        #expect(restored.batch?.items[0].candidates?.count == 2)
+        store.start()
+        #expect(!store.isRunning)
+        #expect(store.batch?.items[0].confirmedAt == nil)
+        #expect(store.batch?.items[0].phase == .review)
+        store.selectCandidate(itemID: item.id, candidateID: nil)
+        #expect(AIEditingBatchStore(root: root).batch?.items[0].selectedCandidateID == nil)
+        #expect(AIEditingBatchStore(root: root).batch?.items[0].result == nil)
+        await store.loadWorkspace(library: library)
+    }
+
+    @Test func confirmingOriginalRecordsDecisionWithoutImageUpload() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let candidate = AIEditingBatch.Candidate(id: UUID(), result: .init(status: "selected", reason: "保留现场氛围", recipeJSON: "{}"), instruction: "", parentID: nil)
+        let item = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "sample.jpg", phase: .review,
+            source: .init(negativeContentHash: String(repeating: "a", count: 64), revision: 1, hasEdit: false, sourceFilename: "sample.jpg", sourceAvailable: true),
+            candidates: [candidate])
+        var manifest = AIEditingBatch(id: UUID(), baseURL: "https://original.invalid", libraryID: "test", items: [item])
+        manifest.confirmed = true
+        try JSONEncoder().encode(manifest).write(to: root.appendingPathComponent("batch.json"))
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [OriginalDecisionProtocol.self]
+        let library = LibraryStore(configuration: .init(baseURL: URL(string: manifest.baseURL)!, libraryID: "test"),
+            session: URLSession(configuration: config), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
+        let store = AIEditingBatchStore(root: root)
+        store.restore(library: library)
+        await store.loadWorkspace(library: library)
+        OriginalDecisionProtocol.reset()
+        store.publish(itemID: item.id)
+        for _ in 0..<200 where store.isRunning { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(store.errorMessage == nil)
+        #expect(store.batch?.items[0].phase == .done)
+        #expect(OriginalDecisionProtocol.decisions == 1)
+        #expect(store.batch?.items[0].confirmedAt != nil)
+    }
+
+    @Test func missingComparisonPreventsPublicationAndFailedBatchCanBeArchived() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let candidate = AIEditingBatch.Candidate(id: UUID(), result: .init(status: "selected", reason: "试调",
+            fullSize: root.appendingPathComponent("missing.jpg")), instruction: "", parentID: nil)
+        var item = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "temporary.jpg", phase: .review)
+        item.candidates = [candidate]; item.selectedCandidateID = candidate.id
+        var batch = AIEditingBatch(id: UUID(), baseURL: "https://sample.invalid", libraryID: "test", items: [item])
+        batch.confirmed = true
+        try JSONEncoder().encode(batch).write(to: root.appendingPathComponent("batch.json"))
+        let store = AIEditingBatchStore(root: root)
+        #expect(!store.canPublish(item))
+        store.archiveAndDismiss()
+        #expect(store.batch == nil)
+        let archive = root.appendingPathComponent("recovery-" + batch.id.uuidString + ".json")
+        let recovered = try JSONDecoder().decode(AIEditingBatch.self, from: Data(contentsOf: archive))
+        #expect(recovered.items[0].selectedCandidateID == candidate.id)
+    }
+
     @Test func onlyTransientNetworkErrorsRetryAutomatically() {
         #expect(AIEditingBatchStore.isTransient(URLError(.notConnectedToInternet)))
         #expect(AIEditingBatchStore.isTransient(KeepsAPIError.http(503, "offline")))
@@ -224,6 +310,7 @@ private final class CommittedBatchProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        if respondToWorkspaceRequest(self) { return }
         guard request.httpMethod == "GET", request.url?.lastPathComponent == "edit" else {
             Issue.record("A committed item must not start new grading or upload requests")
             client?.urlProtocol(self, didFailWithError: URLError(.badURL)); return
@@ -243,7 +330,7 @@ private final class CommittedBatchProtocol: URLProtocol, @unchecked Sendable {
 private final class WaitingBatchProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-    override func startLoading() {}
+    override func startLoading() { _ = respondToWorkspaceRequest(self) }
     override func stopLoading() {}
 }
 
@@ -256,6 +343,7 @@ private final class ConcurrentBatchProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        if respondToWorkspaceRequest(self) { return }
         Self.lock.withLock { Self.active += 1; Self.maximum = max(Self.maximum, Self.active) }
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { [self] in
             Self.lock.withLock { Self.active -= 1 }
@@ -268,6 +356,63 @@ private final class ConcurrentBatchProtocol: URLProtocol, @unchecked Sendable {
                 httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
             client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+    override func stopLoading() {}
+}
+
+private func respondToWorkspaceRequest(_ handler: URLProtocol) -> Bool {
+    guard handler.request.url?.path.contains("/ai-editing/") == true else {
+        if handler.request.httpMethod == "GET", handler.request.url?.path.contains("/edit") != true {
+            handler.client?.urlProtocol(handler, didFailWithError: URLError(.cancelled))
+            return true
+        }
+        return false
+    }
+    let isPreferences = handler.request.url?.lastPathComponent == "preferences"
+    let revision = handler.request.httpMethod == "GET" ? 0 : 1
+    let body = isPreferences ? "{\"revision\":\(revision),\"text\":\"自然肤色\"}" : "{\"revision\":\(revision),\"document\":null}"
+    respond(handler, data: Data(body.utf8))
+    return true
+}
+
+private func respond(_ handler: URLProtocol, data: Data) {
+    handler.client?.urlProtocol(handler, didReceive: HTTPURLResponse(url: handler.request.url!, statusCode: 200,
+        httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
+    handler.client?.urlProtocol(handler, didLoad: data)
+    handler.client?.urlProtocolDidFinishLoading(handler)
+}
+
+private final class ReviewBatchProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard !respondToWorkspaceRequest(self) else { return }
+        Issue.record("An unconfirmed review must not fetch, upload, or commit photo content")
+        client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+    }
+    override func stopLoading() {}
+}
+
+private final class OriginalDecisionProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var count = 0
+    static var decisions: Int { lock.withLock { count } }
+    static func reset() { lock.withLock { count = 0 } }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        if respondToWorkspaceRequest(self) { return }
+        if request.httpMethod == "GET", request.url?.lastPathComponent == "edit" {
+            let state = KeepsEditState(negativeContentHash: String(repeating: "a", count: 64), revision: 1, hasEdit: false, sourceAvailable: true)
+            respond(self, data: try! JSONEncoder().encode(state))
+        } else if request.httpMethod == "POST", request.url?.lastPathComponent == "decisions" {
+            Self.lock.withLock { Self.count += 1 }
+            let state = KeepsEditState(negativeContentHash: String(repeating: "a", count: 64), revision: 1, hasEdit: false, sourceAvailable: true)
+            respond(self, data: try! JSONEncoder().encode(state))
+        } else {
+            Issue.record("Selecting the original must not generate or upload derivative images")
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
         }
     }
     override func stopLoading() {}

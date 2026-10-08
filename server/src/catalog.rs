@@ -20,7 +20,7 @@ fn missing_paths_query(scope: &str) -> Result<String> {
     ))
 }
 
-const VERSION: i64 = 12;
+const VERSION: i64 = 13;
 const DIRECTORY_ASSET_SET: &str =
     " AND a.id IN (SELECT f.asset_id FROM catalog_paths f WHERE f.library_id=? AND ";
 // Ordering by path must not make SQLite scan the whole library for every asset.
@@ -43,6 +43,8 @@ pub fn ensure_schema(db: &mut Connection, allow_migrate: bool) -> Result<()> {
         "database schema {version} is newer than this server supports ({VERSION})"
     );
     if version == VERSION {
+        db.prepare("SELECT library_id,asset_id,metadata FROM photo_edit_decisions LIMIT 0")?;
+        db.prepare("SELECT library_id,kind,revision,content FROM ai_editing_state LIMIT 0")?;
         db.prepare("SELECT negative_hash,edit_revision,negative_selected,last_edit_request FROM catalog_assets LIMIT 0")?;
         db.prepare(
             "SELECT negative_hash,exposure_ev,standard,thumbnail,browse,recipe FROM photo_edits LIMIT 0",
@@ -146,6 +148,9 @@ pub fn ensure_schema(db: &mut Connection, allow_migrate: bool) -> Result<()> {
     crate::browse_cache::migrate(&tx)?;
     if version < 12 {
         crate::edits::migrate(&tx)?;
+    }
+    if version < 13 {
+        crate::ai_editing::migrate(&tx)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;

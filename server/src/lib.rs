@@ -31,3 +31,5 @@ pub mod browse_cache;
 pub mod asset_move;
 
 pub mod edits;
+
+pub mod ai_editing;

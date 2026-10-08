@@ -4,13 +4,16 @@ public struct KeepsEditRecipe: Codable, Equatable, Sendable {
     public var engine: String
     public var engineVersion: String
     public var recipeJSON: String
+    public var metadata: String?
     public var xmp: String
-    public init(engine: String = "darktable", engineVersion: String = "5.6.2", recipeJSON: String, xmp: String) {
+    public init(engine: String = "darktable", engineVersion: String = "5.6.2", recipeJSON: String, xmp: String, metadata: String? = nil) {
+        self.metadata = metadata
         self.engine = engine; self.engineVersion = engineVersion; self.recipeJSON = recipeJSON; self.xmp = xmp
     }
 }
 
 public struct KeepsEditState: Codable, Equatable, Sendable {
+    public var decisionMetadata: String?
     public var negativeContentHash: String?
     public var revision: Int64
     public var hasEdit: Bool
@@ -24,7 +27,8 @@ public struct KeepsEditState: Codable, Equatable, Sendable {
 
     public init(negativeContentHash: String?, revision: Int64, hasEdit: Bool, exposureEV: Double? = nil,
                 sourceFilename: String? = nil, sourceAvailable: Bool, lastRequestID: String? = nil,
-                sourceFileHash: String? = nil, sourceSizeBytes: Int64? = nil, recipe: KeepsEditRecipe? = nil) {
+                sourceFileHash: String? = nil, sourceSizeBytes: Int64? = nil, recipe: KeepsEditRecipe? = nil, decisionMetadata: String? = nil) {
+        self.decisionMetadata = decisionMetadata
         self.negativeContentHash = negativeContentHash
         self.revision = revision
         self.hasEdit = hasEdit
@@ -90,4 +94,16 @@ public struct KeepsEditCommit: Codable, Sendable {
         self.recipe = recipe
         self.algorithmVersion = algorithmVersion; self.rendererVersion = rendererVersion; self.outputs = outputs
     }
+}
+
+public struct KeepsAIPreferences: Codable, Equatable, Sendable {
+    public var revision: Int64
+    public var text: String
+    public init(revision: Int64 = 0, text: String = "") { self.revision = revision; self.text = text }
+}
+
+public struct KeepsAIWorkspace: Codable, Equatable, Sendable {
+    public var revision: Int64
+    public var document: String?
+    public init(revision: Int64 = 0, document: String? = nil) { self.revision = revision; self.document = document }
 }

@@ -6,6 +6,7 @@ struct PhotoAssetManagerApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var library = LibraryStore()
     @StateObject private var batch = AIEditingBatchStore()
+    @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.gallerySelection) private var gallerySelection
     var body: some Scene {
         WindowGroup {
@@ -31,6 +32,8 @@ struct PhotoAssetManagerApp: App {
                 Toggle("过滤隐藏目录内容", isOn: $library.hiddenDirectoryFilterEnabled).disabled(library.isOperationBlocking)
             }
             CommandMenu("照片") {
+                Button("打开 AI 调色工作台") { openWindow(id: "ai-editing-workspace") }
+                Divider()
                 Group {
                 Button("上一张") { library.selectAdjacent(-1) }
                 Button("下一张") { library.selectAdjacent(1) }
@@ -47,6 +50,13 @@ struct PhotoAssetManagerApp: App {
                 }.disabled(library.isOperationBlocking || library.isSelectingAll)
             }
         }
+        Window("AI 调色工作台", id: "ai-editing-workspace") {
+            AIEditingWorkspaceView()
+                .environmentObject(library)
+                .environmentObject(batch)
+                .frame(minWidth: 960, minHeight: 680)
+        }
+        .defaultSize(width: 1280, height: 900)
         Window("任务追踪", id: "nas-tasks") {
             Group {
                 if let client = library.client {
@@ -82,14 +92,15 @@ struct PhotoAssetManagerApp: App {
             .disabled(library.isDirectoryOperationBlocking || batch.isRunning)
             .overlay {
                 if library.isDirectoryOperationBlocking || batch.isRunning {
-                    Text(batch.isBlocking ? "正在进行 AI 调色，请在主窗口查看进度。" : "正在整理照片或文件夹，请在主窗口查看进度。")
+                    Text(batch.isRunning ? "正在进行 AI 调色，请在调色工作台查看进度。" : "正在整理照片或文件夹，请在主窗口查看进度。")
                         .padding().background(.regularMaterial)
                 }
             }
         }
     }
 
-    private func synchronizeEditorActivity(_ busy: Bool) {
+    private func synchronizeEditorActivity(_ editorBusy: Bool) {
+        let busy = editorBusy && !batch.editor.batchActive
         guard library.isAISettingsBusy != busy else { return }
         library.isAISettingsBusy = busy
         if busy { library.pauseLibraryForDirectoryOperation() }

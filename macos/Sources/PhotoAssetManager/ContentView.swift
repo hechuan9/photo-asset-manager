@@ -70,9 +70,7 @@ struct ContentView: View {
             }
         }
         .overlay {
-            if batch.isBlocking {
-                AIBatchProgressView(batch: batch)
-            } else if library.isAISettingsBusy {
+            if library.isAISettingsBusy {
                 VStack(spacing: 16) {
                     ProgressView()
                     Text("AI 修图设置正在运行，请在设置中查看进度。")
@@ -353,18 +351,23 @@ struct ContentView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             Divider()
-            Button { batch.prepare(library: library) } label: {
+            Button { openAIWorkspace() } label: {
                 Label(aiEditingTitle, systemImage: "wand.and.stars").frame(maxWidth: .infinity)
             }.disabled(!canStartAIEditing).padding(16)
         }.background(WorkspaceStyle.panel)
     }
 
+    private func openAIWorkspace() {
+        if batch.batch == nil { batch.prepare(library: library) }
+        openWindow(id: "ai-editing-workspace")
+    }
+
     private var aiEditingTitle: String {
-        library.selectedIDs.count > 1 ? "AI 调色（\(library.selectedIDs.count) 张）" : "AI 调色"
+        batch.batch != nil ? "打开调色工作台" : library.selectedIDs.count > 1 ? "AI 调色（\(library.selectedIDs.count) 张）" : "AI 调色"
     }
 
     private var canStartAIEditing: Bool {
-        !library.selectedIDs.isEmpty && library.client != nil && !library.isOperationBlocking &&
+        (batch.batch != nil || !library.selectedIDs.isEmpty) && library.client != nil && !library.isOperationBlocking &&
         !library.isMutating && !library.isSelectingAll && !library.isCheckingConnection && !library.isUpdatingHiddenDirectory &&
         !library.isImportingPhotos && library.directoryToRename == nil && library.directoryToTrash == nil
     }
@@ -372,7 +375,7 @@ struct ContentView: View {
     private var inspectorRail: some View {
         VStack {
             railButton("照片信息", icon: "info.circle", selected: showsInspector) { showsInspector.toggle() }
-            railButton(aiEditingTitle, icon: "wand.and.stars", selected: false) { batch.prepare(library: library) }
+            railButton(aiEditingTitle, icon: "wand.and.stars", selected: false) { openAIWorkspace() }
                 .disabled(!canStartAIEditing)
                 .accessibilityIdentifier("ai-editing-selected-photos")
             Spacer()
@@ -566,115 +569,5 @@ private struct SidebarLayoutAutosave: NSViewRepresentable {
                 ancestor = view.superview
             }
         }
-    }
-}
-
-
-private struct AIBatchProgressView: View {
-    @Environment(\.openSettings) private var openSettings
-    @ObservedObject var batch: AIEditingBatchStore
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text(batch.isAwaitingConfirmation ? "为 \(batch.totalCount) 张照片进行 AI 调色？" : "AI 调色 · \(batch.completedCount) / \(batch.totalCount) 张")
-                .font(.title2)
-            if batch.isAwaitingConfirmation {
-                Text("本次固定处理已选中的 \(batch.totalCount) 张照片。AI 在线分析预览，最多同时处理 \(batch.editor.limits.photos) 张，调色由这台 Mac 执行，原图保持不变。")
-                Text("运行期间将暂停客户端的其他操作。你可以随时取消，已完成的照片会保留调整。")
-                    .foregroundStyle(.secondary)
-            } else {
-                ProgressView(value: batch.overallProgress, total: 1)
-                    .animation(.linear(duration: 1), value: batch.overallProgress)
-                HStack {
-                    Text("预计进度 \(Int(batch.overallProgress * 100))% · 已用时 \(batch.elapsedSeconds / 60):\(String(format: "%02d", batch.elapsedSeconds % 60))")
-                    Spacer()
-                    if batch.isRunning { ProgressView().controlSize(.small) }
-                }.font(.caption).foregroundStyle(.secondary)
-                Text("处理中 \(batch.activeCount) · 等待 \(batch.waitingCount) · 待重试 \(batch.failedItems.count)")
-                    .font(.caption).foregroundStyle(.secondary)
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(batch.activeItems) { item in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(item.name).lineLimit(1)
-                                Text("\(item.title) · \(item.elapsedSeconds) 秒").font(.caption).foregroundStyle(.secondary)
-                                ProgressView(value: item.progress).animation(.linear(duration: 1), value: item.progress)
-                            }
-                        }
-                        ForEach(batch.failedItems) { item in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(item.name).lineLimit(1)
-                                Text(item.failure ?? "").font(.caption).foregroundStyle(.red)
-                                if let result = item.result?.fullSize {
-                                    Button("查看已保留的调色结果") { NSWorkspace.shared.activateFileViewerSelecting([result]) }
-                                }
-                                DisclosureGroup("诊断详情") { Text(item.failureDetails ?? "").font(.caption).textSelection(.enabled) }
-                            }
-                        }
-                    }
-                }.frame(maxHeight: 240)
-            }
-            Text(batch.status).font(.callout)
-            if let items = batch.batch?.items, items.contains(where: { $0.result?.timing != nil }) {
-                DisclosureGroup("已处理照片耗时") {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 8) {
-                            ForEach(items) { item in
-                                if let timing = item.result?.timing {
-                                    Text("\(item.name)：AI 会话 \(Int(timing.sessionSeconds)) 秒，本地渲染 \(Int(timing.renderSeconds)) 秒，渲染排队 \(Int(timing.renderQueueSeconds)) 秒")
-                                        .font(.caption).textSelection(.enabled)
-                                }
-                            }
-                        }
-                    }.frame(maxHeight: 120)
-                    Text("会话时间包含工具执行；渲染与排队时间含本照片的重试，不能直接相加为批次耗时。")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            if batch.isFinished, let batchState = batch.batch {
-                ScrollView {
-                    LazyVStack(alignment: .leading) {
-                        ForEach(batchState.items.filter { $0.phase == .review }) { item in
-                            Text("\(item.name)：\(item.result?.reason ?? "需要检查")").font(.caption)
-                        }
-                    }
-                }.frame(maxHeight: 120)
-            }
-            if let error = batch.errorMessage, batch.failedItems.isEmpty {
-                ScrollView { Text(error).foregroundStyle(.red).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
-                    .frame(maxHeight: 140)
-                DisclosureGroup("诊断详情") {
-                    if let details = batch.errorDetails {
-                        ScrollView { Text(details).font(.caption).textSelection(.enabled) }.frame(maxHeight: 90)
-                    }
-                    if let directory = batch.diagnosticDirectory {
-                        Button("打开诊断日志") { NSWorkspace.shared.open(directory) }
-                    }
-                }.font(.callout)
-            }
-            HStack {
-                Spacer()
-                if batch.isAwaitingConfirmation {
-                    Button("取消", action: batch.dismiss)
-                    Button("AI 设置") { openSettings() }
-                    Button("开始调色 \(batch.totalCount) 张", action: batch.start).buttonStyle(.borderedProminent)
-                } else if batch.isRunning {
-                    Button("取消调色", action: batch.cancel)
-                } else {
-                    Button(batch.isFinished ? "关闭" : "放弃剩余并关闭", action: batch.dismiss)
-                    if batch.errorMessage != nil && !batch.isFinished {
-                        Button("AI 设置") { openSettings() }
-                        if let result = batch.pendingResultURL {
-                            Button("查看本机结果") { NSWorkspace.shared.activateFileViewerSelecting([result]) }
-                        }
-                        Button(batch.isAwaitingUpload ? "重试保存到 NAS" : "重试", action: batch.retry).buttonStyle(.borderedProminent)
-                    }
-                }
-            }
-        }
-        .padding(28).frame(width: 500)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.secondary.opacity(0.3)))
-        .padding(24)
     }
 }

@@ -71,6 +71,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .merge(crate::remote_worker::router())
         .merge(crate::edits::router())
+        .merge(crate::ai_editing::router())
         .merge(crate::imports::router())
         .merge(crate::offline_rebuild::router(state.clone()))
         .route("/libraries/{library}/assets", get(assets))
