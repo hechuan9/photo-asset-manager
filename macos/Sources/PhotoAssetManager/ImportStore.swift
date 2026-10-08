@@ -79,7 +79,7 @@ final class ImportStore: ObservableObject {
 
     private func inventory(source: URL, targetPath: String) async throws {
         let calculateHashes = deduplicate
-        message = calculateHashes ? "正在读取文件以检查目标目录中的重复内容…" : "正在递归查找 RAW、HEIF 和关联 XMP…"
+        message = calculateHashes ? "正在读取文件以检查目标目录中的重复内容…" : "正在递归查找 RAW、JPEG、HEIF 和关联 XMP…"
         let scan = Task.detached(priority: .userInitiated) { try ImportSource.scan(source, calculateHashes: calculateHashes) }
         let files = try await withTaskCancellationHandler {
             try await scan.value
@@ -87,7 +87,7 @@ final class ImportStore: ObservableObject {
             scan.cancel()
         }
         guard !files.isEmpty else {
-            throw NSError(domain: "KeepsImport", code: 1, userInfo: [NSLocalizedDescriptionKey: "来源文件夹中没有 RAW 或 HEIF 照片。"])
+            throw NSError(domain: "KeepsImport", code: 1, userInfo: [NSLocalizedDescriptionKey: "来源文件夹中没有 RAW、JPEG 或 HEIF 照片。"])
         }
         sources = files
         fileCount = files.count

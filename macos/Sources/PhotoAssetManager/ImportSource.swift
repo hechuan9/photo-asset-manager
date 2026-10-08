@@ -13,7 +13,7 @@ enum ImportSource {
     private static let photoExtensions: Set<String> = [
         "3fr", "ari", "arw", "bay", "cr2", "cr3", "crw", "dcr", "dng", "erf", "fff", "iiq", "k25",
         "kdc", "mef", "mos", "mrw", "nef", "nrw", "orf", "pef", "raf", "raw", "rw2", "rwl", "sr2",
-        "srf", "srw", "heif", "heic", "hif",
+        "srf", "srw", "heif", "heic", "hif", "jpg", "jpeg",
     ]
 
     static func scan(_ root: URL, calculateHashes: Bool = false) throws -> [ImportSourceFile] {
