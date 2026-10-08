@@ -75,7 +75,7 @@ struct PhotoAssetManagerApp: App {
                 .tabItem { Label("来源", systemImage: "folder") }
                 AIEditingSettingsView(store: batch.editor)
                     .disabled(library.isImportingPhotos || library.isMutating || library.isCheckingConnection || library.isUpdatingHiddenDirectory || library.directoryToRename != nil || library.directoryToTrash != nil)
-                    .tabItem { Label("AI 修图", systemImage: "slider.horizontal.3") }
+                    .tabItem { Label("AI 修图", systemImage: "wand.and.stars") }
             }
             .environmentObject(library)
             .onReceive(batch.editor.$isBusy, perform: synchronizeEditorActivity)

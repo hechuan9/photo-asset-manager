@@ -5,6 +5,49 @@ import CryptoKit
 @testable import PhotoAssetManager
 
 @MainActor struct AIEditingSettingsTests {
+    @Test(arguments: [
+        ("Error loading config.toml: invalid type: string, expected a sequence", "配置有误"),
+        ("401 Unauthorized: token expired", "登录已失效"),
+        ("insufficient_quota", "额度已用完"),
+        ("model_not_found", "无法使用所选 AI 模型"),
+        ("429 too many requests", "请求过于频繁"),
+        ("stream disconnected", "连接 AI 服务"),
+        ("mcp startup failed", "本机调色工具"),
+        ("unexpected crash", "暂时无法确定原因")
+    ])
+    func commonFailuresExplainRecovery(diagnostic: String, expected: String) {
+        let job = URL(fileURLWithPath: "/tmp/diagnostics")
+        let failure = AIEditingFailure.process(.init(exitCode: 1, output: "", errors: diagnostic), job: job)
+        #expect(failure.localizedDescription.contains(expected))
+        #expect(failure.logDirectory == job)
+        #expect(!failure.localizedDescription.contains("AIEditingFailure("))
+    }
+
+    @Test func nasFailureDoesNotExposeRawResponse() {
+        let message = AIEditingFailure.userMessage(KeepsAPIError.http(409, "internal raw response"))
+        #expect(message.contains("未覆盖"))
+        #expect(!message.contains("internal raw response"))
+        #expect(AIEditingFailure.userMessage(URLError(.notConnectedToInternet)).contains("NAS"))
+    }
+
+    @Test func configurationPathsAreValidForCodex() throws {
+        let arguments = ["--source", "/tmp/test folder/照片.ARW", "--job", "/tmp/job"]
+        let encoded = try AIEditingSettingsStore.json(arguments)
+        #expect(!encoded.contains("\\/"))
+        #expect(try JSONDecoder().decode([String].self, from: Data(encoded.utf8)) == arguments)
+        if let binary = ProcessInfo.processInfo.environment["KEEPS_TEST_CODEX"] {
+            let process = Process(); process.executableURL = URL(fileURLWithPath: binary)
+            let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: home) }
+            process.environment = AIEditingProcess.environment(home: home, ambient: ProcessInfo.processInfo.environment)
+            process.arguments = ["features", "list", "-c", "mcp_servers.keeps_color.command=\"/tmp/helper\"", "-c", "mcp_servers.keeps_color.args=" + encoded]
+            process.standardOutput = FileHandle.nullDevice
+            try process.run(); process.waitUntilExit()
+            #expect(process.terminationStatus == 0)
+        }
+    }
+
     @Test func bundledSampleIsLocalAndMissingResourceFails() throws {
         let runtime = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: runtime) }

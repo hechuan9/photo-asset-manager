@@ -342,7 +342,7 @@ struct ContentView: View {
             }
             Divider()
             Button { batch.prepare(library: library) } label: {
-                Label(aiEditingTitle, systemImage: "slider.horizontal.3").frame(maxWidth: .infinity)
+                Label(aiEditingTitle, systemImage: "wand.and.stars").frame(maxWidth: .infinity)
             }.disabled(!canStartAIEditing).padding(16)
         }.background(WorkspaceStyle.panel)
     }
@@ -360,7 +360,7 @@ struct ContentView: View {
     private var inspectorRail: some View {
         VStack {
             railButton("照片信息", icon: "info.circle", selected: showsInspector) { showsInspector.toggle() }
-            railButton(aiEditingTitle, icon: "slider.horizontal.3", selected: false) { batch.prepare(library: library) }
+            railButton(aiEditingTitle, icon: "wand.and.stars", selected: false) { batch.prepare(library: library) }
                 .disabled(!canStartAIEditing)
                 .accessibilityIdentifier("ai-editing-selected-photos")
             Spacer()
@@ -586,7 +586,15 @@ private struct AIBatchProgressView: View {
             }
             if let error = batch.errorMessage {
                 ScrollView { Text(error).foregroundStyle(.red).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
-                    .frame(maxHeight: 180)
+                    .frame(maxHeight: 140)
+                DisclosureGroup("诊断详情") {
+                    if let details = batch.errorDetails {
+                        ScrollView { Text(details).font(.caption).textSelection(.enabled) }.frame(maxHeight: 90)
+                    }
+                    if let directory = batch.diagnosticDirectory {
+                        Button("打开诊断日志") { NSWorkspace.shared.open(directory) }
+                    }
+                }.font(.callout)
             }
             HStack {
                 Spacer()

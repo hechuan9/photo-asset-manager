@@ -8,7 +8,7 @@ struct AIEditingSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label("AI 修图", systemImage: "slider.horizontal.3").font(.title2)
+                    Label("AI 修图", systemImage: "wand.and.stars").font(.title2)
                     Text("AI 在线分析照片，调色由这台 Mac 执行。Keeps 使用独立登录，不使用本机其他 Codex 会话的账户。")
                         .font(.callout).foregroundStyle(.secondary)
                 }

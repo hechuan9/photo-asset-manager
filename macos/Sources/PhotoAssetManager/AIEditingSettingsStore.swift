@@ -97,7 +97,7 @@ import CryptoKit
                 arguments: self.execArguments(job: job) + ["-"], home: self.home, directory: job,
                 input: "Reply with exactly KEEPS_CONNECTION_OK. Do not use any tools.", timeout: 90)
             try self.writeLog(result, job: job)
-            guard result.exitCode == 0 else { throw AIEditingFailure("模型连接失败（退出码 \(result.exitCode)）。诊断日志：\(job.path)") }
+            guard result.exitCode == 0 else { throw AIEditingFailure.process(result, job: job) }
             let reply = try String(contentsOf: job.appendingPathComponent("result.json"), encoding: .utf8)
             guard reply.trimmingCharacters(in: .whitespacesAndNewlines) == "KEEPS_CONNECTION_OK" else {
                 throw AIEditingFailure("模型未返回预期连接确认。诊断日志：\(job.path)")
@@ -195,7 +195,7 @@ import CryptoKit
             home: self.home, directory: job, input: prompt, timeout: 600)
         try self.writeLog(result, job: job)
         runExitCode = result.exitCode
-        guard result.exitCode == 0 else { throw AIEditingFailure("调色失败（退出码 \(result.exitCode)）。诊断日志：\(job.path)") }
+        guard result.exitCode == 0 else { throw AIEditingFailure.process(result, job: job) }
         try self.readAccount(); try self.requireAccount()
         let validated = try Self.validateResult(in: job)
         self.resultPreview = validated.preview
@@ -217,7 +217,7 @@ import CryptoKit
             fail(error)
         }
     }
-    private func fail(_ error: Error) { errorMessage = error.localizedDescription; status = "需要处理" }
+    private func fail(_ error: Error) { errorMessage = AIEditingFailure.userMessage(error); status = "需要处理" }
     private func prepareDirectories() throws {
         for directory in [root, home, logDirectory] {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -271,8 +271,9 @@ import CryptoKit
         let lines = result.output.split(separator: "\n").map { Self.redacted(String($0)) }
         try Data(lines.joined(separator: "\n").utf8).write(to: job.appendingPathComponent("events.jsonl"), options: .atomic)
     }
-    private static func json(_ value: Any) throws -> String {
-        String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys]), as: UTF8.self)
+    // Codex parses overrides as TOML, which does not accept JSON escaped slashes.
+    static func json(_ value: Any) throws -> String {
+        String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
     }
 
     static func validateAccount(actual: String, expected: String) throws {

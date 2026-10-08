@@ -27,6 +27,8 @@ struct AIEditingBatch: Codable {
     @Published private(set) var status = "准备 AI 调色"
     @Published private(set) var currentName = ""
     @Published private(set) var errorMessage: String?
+    @Published private(set) var errorDetails: String?
+    @Published private(set) var diagnosticDirectory: URL?
     @Published private(set) var isRunning = false
     var isBlocking: Bool { batch != nil }
     var isAwaitingConfirmation: Bool { batch != nil && batch?.confirmed == false && batch?.cancelled == false }
@@ -49,7 +51,7 @@ struct AIEditingBatch: Codable {
             if FileManager.default.fileExists(atPath: manifest.path) {
                 batch = try JSONDecoder().decode(AIEditingBatch?.self, from: Data(contentsOf: manifest))
             }
-        } catch { storageError = error; errorMessage = String(reflecting: error) }
+        } catch { storageError = error; recordFailure(error) }
     }
 
     func prepare(library: LibraryStore) {
@@ -67,7 +69,7 @@ struct AIEditingBatch: Codable {
             self.library = library
             library.isAIEditingBlocking = true
             library.pauseLibraryForDirectoryOperation()
-            errorMessage = nil
+            errorMessage = nil; errorDetails = nil; diagnosticDirectory = nil
             status = "确认对所选 \(totalCount) 张照片进行 AI 调色"
         } catch { batch = nil; library.lastError = String(reflecting: error) }
     }
@@ -89,10 +91,10 @@ struct AIEditingBatch: Codable {
             guard let client = library?.client, matches(client) else { throw AIEditingFailure("请使用创建此任务时的资料库连接。") }
             batch!.confirmed = true
             try persist()
-            errorMessage = nil
+            errorMessage = nil; errorDetails = nil; diagnosticDirectory = nil
             isRunning = true
             worker = Task { await run(client: client) }
-        } catch { errorMessage = String(reflecting: error); status = "任务已暂停；可到 AI 设置重新登录后重试" }
+        } catch { recordFailure(error); status = "任务已暂停，请按下方提示处理后重试" }
     }
 
     func retry() { start() }
@@ -108,7 +110,7 @@ struct AIEditingBatch: Codable {
         editor.cancel()
         worker?.cancel()
         status = "正在停止；已提交的调色结果保留"
-        do { try persist() } catch { errorMessage = String(reflecting: error) }
+        do { try persist() } catch { recordFailure(error) }
         if worker == nil { status = "已取消；已提交的结果保留" }
     }
 
@@ -117,10 +119,21 @@ struct AIEditingBatch: Codable {
         let previous = batch
         batch = nil
         do { try persist() }
-        catch { batch = previous; errorMessage = String(reflecting: error); return }
+        catch { batch = previous; recordFailure(error); return }
         library?.isAIEditingBlocking = false
         library?.refresh(force: true)
         library?.refreshNavigation()
+    }
+
+    private func recordFailure(_ error: Error, context: String? = nil) {
+        errorMessage = [context, AIEditingFailure.userMessage(error)].compactMap { $0 }.joined(separator: "\n")
+        errorDetails = AIEditingSettingsStore.redacted(String(reflecting: error))
+        diagnosticDirectory = (error as? AIEditingFailure)?.logDirectory ?? root
+        do {
+            try Data((errorDetails ?? "").utf8).write(to: root.appendingPathComponent("failure.log"), options: .atomic)
+        } catch {
+            errorDetails = (errorDetails ?? "") + "\n诊断日志无法写入：" + error.localizedDescription
+        }
     }
 
     private func matches(_ client: KeepsClient) -> Bool {
@@ -146,13 +159,13 @@ struct AIEditingBatch: Codable {
             do {
                 try await advance(&item, client: client)
                 try save(item, index: index)
-                errorMessage = nil
+                errorMessage = nil; errorDetails = nil; diagnosticDirectory = nil
             } catch {
                 if Task.isCancelled || batch?.cancelled == true {
                     status = "已取消；已提交的结果保留。若提交时断开，重新调色前会读取服务器状态。"
                     return
                 }
-                errorMessage = String(reflecting: error) + "\n" + (error as NSError).description
+                recordFailure(error, context: status)
                 if Self.isTransient(error) {
                     status = "连接暂时不可用，等待重连（\(completedCount)/\(totalCount)）"
                     do { try await Task.sleep(for: retryInterval) } catch { return }
