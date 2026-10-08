@@ -21,7 +21,7 @@ import Testing
         #expect(!restored.isRunning)
         library.rejectedTrash = nil
         restored.restore(library: library)
-        #expect(library.isAIEditingBlocking)
+        #expect(!library.isAIEditingBlocking)
         #expect(restored.isAwaitingConfirmation)
     }
 
