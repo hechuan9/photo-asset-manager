@@ -409,7 +409,7 @@ fn plan_files(
                 invalid("case-insensitive duplicate filenames within source group")
             );
             if let Some(matches) = matching_existing_group(
-                &destination,
+                destination,
                 entries,
                 &suffixes,
                 &pending_names,
