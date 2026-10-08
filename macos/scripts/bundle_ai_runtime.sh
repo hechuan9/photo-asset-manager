@@ -37,6 +37,8 @@ cp "$CODEX_BINARY" "$HELPERS_DIR/codex"
 cp "$HELPER_BIN_DIR/keeps-color-mcp" "$HELPERS_DIR/keeps-color-mcp"
 cp "$ROOT_DIR/ColorTools/Skills/keeps-color/SKILL.md" "$RUNTIME_DIR/SKILL.md"
 cp "$ROOT_DIR/scripts/runtime-licenses/"*.txt "$RUNTIME_DIR/"
+cp "$ROOT_DIR/scripts/runtime-sample/sample.jpg" "$RUNTIME_DIR/sample.jpg"
+cp "$ROOT_DIR/scripts/runtime-sample/SampleLicense.txt" "$RUNTIME_DIR/SampleLicense.txt"
 # Build output only: discard stale engine files before copying the pinned bundle.
 rm -rf "$HELPERS_DIR/darktable.app"
 /usr/bin/ditto "$DARKTABLE_APP" "$HELPERS_DIR/darktable.app"

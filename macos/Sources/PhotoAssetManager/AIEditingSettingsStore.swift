@@ -1,7 +1,6 @@
 import Foundation
 import Combine
 import CryptoKit
-import KeepsAPI
 
 @MainActor final class AIEditingSettingsStore: ObservableObject {
     @Published var expectedEmail: String {
@@ -23,7 +22,6 @@ import KeepsAPI
     let root: URL
     let runtime: URL
     let codeRuntime: URL
-    private var sampleTask: Task<URL, Error>?
     private let defaults: UserDefaults
     private let runner = AIEditingProcess()
     private var home: URL { root.appendingPathComponent("codex", isDirectory: true) }
@@ -110,74 +108,18 @@ import KeepsAPI
         }
     }
 
-    static let samplePath = "照片/2023/香港/DSC01194.ARW"
-
-    func testFixedPhoto(client: KeepsClient?) async {
-        await perform("正在获取固定样片 DSC01194.ARW") {
-            guard let client else { throw AIEditingFailure("请先在服务器设置中连接 NAS，以获取固定样片。") }
-            try self.prepareDirectories(); try self.checkRuntime(); try self.readAccount(); try self.requireAccount()
-            guard self.connectionVerified else { throw AIEditingFailure("请先完成模型连接测试。") }
-            let task = Task { try await self.fixedPhoto(client: client) }
-            self.sampleTask = task
-            defer { self.sampleTask = nil }
-            let source = try await task.value
-            try Task.checkCancellation()
-            self.status = "正在使用 DSC01194.ARW 验证 AI 调色"
-            try await self.runPhoto(source)
+    func testFixedPhoto() async {
+        await perform("正在使用内置公开样片验证 AI 调色") {
+            try await self.runPhoto(Self.bundledSample(in: self.runtime))
         }
     }
 
-    private func fixedPhoto(client: KeepsClient) async throws -> URL {
-        var query = KeepsAssetQuery()
-        query.q = "DSC01194"; query.showHidden = true
-        var matches: [(UUID, KeepsAssetVersion)] = []
-        repeat {
-            let page = try await client.assets(query: query)
-            for asset in page.items {
-                for version in try await client.versions(assetID: asset.id) where Self.isFixedSample(version) {
-                    matches.append((asset.id, version))
-                }
-            }
-            query.cursor = page.nextCursor
-        } while query.cursor != nil
-        guard matches.count == 1, let (assetID, version) = matches.first else {
-            throw AIEditingFailure(matches.isEmpty ? "NAS 中找不到可用的固定样片：\(Self.samplePath)" : "NAS 中有多个同路径样片，无法确定验证原片。")
+    static func bundledSample(in runtime: URL) throws -> URL {
+        let source = runtime.appendingPathComponent("sample.jpg")
+        guard FileManager.default.isReadableFile(atPath: source.path) else {
+            throw AIEditingFailure("安装包缺少内置测试图，请重新安装 Keeps。")
         }
-        let directory = root.appendingPathComponent("sample", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let target = try Self.sampleCacheURL(directory: directory, hash: version.contentHash)
-        if try Self.sampleCacheIsValid(target, hash: version.contentHash) { return target }
-        let downloaded = directory.appendingPathComponent("pending-" + UUID().uuidString + ".ARW")
-        defer { try? FileManager.default.removeItem(at: downloaded) }
-        try await client.downloadVersion(assetID: assetID, contentHash: version.contentHash, to: downloaded)
-        guard try Self.sampleCacheIsValid(downloaded, hash: version.contentHash) else {
-            throw AIEditingFailure("固定样片下载校验失败，请重试；NAS 原片未改动。")
-        }
-        // Atomic replacement touches only the app-owned cache.
-        try Data(contentsOf: downloaded, options: .mappedIfSafe).write(to: target, options: .atomic)
-        return target
-    }
-
-    static func isFixedSample(_ version: KeepsAssetVersion) -> Bool {
-        version.available && version.paths.contains { location in
-            location.available && (location.path == samplePath || location.path.hasSuffix("/" + samplePath))
-        }
-    }
-
-    static func sampleCacheURL(directory: URL, hash: String) throws -> URL {
-        guard hash.count == 64, hash.allSatisfy({ "0123456789abcdef".contains($0) }) else {
-            throw AIEditingFailure("NAS 样片内容校验标识无效。")
-        }
-        return directory.appendingPathComponent(hash + ".ARW")
-    }
-
-    static func sampleCacheIsValid(_ url: URL, hash: String) throws -> Bool {
-        guard FileManager.default.fileExists(atPath: url.path) else { return false }
-        let file = try FileHandle(forReadingFrom: url)
-        defer { try? file.close() }
-        var digest = SHA256()
-        while let data = try file.read(upToCount: 1024 * 1024), !data.isEmpty { digest.update(data: data) }
-        return digest.finalize().map { String(format: "%02x", $0) }.joined() == hash
+        return source
     }
 
     func testPhoto(_ source: URL) async {
@@ -188,8 +130,8 @@ import KeepsAPI
         self.resultPreview = nil; self.resultSummary = nil
         try self.prepareDirectories(); try self.checkRuntime(); try self.readAccount(); try self.requireAccount()
         guard self.connectionVerified else { throw AIEditingFailure("请先完成模型连接测试。") }
-        let allowed = ["arw", "3fr", "dng", "cr2", "cr3", "nef", "raf", "orf", "rw2"]
-        guard allowed.contains(source.pathExtension.lowercased()) else { throw AIEditingFailure("当前测试仅支持 RAW 原片，请选择 RAW 文件。") }
+        let allowed = ["arw", "3fr", "dng", "cr2", "cr3", "nef", "raf", "orf", "rw2", "jpg", "jpeg"]
+        guard allowed.contains(source.pathExtension.lowercased()) else { throw AIEditingFailure("当前测试支持 RAW 和 JPEG 照片。") }
         let accessed = source.startAccessingSecurityScopedResource()
         defer { if accessed { source.stopAccessingSecurityScopedResource() } }
         guard FileManager.default.isReadableFile(atPath: source.path) else { throw AIEditingFailure("无法读取选中的照片。") }
@@ -236,7 +178,7 @@ import KeepsAPI
         self.status = validated.selected ? "单张调色测试成功；结果保存在本机" : "测试完成；结果需要人工检查"
     }
 
-    func cancel() { sampleTask?.cancel(); runner.cancel() }
+    func cancel() { runner.cancel() }
 
     private func perform(_ message: String, includeProcessLog: Bool = true, operation: () async throws -> Void) async {
         guard !isBusy else { return }

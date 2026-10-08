@@ -43,6 +43,35 @@ final class RenderingTests: XCTestCase {
         print("Real renderer artifacts: \(directory.path); ellipse inside=\(inside), outside=\(outside)")
     }
 
+    func testRealJPEGExposureAndReplay() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let executable = environment["KEEPS_TEST_DARKTABLE"], let source = environment["KEEPS_TEST_JPEG"] else {
+            throw XCTSkip("Set KEEPS_TEST_DARKTABLE and KEEPS_TEST_JPEG for real JPEG validation")
+        }
+        let sourceURL = URL(fileURLWithPath: source)
+        let before = try contentHash(sourceURL)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("keeps-jpeg-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var engine: DarktableProcess? = try DarktableProcess(executable: URL(fileURLWithPath: executable), source: sourceURL, directory: directory)
+        XCTAssertTrue(engine!.isJPEG)
+        XCTAssertFalse(engine!.supportsLocalMasks)
+        func render(_ engine: DarktableProcess, recipe: ColorRecipe, operation: String, full: Bool = false) throws -> Pixels {
+            let candidate = try engine.store.add(operationID: operation, parentID: nil, recipe: JSONEncoder().encode(recipe))
+            return try pixels(engine.render(xmp: DarktableRecipe.apply(recipe, to: engine.baseline), candidateID: candidate.id, full: full))
+        }
+        let initial = try render(engine!, recipe: ColorRecipe(), operation: "initial")
+        let recipe = ColorRecipe(exposureEV: -0.5, saturation: 0.8)
+        let changed = try render(engine!, recipe: recipe, operation: "changed")
+        XCTAssertGreaterThan(difference(initial, changed, x: 0...1, y: 0...1), 3)
+        XCTAssertThrowsError(try DarktableRecipe.apply(ColorRecipe(whiteBalanceRGB: [1.1, 1, 1]), to: engine!.baseline))
+        XCTAssertThrowsError(try DarktableRecipe.apply(ColorRecipe(contrast: 1.7), to: engine!.baseline))
+        engine = nil
+        let restarted = try DarktableProcess(executable: URL(fileURLWithPath: executable), source: sourceURL, directory: directory)
+        let replay = try render(restarted, recipe: recipe, operation: "replay", full: true)
+        XCTAssertLessThan(difference(changed, replay, x: 0...1, y: 0...1), 1)
+        XCTAssertEqual(try contentHash(sourceURL), before)
+    }
+
     private struct Pixels { let bytes: [UInt8]; let width: Int; let height: Int }
     private func pixels(_ url: URL, width: Int = 400, height: Int = 267) throws -> Pixels {
         let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))

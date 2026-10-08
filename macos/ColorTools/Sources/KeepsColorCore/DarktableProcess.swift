@@ -7,6 +7,7 @@ public final class DarktableProcess {
     public let input: URL
     public let baseline: String
     public let supportsLocalMasks: Bool
+    public let isJPEG: Bool
     public let store: CandidateStore
     private let executable: URL
     private let lock: FileHandle
@@ -22,7 +23,8 @@ public final class DarktableProcess {
         guard flock(lock.fileDescriptor, LOCK_EX | LOCK_NB) == 0 else { throw ColorToolError("Task already has an active worker") }
         let imageSource = CGImageSourceCreateWithURL(source as CFURL, nil)
         let properties = imageSource.flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [CFString: Any] }
-        supportsLocalMasks = (properties?[kCGImagePropertyOrientation] as? NSNumber)?.intValue == 1
+        isJPEG = imageSource.map { CGImageSourceGetType($0) as String? == "public.jpeg" } ?? false
+        supportsLocalMasks = !isJPEG && (properties?[kCGImagePropertyOrientation] as? NSNumber)?.intValue == 1
         let digest = try contentHash(source)
         store = try CandidateStore(directory: directory, sourceHash: digest)
         input = directory.appendingPathComponent("input." + source.pathExtension.lowercased())

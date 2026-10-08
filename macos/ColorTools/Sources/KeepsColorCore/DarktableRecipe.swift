@@ -79,11 +79,14 @@ public enum DarktableRecipe {
         let doc = try XMLDocument(xmlString: baselineXMP, options: [.nodePreserveAll])
         guard let description = try doc.nodes(forXPath: "//*[local-name()='Description']").first as? XMLElement,
               description.attribute(forName: "darktable:xmp_version")?.stringValue == "5",
-              description.attribute(forName: "darktable:iop_order_version")?.stringValue == "4",
+              ["4", "5"].contains(description.attribute(forName: "darktable:iop_order_version")?.stringValue ?? ""),
               description.attribute(forName: "darktable:iop_order_list") == nil,
               let history = try doc.nodes(forXPath: "//*[local-name()='history']/*[local-name()='Seq']").first as? XMLElement,
               let masks = try doc.nodes(forXPath: "//*[local-name()='masks_history']/*[local-name()='Seq']").first as? XMLElement,
-              masks.childCount == 0 else { throw RecipeError.invalid("Requires pristine darktable 5.6.2 RAW baseline (XMP 5, order 4, no masks/custom order)") }
+              masks.childCount == 0 else { throw RecipeError.invalid("Requires pristine darktable 5.6.2 baseline (XMP 5, order 4 or 5, no masks/custom order)") }
+        if description.attribute(forName: "darktable:iop_order_version")?.stringValue == "5" {
+            return try applyJPEG(recipe, document: doc, description: description, history: history)
+        }
         let items = history.children?.compactMap { $0 as? XMLElement } ?? []
         func module(_ operation: String, version: Int, size: Int) throws -> (XMLElement, [UInt8]) {
             let matches = items.filter { $0.attribute(forName: "darktable:operation")?.stringValue == operation }
@@ -159,6 +162,41 @@ public enum DarktableRecipe {
             set(description,"iop_order_list",entries.joined(separator:","))
         }
         return doc.xmlString(options: [])
+    }
+    // JPEG's v5 pipeline is already display-referred: retain its color profile and
+    // tone response rather than adding the RAW white balance and sigmoid stages.
+    private static func applyJPEG(_ recipe: ColorRecipe, document: XMLDocument, description: XMLElement, history: XMLElement) throws -> String {
+        guard recipe.whiteBalanceRGB == [1, 1, 1], recipe.contrast == 1.5, recipe.skew == 0, recipe.localAdjustments.isEmpty else {
+            throw RecipeError.invalid("JPEG supports exposureEV and saturation only; RAW white balance, sigmoid and local masks are unavailable")
+        }
+        let items = history.children?.compactMap { $0 as? XMLElement } ?? []
+        guard Set(items.compactMap { $0.attribute(forName: "darktable:operation")?.stringValue }) == Set(["colorin", "colorout", "gamma", "flip"]), items.count == 4,
+              let template = items.first,
+              template.attribute(forName: "darktable:blendop_version")?.stringValue == "14" else {
+            throw RecipeError.invalid("Requires pristine darktable JPEG baseline")
+        }
+        var count = items.count
+        func append(_ operation: String, version: Int, params: [UInt8]) {
+            let node = template.copy() as! XMLElement
+            for (key, value) in ["num": String(count), "operation": operation, "enabled": "1", "modversion": String(version), "params": hex(params), "multi_priority": "0", "multi_name": "Keeps " + operation] { set(node, key, value) }
+            history.addChild(node)
+            count += 1
+        }
+        var exposure = [UInt8](repeating: 0, count: 28)
+        putFloat(recipe.exposureEV, into: &exposure, at: 8)
+        putFloat(50, into: &exposure, at: 12)
+        putFloat(-4, into: &exposure, at: 16)
+        append("exposure", version: 7, params: exposure)
+        if recipe.saturation != 1 {
+            var params = [UInt8](repeating: 0, count: 132)
+            for index in [12, 14] { putFloat(1, into: &params, at: index * 4) }
+            for index in [28, 30] { putFloat(0.1845, into: &params, at: index * 4) }
+            putFloat(recipe.saturation - 1, into: &params, at: 19 * 4)
+            put(1, into: &params, at: 128)
+            append("colorbalancergb", version: 5, params: params)
+        }
+        set(description, "history_end", String(count))
+        return document.xmlString(options: [])
     }
     private static func set(_ node: XMLElement, _ key: String, _ value: String) {
         let name = "darktable:"+key

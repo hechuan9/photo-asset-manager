@@ -1,9 +1,7 @@
 import AppKit
 import SwiftUI
-import KeepsAPI
 
 struct AIEditingSettingsView: View {
-    let client: KeepsClient?
     @StateObject private var store = AIEditingSettingsStore()
 
     var body: some View {
@@ -82,10 +80,9 @@ struct AIEditingSettingsView: View {
                     }
                     Spacer()
                 }
-                Text("固定样片：照片/2023/香港/DSC01194.ARW").font(.caption).textSelection(.enabled)
-                if client == nil { Text("请先在服务器设置中连接 NAS，以获取固定样片。").font(.caption).foregroundStyle(.secondary) }
-                Button("使用固定样片验证") { Task { await store.testFixedPhoto(client: client) } }
-                    .disabled(store.isBusy || !store.connectionVerified || client == nil)
+                Text("内置公开风景样片（CC0），无需连接照片库。").font(.caption).foregroundStyle(.secondary)
+                Button("使用内置样片验证") { Task { await store.testFixedPhoto() } }
+                    .disabled(store.isBusy || !store.connectionVerified)
                     .accessibilityIdentifier("ai-editing-test-photo")
             }.padding(8)
         } label: { Text("3. 验证与试修图") }

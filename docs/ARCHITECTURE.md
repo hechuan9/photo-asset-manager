@@ -320,12 +320,12 @@ NAS 离线重建由 `POST /libraries/{library}/offline-rebuild` 创建任务，�
 
 ### 本地 AI 调色验证工具
 
-`macos/ColorTools` 是独立原生 Swift helper（已接入 macOS 设置中的单张试修图，尚未接入图库发布），固定调用 darktable 5.6.2 CLI。模型经 stdio MCP 读取预览/区域裁切，设置绝对参数、比较不可变候选并选择结果；配方适配层负责 XMP 模块版本、顺序和局部蒙版。原片只读复制到任务私有目录，候选按操作 ID 幂等落盘；每次从固定 baseline 重建，不累积改写原片。当前验证范围为 RAW、曝光、源白平衡 RGB 倍率、sigmoid、饱和度及渐变/椭圆局部曝光；局部蒙版暂仅支持方向为 1 的底片，其他方向明确拒绝。跨任务缓存、NAS 发布和正式分发由后续任务接入。
+`macos/ColorTools` 是独立原生 Swift helper（已接入 macOS 设置中的单张试修图，尚未接入图库发布），固定调用 darktable 5.6.2 CLI。模型经 stdio MCP 读取预览/区域裁切，设置绝对参数、比较不可变候选并选择结果；配方适配层负责 XMP 模块版本、顺序和局部蒙版。原片只读复制到任务私有目录，候选按操作 ID 幂等落盘；每次从固定 baseline 重建，不累积改写原片。RAW 验证支持曝光、源白平衡 RGB 倍率、sigmoid、饱和度及渐变/椭圆局部曝光；JPEG 保留原生色彩管线，当前支持曝光与饱和度，工具按输入返回可用参数；局部蒙版暂仅支持方向为 1 的底片，其他方向明确拒绝。跨任务缓存与 NAS 发布由后续任务接入。
 
 专用 Skill 位于该包 `Skills/keeps-color`。`scripts/evaluate_ai.py` 仅供开发验证，显式指定 Codex、helper、darktable、输入和全新任务目录，默认 GPT-6 Luna；禁用通用 shell、插件及外部应用工具，只加载本地调色 MCP，保留事件与结构化结果，并核实模型所选候选确实已渲染。此脚本必须显式提供专属 `--codex-home` 和 `--account-email`，拒绝默认开发者目录及不匹配的账户，不继承环境中的 API 凭证。渲染测试通过 `KEEPS_TEST_DARKTABLE` 和 `KEEPS_TEST_RAW` 指定本机输入，未配置则跳过真实 RAW 集成测试。
 
-macOS「设置 → AI 修图」提供运行环境检查、指定邮箱登录、退出、连接测试与固定 RAW 样片验证。原生 Swift runner 只调用应用 `Contents/Helpers` 内的 Codex、helper、darktable；Skill 位于 `Contents/Resources/AIEditing`，不搜索系统安装，不回退到开发账户。认证与日志位于 Application Support/Keeps/AIEditing；Codex 使用其中的独立 `codex` 目录、file 凭证和强制 ChatGPT 登录，每次请求核对实际邮箱。首次 OAuth 授权由用户在浏览器完成，登录状态可在应用重启后重新读取。设置测试仅生成本地候选，不自动发布 NAS 或更新图库缩略图；完整调色任务恢复仍由后续调度任务实现。
+macOS「设置 → AI 修图」提供运行环境检查、指定邮箱登录、退出、连接测试与内置公开 JPEG 样片验证。原生 Swift runner 只调用应用 `Contents/Helpers` 内的 Codex、helper、darktable；Skill 位于 `Contents/Resources/AIEditing`，不搜索系统安装，不回退到开发账户。认证与日志位于 Application Support/Keeps/AIEditing；Codex 使用其中的独立 `codex` 目录、file 凭证和强制 ChatGPT 登录，每次请求核对实际邮箱。首次 OAuth 授权由用户在浏览器完成，登录状态可在应用重启后重新读取。设置测试仅生成本地候选，不自动发布 NAS 或更新图库缩略图；完整调色任务恢复仍由后续调度任务实现。
 
 Release 归档要求显式 `KEEPS_CODEX_BINARY` 与 `KEEPS_DARKTABLE_APP`，固定公开 Codex 0.161.0 和 darktable 5.6.2；缺少组件或签名身份即失败。当前 AI 发行包仅支持 Apple Silicon。构建记录版本/摘要并从内到外签名，子进程继承主应用沙盒；保留上游许可及对应源指向，绝不复制登录凭证。没有运行时输入的普通 Debug/CI 包显示组件缺失。
 
-固定验证样片为 `照片/2023/香港/DSC01194.ARW`，从已连接资料库按可用版本及路径精确匹配，经受鉴权的 `GET /libraries/{library}/assets/{id}/versions/{contentHash}/download` 下载。服务端确认资产归属、活跃追踪路径、文件身份/尺寸/修改时间，拒绝符号链接并只读流式响应。客户端按 SHA256 校验并缓存于自身容器，后续验证复用相同内容；样片不进入安装包。
+运行验证使用安装包内置的公开 CC0 风景 JPEG（Nick West，Landscape），许可与来源随图打包。设置流程只读取该资源，不访问用户照片库，不依赖 NAS 或样片下载缓存。资料库版本下载接口保留为受鉴权的通用只读 API，校验资产归属、追踪路径与文件状态。
