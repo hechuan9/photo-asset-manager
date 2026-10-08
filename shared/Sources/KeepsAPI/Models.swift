@@ -301,3 +301,16 @@ public struct KeepsPhotoMoveTask: Decodable, Sendable {
     public var phase: String
     public var error: String?
 }
+
+public struct KeepsRejectedTrashTask: Codable, Equatable, Identifiable, Sendable {
+    public var id: UUID
+    public var count: Int
+    public var status: String
+    public var phase: String
+    public var completedFiles: Int
+    public var totalFiles: Int
+    public var error: String?
+    public var createdAt: Double
+    public var updatedAt: Double
+    public var finishedAt: Double?
+}

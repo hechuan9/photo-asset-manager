@@ -100,7 +100,7 @@ struct AIEditingBatch: Codable {
     }
 
     func restore(library: LibraryStore) {
-        guard !restored else { return }
+        guard !restored, !library.isDirectoryOperationBlocking else { return }
         restored = true
         self.library = library
         guard let batch else { return }
@@ -110,7 +110,7 @@ struct AIEditingBatch: Codable {
     }
 
     func start() {
-        guard worker == nil, !editor.isBusy, batch != nil, !isFinished else { return }
+        guard worker == nil, !editor.isBusy, library?.isDirectoryOperationBlocking != true, batch != nil, !isFinished else { return }
         do {
             guard let client = library?.client, matches(client) else { throw AIEditingFailure("请使用创建此任务时的资料库连接。") }
             for index in batch!.items.indices { batch!.items[index].failure = nil; batch!.items[index].failureDetails = nil }

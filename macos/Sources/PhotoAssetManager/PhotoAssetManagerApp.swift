@@ -31,6 +31,9 @@ struct PhotoAssetManagerApp: App {
                 Toggle("过滤隐藏目录内容", isOn: $library.hiddenDirectoryFilterEnabled).disabled(library.isOperationBlocking)
             }
             CommandMenu("照片") {
+                Button("删除所有弃用照片…") { library.showsRejectedTrash = true }
+                    .disabled(library.client == nil || library.isOperationBlocking || library.isMutating || library.isCheckingConnection || library.isImportingPhotos || batch.isBlocking || batch.editor.isBusy)
+                Divider()
                 Group {
                 Button("上一张") { library.selectAdjacent(-1) }
                 Button("下一张") { library.selectAdjacent(1) }

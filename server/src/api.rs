@@ -71,6 +71,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .merge(crate::remote_worker::router())
         .merge(crate::edits::router())
+        .merge(crate::rejected_trash::router())
         .merge(crate::imports::router())
         .merge(crate::offline_rebuild::router(state.clone()))
         .route("/libraries/{library}/assets", get(assets))
@@ -297,8 +298,11 @@ async fn patch_asset(
 ) -> ApiResult {
     let id = asset_id(&id)?;
     Ok(Json(
-        blocking(move || signed_asset(&state, state.store.patch_asset(&library, &id, &patch)?))
-            .await?,
+        blocking(move || {
+            let _guard = state.jobs.directory_mutation.read().unwrap();
+            signed_asset(&state, state.store.patch_asset(&library, &id, &patch)?)
+        })
+        .await?,
     )
     .into_response())
 }
@@ -310,8 +314,11 @@ async fn set_trashed(
 ) -> ApiResult {
     let id = asset_id(&id)?;
     Ok(Json(
-        blocking(move || signed_asset(&state, state.store.set_trashed(&library, &id, trashed)?))
-            .await?,
+        blocking(move || {
+            let _guard = state.jobs.directory_mutation.read().unwrap();
+            signed_asset(&state, state.store.set_trashed(&library, &id, trashed)?)
+        })
+        .await?,
     )
     .into_response())
 }

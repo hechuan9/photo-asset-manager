@@ -7,6 +7,26 @@ private let assetJSON = """
 """
 
 struct KeepsAPITests {
+    @Test func rejectedTrashUsesPreviewIdentityAndNumericConfirmation() async throws {
+        let id = UUID()
+        let fixture = Fixture { request in
+            let preview = request.url!.path.hasSuffix("/preview")
+            #expect(request.url!.path == "/api/libraries/library/rejected-trash/" + (preview ? "preview" : id.uuidString.lowercased()))
+            if request.httpMethod == "POST" && !preview {
+                let body = try JSONSerialization.jsonObject(with: request.bodyData) as! [String: Int]
+                #expect(body == ["confirmationCount": 2])
+            }
+            return (preview ? 200 : 202, """
+            {"id":"\(id)","count":2,"status":"\(preview ? "draft" : "pending")","phase":"waiting","completedFiles":0,"totalFiles":3,"createdAt":1,"updatedAt":1}
+            """)
+        }
+        let preview = try await fixture.client.previewRejectedTrash()
+        #expect(preview.count == 2)
+        #expect(try await fixture.client.submitRejectedTrash(id: preview.id, confirmationCount: 2).id == id)
+        #expect(try await fixture.client.rejectedTrashTask(id: id).totalFiles == 3)
+    }
+
+
     @Test func originalDownloadUsesAuthenticatedVersionRouteAndPreservesExistingDestination() async throws {
         let id = UUID()
         let hash = String(repeating: "a", count: 64)
