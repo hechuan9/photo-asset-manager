@@ -41,10 +41,14 @@ import CryptoKit
         var lines: [String] = []
         var deliveredWhileRunning = false
         _ = try await AIEditingProcess().run(executable: URL(fileURLWithPath: "/bin/sh"),
-            arguments: ["-c", "printf 'first'; sleep 0.2; printf '\\nsecond\\n'; sleep 0.3; touch finished"], home: root, directory: root,
+            arguments: ["-c", "printf 'first'; sleep 0.1; printf '\\nsecond\\n'; while [ ! -f acknowledged ]; do sleep 0.05; done; touch finished"], home: root, directory: root,
             timeout: 5, onEvent: { line in
                 lines.append(line)
-                deliveredWhileRunning = !FileManager.default.fileExists(atPath: root.appendingPathComponent("finished").path)
+                deliveredWhileRunning = deliveredWhileRunning || !FileManager.default.fileExists(atPath: root.appendingPathComponent("finished").path)
+                if line == "second" {
+                    do { try Data().write(to: root.appendingPathComponent("acknowledged")) }
+                    catch { Issue.record("Could not acknowledge streamed event: \(error)") }
+                }
             })
         #expect(lines == ["first", "second"])
         #expect(deliveredWhileRunning)
