@@ -32,7 +32,7 @@ swift test --package-path shared
 swift test --package-path macos
 swift build --package-path macos
 ./macos/scripts/package_app.sh
-open macos/.build/app/Keeps.app
+open "macos/.build/app/Keeps Debug.app"
 ```
 
 iOS Simulator：

@@ -23,6 +23,7 @@ struct DirectoryOutlineView: NSViewRepresentable {
         outline.rowHeight = 30
         outline.indentationPerLevel = 14
         outline.style = .plain
+        outline.draggingDestinationFeedbackStyle = .none
         outline.backgroundColor = NSColor(white: 0.17, alpha: 1)
         outline.appearance = NSAppearance(named: .darkAqua)
         outline.allowsEmptySelection = true
@@ -50,6 +51,34 @@ struct DirectoryOutlineView: NSViewRepresentable {
 
     final class DirectoryOutline: NSOutlineView {
         var contextMenuForItem: ((Any) -> NSMenu?)?
+        private(set) var dropTargetRow = -1
+
+        func highlightDropTarget(row: Int) {
+            if dropTargetRow != row {
+                if dropTargetRow >= 0, dropTargetRow < numberOfRows {
+                    (view(atColumn: 0, row: dropTargetRow, makeIfNecessary: false) as? DirectoryCell)?.nameLabel.isDropTarget = false
+                }
+                dropTargetRow = row
+            }
+            if row >= 0 {
+                (view(atColumn: 0, row: row, makeIfNecessary: true) as? DirectoryCell)?.nameLabel.isDropTarget = true
+            }
+        }
+
+        override func draggingExited(_ sender: NSDraggingInfo?) {
+            super.draggingExited(sender)
+            highlightDropTarget(row: -1)
+        }
+
+        override func draggingEnded(_ sender: NSDraggingInfo) {
+            super.draggingEnded(sender)
+            highlightDropTarget(row: -1)
+        }
+
+        override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+            defer { highlightDropTarget(row: -1) }
+            return super.performDragOperation(sender)
+        }
 
         override func keyDown(with event: NSEvent) {
             if event.charactersIgnoringModifiers?.lowercased() == "a", event.modifierFlags.contains(.control) {
@@ -88,8 +117,17 @@ struct DirectoryOutlineView: NSViewRepresentable {
     }
 
     final class DirectoryNameLabel: NSTextField {
-        // 目录展开与列宽变化时，使用 AppKit 的标准绘制路径，避免文本图层保留空白内容。
-        override func draw(_ dirtyRect: NSRect) { super.draw(dirtyRect) }
+        var isDropTarget = false { didSet { needsDisplay = true } }
+
+        override func draw(_ dirtyRect: NSRect) {
+            if isDropTarget {
+                let width = min(bounds.width, intrinsicContentSize.width + 4)
+                let rect = NSRect(x: bounds.minX, y: bounds.minY, width: width, height: bounds.height)
+                NSColor(calibratedRed: 0.20, green: 0.45, blue: 0.80, alpha: 1).setFill()
+                NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3).fill()
+            }
+            super.draw(dirtyRect)
+        }
     }
 
     final class DirectoryCell: NSTableCellView {
@@ -277,8 +315,16 @@ struct DirectoryOutlineView: NSViewRepresentable {
         }
 
         func outlineView(_ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo, proposedItem item: Any?, proposedChildIndex index: Int) -> NSDragOperation {
-            guard index == NSOutlineViewDropOnItemIndex else { return [] }
-            return draggedPhotos(info, target: item) != nil || draggedPath(info, target: item) != nil ? .move : []
+            let row = outlineView.row(at: outlineView.convert(info.draggingLocation, from: nil))
+            guard row >= 0, let target = outlineView.item(atRow: row) as? Node,
+                  draggedPhotos(info, target: target) != nil || draggedPath(info, target: target) != nil else {
+                (outlineView as? DirectoryOutline)?.highlightDropTarget(row: -1)
+                return []
+            }
+            (outlineView as? DirectoryOutline)?.highlightDropTarget(row: row)
+            // 整行都表示移入该目录，避免行边缘被 AppKit 解释为插入相邻目录之间。
+            outlineView.setDropItem(target, dropChildIndex: NSOutlineViewDropOnItemIndex)
+            return .move
         }
 
         func outlineView(_ outlineView: NSOutlineView, acceptDrop info: NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {

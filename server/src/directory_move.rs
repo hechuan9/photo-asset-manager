@@ -214,6 +214,7 @@ pub(crate) fn recover_locked(jobs: &Jobs, store: &Store) -> Result<()> {
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut files = std::collections::BTreeMap::<String, Vec<crate::asset_move::FileMove>>::new();
     for (id, lib, source, destination) in pending {
         match (
             Path::new(&source).try_exists()?,
@@ -225,11 +226,24 @@ pub(crate) fn recover_locked(jobs: &Jobs, store: &Store) -> Result<()> {
                     .unwrap()
                     .execute("DELETE FROM directory_moves WHERE id=?1", [id])?;
             }
+            (false, true) if Path::new(&destination).is_file() => {
+                files
+                    .entry(lib)
+                    .or_default()
+                    .push(crate::asset_move::FileMove {
+                        id,
+                        source,
+                        destination,
+                    });
+            }
             (false, true) => reconcile(jobs, store, &id, &lib, &source, &destination)?,
             _ => anyhow::bail!(
                 "Cannot recover directory move {id}: inspect {source} and {destination}"
             ),
         }
+    }
+    for (library, moves) in files {
+        crate::asset_move::reconcile_files(jobs, store, &library, &moves)?;
     }
     Ok(())
 }

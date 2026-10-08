@@ -291,7 +291,7 @@ public struct KeepsDirectoryMoveTask: Decodable, Sendable {
 public struct KeepsPhotoMoveTask: Decodable, Sendable {
     public var id: UUID
     public var assetIDs: [UUID]
-    public var sourcePath: String
+    public var sourcePath: String?
     public var parentPath: String
     public var status: String
     public var phase: String

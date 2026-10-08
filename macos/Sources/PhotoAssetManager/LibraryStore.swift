@@ -60,6 +60,7 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var isMutating = false
     @Published private(set) var isCheckingRevision = false
     var hasLoadedResults: Bool { displayedPage != nil }
+    var hasCurrentPhotoResults: Bool { displayedPage != nil && displayedQuery == effectiveQuery }
     @Published private(set) var configuration: KeepsConfiguration?
     @Published var lastError: String?
     @Published private(set) var isCheckingConnection = false

@@ -5,16 +5,16 @@ struct BrandingTests {
     @Test func macOSBundleUsesKeepsBranding() throws {
         let plist = try propertyList(at: repositoryRoot().appendingPathComponent("macos/Sources/PhotoAssetManager/Resources/Info.plist"))
 
-        #expect(plist["CFBundleName"] as? String == "Keeps")
-        #expect(plist["CFBundleIdentifier"] as? String == "local.keeps")
-        #expect(plist["CFBundleExecutable"] as? String == "Keeps")
+        #expect(plist["CFBundleName"] as? String == "$(PRODUCT_NAME)")
+        #expect(plist["CFBundleIdentifier"] as? String == "$(PRODUCT_BUNDLE_IDENTIFIER)")
+        #expect(plist["CFBundleExecutable"] as? String == "$(EXECUTABLE_NAME)")
     }
 
     @Test func packageScriptsUseKeepsAppOutput() throws {
         let packageScript = try String(contentsOf: repositoryRoot().appendingPathComponent("macos/scripts/package_app.sh"), encoding: .utf8)
         let iosPackageScript = try String(contentsOf: repositoryRoot().appendingPathComponent("ios/scripts/package_app.sh"), encoding: .utf8)
 
-        #expect(packageScript.contains(".build/app/Keeps.app"))
+        #expect(packageScript.contains(".build/app/Keeps Debug.app"))
         #expect(packageScript.contains("\"$MACOS_DIR/Keeps\""))
         #expect(iosPackageScript.contains("testflight.sh"))
         #expect(iosPackageScript.contains("ios archive"))

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_DIR="$ROOT_DIR/.build/app/Keeps.app"
+APP_DIR="$ROOT_DIR/.build/app/Keeps Debug.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -19,6 +19,9 @@ cp "$ROOT_DIR/Sources/PhotoAssetManager/Resources/Info.plist" "$CONTENTS_DIR/Inf
 MARKETING_VERSION="$(awk '$1 == "MARKETING_VERSION" { print $3 }' "$ROOT_DIR/Version.xcconfig")"
 BUILD_NUMBER="$(awk '$1 == "CURRENT_PROJECT_VERSION" { print $3 }' "$ROOT_DIR/Version.xcconfig")"
 [[ -n "$MARKETING_VERSION" && -n "$BUILD_NUMBER" ]]
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier local.keeps.debug" "$CONTENTS_DIR/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleName Keeps Debug" "$CONTENTS_DIR/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable Keeps" "$CONTENTS_DIR/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MARKETING_VERSION" "$CONTENTS_DIR/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$CONTENTS_DIR/Info.plist"
 cp "$ROOT_DIR/Sources/PhotoAssetManager/Resources/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"

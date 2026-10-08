@@ -4,6 +4,15 @@ import KeepsAPI
 @testable import PhotoAssetManager
 
 @MainActor struct PhotoDragPayloadTests {
+    @Test func photoDragTypeIsDeclaredAsDataForAppKitBridge() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf: root.appendingPathComponent("Sources/PhotoAssetManager/Resources/Info.plist"))
+        let plist = try #require(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        let declarations = plist["UTExportedTypeDeclarations"] as? [[String: Any]] ?? []
+        let declaration = try #require(declarations.first { $0["UTTypeIdentifier"] as? String == PhotoDragPayload.pasteboardType })
+        #expect((declaration["UTTypeConformsTo"] as? [String] ?? []).contains("public.data"))
+    }
+
     @Test func draggingSelectedAssetIncludesGroupAndUnselectedAssetIncludesOnlyItself() async throws {
         let store = try await loadedStore()
         let ids = store.assets.map(\.id)
@@ -15,7 +24,7 @@ import KeepsAPI
         #expect(otherPayload.assetIDs == [ids[1]])
         #expect(store.canMovePhotos(selectedPayload, to: "/target"))
         #expect(!store.canMovePhotos(selectedPayload, to: "/source"))
-        #expect(store.photoDragProvider(for: ids[0]).registeredTypeIdentifiers.contains(PhotoDragPayload.pasteboardType))
+        #expect(store.photoDragItem(for: ids[0])?.types.contains(.init(PhotoDragPayload.pasteboardType)) == true)
     }
 
     @Test func staleDirectoryQueryAndConnectionPayloadsAreRejected() async throws {
@@ -37,7 +46,7 @@ import KeepsAPI
         #expect(!store.canMovePhotos(staleLibrary, to: "/target"))
     }
 
-    @Test func selectAllPaginationAndNoDirectoryDisableDragging() async throws {
+    @Test func selectAllPaginationBlocksDraggingUntilSelectionFinishes() async throws {
         let store = try await loadedStore(paginated: true)
         let id = store.assets[0].id
         let payload = try #require(store.photoDragPayload(for: id))
@@ -48,7 +57,44 @@ import KeepsAPI
         try await waitUntil { !store.isLoading }
         #expect(store.photoDragPayload(for: id)?.assetIDs.count == 5)
         store.query.directory = nil
-        #expect(store.photoDragPayload(for: id) == nil)
+        store.refresh()
+        try await waitUntil { !store.isLoading }
+        let allPhotos = try #require(store.photoDragPayload(for: id))
+        #expect(allPhotos.sourcePath == nil)
+        #expect(store.canMovePhotos(allPhotos, to: "/target"))
+    }
+
+    @Test func startingDragSelectsUnselectedPhotoAndPreservesSelectedGroup() async throws {
+        let store = try await loadedStore()
+        let ids = store.assets.map(\.id)
+        store.query.directory = nil
+        store.refresh()
+        try await waitUntil { !store.isLoading }
+        _ = store.photoDragItem(for: ids[0])
+        #expect(store.selectedIDs == [ids[0]])
+        store.select(ids[1], extending: true)
+        _ = store.photoDragItem(for: ids[0])
+        #expect(store.selectedIDs == [ids[0], ids[1]])
+        _ = store.photoDragItem(for: ids[2])
+        #expect(store.selectedIDs == [ids[2]])
+        #expect(store.photoDragItem(for: ids[2])?.types.contains(.init(PhotoDragPayload.pasteboardType)) == true)
+        #expect(!store.isDirectoryOperationBlocking)
+    }
+
+    @Test func backgroundRefreshKeepsSelectedPhotosDraggable() async throws {
+        let store = try await loadedStore()
+        let ids = store.assets.map(\.id)
+        store.select(ids[0])
+        store.select(ids[1], extending: true)
+        store.refresh()
+        #expect(store.isLoading)
+        #expect(store.isCheckingRevision)
+        let item = try #require(store.photoDragItem(for: ids[0]))
+        let data = try #require(item.data(forType: .init(PhotoDragPayload.pasteboardType)))
+        let payload = try JSONDecoder().decode(PhotoDragPayload.self, from: data)
+        #expect(Set(payload.assetIDs) == [ids[0], ids[1]])
+        #expect(store.canMovePhotos(payload, to: "/target"))
+        try await waitUntil { !store.isLoading }
     }
 
     private func loadedStore(paginated: Bool = false) async throws -> LibraryStore {

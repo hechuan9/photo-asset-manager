@@ -1,4 +1,4 @@
-//! Durable NAS file moves scoped to the directory the user is browsing.
+//! Durable NAS file moves for selected assets, optionally scoped to a directory.
 use crate::{
     directory_move,
     jobs::Jobs,
@@ -32,7 +32,7 @@ pub struct Request {
     pub request_id: String,
     #[serde(rename = "assetIDs")]
     pub asset_ids: Vec<String>,
-    pub source_path: String,
+    pub source_path: Option<String>,
     pub parent_path: String,
 }
 #[derive(Debug, Serialize)]
@@ -41,7 +41,7 @@ pub struct Task {
     pub id: String,
     #[serde(rename = "assetIDs")]
     pub asset_ids: Vec<String>,
-    pub source_path: String,
+    pub source_path: Option<String>,
     pub parent_path: String,
     pub status: String,
     pub phase: String,
@@ -90,12 +90,18 @@ pub(crate) fn submit(jobs: &Jobs, library: &str, mut request: Request) -> Result
         error(422, "Select at least one photo")
     );
     ensure!(
-        crate::revisions::normalize_directory(&request.source_path)? == request.source_path
+        request
+            .source_path
+            .as_ref()
+            .map(|path| crate::revisions::normalize_directory(path)
+                .map(|normalized| normalized == *path))
+            .transpose()?
+            .unwrap_or(true)
             && crate::revisions::normalize_directory(&request.parent_path)? == request.parent_path,
         error(422, "Paths must be canonical and absolute")
     );
     ensure!(
-        request.source_path != request.parent_path,
+        request.source_path.as_ref() != Some(&request.parent_path),
         error(422, "Choose a different destination folder")
     );
     let encoded = serde_json::to_string(&request)?;
@@ -116,10 +122,10 @@ pub(crate) fn submit(jobs: &Jobs, library: &str, mut request: Request) -> Result
     get(jobs, library, &request.request_id)
 }
 #[derive(Debug, Deserialize, Serialize)]
-struct FileMove {
-    id: String,
-    source: String,
-    destination: String,
+pub(crate) struct FileMove {
+    pub(crate) id: String,
+    pub(crate) source: String,
+    pub(crate) destination: String,
 }
 fn transition(jobs: &Jobs, id: &str, phase: &str, message: Option<&str>) -> Result<()> {
     let status = match phase {
@@ -130,14 +136,22 @@ fn transition(jobs: &Jobs, id: &str, phase: &str, message: Option<&str>) -> Resu
     jobs.trash_db.lock().unwrap().execute("UPDATE asset_move_tasks SET status=?2,phase=?3,error=?4,updated_at=unixepoch(),finished_at=CASE WHEN ?2 IN ('completed','failed') THEN unixepoch() ELSE NULL END WHERE id=?1",params![id,status,phase,message])?;
     Ok(())
 }
-fn validate_directories(jobs: &Jobs, library: &str, request: &Request) -> Result<()> {
+fn validate_tracked_directories(
+    jobs: &Jobs,
+    library: &str,
+    paths: impl IntoIterator<Item = impl AsRef<Path>>,
+) -> Result<()> {
     let folders = jobs.folders()?;
-    for path in [&request.source_path, &request.parent_path] {
+    let paths: BTreeSet<PathBuf> = paths
+        .into_iter()
+        .map(|path| path.as_ref().to_path_buf())
+        .collect();
+    for path in paths {
         let canonical = jobs
-            .validate_path(Path::new(path))
+            .validate_path(&path)
             .map_err(|e| error(422, format!("{e:#}")))?;
         ensure!(
-            canonical == Path::new(path),
+            canonical == path,
             error(422, "Paths must be canonical and absolute")
         );
         ensure!(
@@ -153,6 +167,17 @@ fn validate_directories(jobs: &Jobs, library: &str, request: &Request) -> Result
             error(409, "Directory overlaps another library")
         );
     }
+    Ok(())
+}
+fn validate_directories(jobs: &Jobs, library: &str, request: &Request) -> Result<()> {
+    validate_tracked_directories(
+        jobs,
+        library,
+        request
+            .source_path
+            .iter()
+            .chain(std::iter::once(&request.parent_path)),
+    )?;
     let active_trash: bool = jobs.trash_db.lock().unwrap().query_row(
         "SELECT EXISTS(SELECT 1 FROM directory_trash_tasks WHERE status IN ('pending','running'))",
         [],
@@ -177,7 +202,7 @@ fn plan(jobs: &Jobs, store: &Store, library: &str, request: &Request) -> Result<
     let mut paths = BTreeSet::<PathBuf>::new();
     {
         let db = store.lock()?;
-        let mut query=db.prepare("SELECT path FROM (SELECT path,asset_id FROM catalog_paths WHERE library_id=?1 UNION SELECT path,asset_id FROM catalog_version_paths WHERE library_id=?1 AND available=1) p WHERE asset_id=?2 AND NOT EXISTS(SELECT 1 FROM catalog_deprecated_files d WHERE d.library_id=?1 AND d.path=p.path)")?;
+        let mut query=db.prepare("SELECT path FROM (SELECT path FROM catalog_paths WHERE library_id=?1 AND asset_id=?2 UNION SELECT path FROM catalog_version_paths WHERE library_id=?1 AND asset_id=?2 AND available=1) p WHERE NOT EXISTS(SELECT 1 FROM catalog_deprecated_files d WHERE d.library_id=?1 AND d.path=p.path)")?;
         for asset in &request.asset_ids {
             let active:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_assets WHERE library_id=?1 AND id=?2 AND trashed=0)",params![library,asset],|r|r.get(0))?;
             ensure!(active, error(409, "Photo is missing or in the recycle bin"));
@@ -187,7 +212,12 @@ fn plan(jobs: &Jobs, store: &Store, library: &str, request: &Request) -> Result<
             let scoped: Vec<PathBuf> = candidates
                 .into_iter()
                 .map(PathBuf::from)
-                .filter(|p| p.starts_with(&request.source_path))
+                .filter(|p| {
+                    request
+                        .source_path
+                        .as_ref()
+                        .is_none_or(|source| p.starts_with(source))
+                })
                 .collect();
             ensure!(
                 !scoped.is_empty(),
@@ -199,12 +229,14 @@ fn plan(jobs: &Jobs, store: &Store, library: &str, request: &Request) -> Result<
             paths.extend(scoped);
         }
     }
+    validate_tracked_directories(jobs, library, paths.iter().filter_map(|path| path.parent()))?;
     let originals = paths.clone();
     for path in &originals {
         for sidecar in crate::media::sidecars(path)? {
             paths.insert(sidecar.canonicalize()?);
         }
     }
+    validate_tracked_directories(jobs, library, paths.iter().filter_map(|path| path.parent()))?;
     // A shared stem XMP must stay with every photo that depends on it.
     let sidecars: HashSet<_> = paths
         .iter()
@@ -258,7 +290,6 @@ fn plan(jobs: &Jobs, store: &Store, library: &str, request: &Request) -> Result<
         !result.is_empty(),
         error(409, "Selected photos are already in the destination")
     );
-    preflight(jobs, store, library, &result)?;
     Ok(result)
 }
 fn preflight(jobs: &Jobs, store: &Store, library: &str, plan: &[FileMove]) -> Result<()> {
@@ -304,20 +335,127 @@ fn preflight(jobs: &Jobs, store: &Store, library: &str, plan: &[FileMove]) -> Re
             error(422, "Cross-filesystem photo moves are unsupported")
         );
     }
-    let mut db = store.lock()?;
-    let tx = db.transaction()?;
+    validate_tracked_directories(
+        jobs,
+        library,
+        pending
+            .iter()
+            .filter_map(|item| Path::new(&item.source).parent()),
+    )?;
+    let db = store.lock()?;
     for item in &pending {
-        directory_move::catalog(&tx, library, &item.source, &item.destination)?;
+        for table in [
+            "catalog_paths",
+            "catalog_version_paths",
+            "catalog_deprecated_files",
+        ] {
+            let conflict: bool = db.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE library_id=?1 AND path=?2)"),
+                params![library, item.destination],
+                |r| r.get(0),
+            )?;
+            ensure!(
+                !conflict,
+                error(
+                    409,
+                    format!("Destination is already indexed: {}", item.destination)
+                )
+            );
+        }
     }
-    tx.rollback()?;
-    let mut db = jobs.db.lock().unwrap();
-    let tx = db.transaction()?;
+    drop(db);
+    let db = jobs.db.lock().unwrap();
     for item in &pending {
-        directory_move::tracking(&tx, library, &item.source, &item.destination)?;
+        let conflict: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM files WHERE path=?2 AND folder_id IN (SELECT id FROM folders WHERE library_id=?1))", params![library,item.destination], |r| r.get(0))?;
+        ensure!(
+            !conflict,
+            error(
+                409,
+                format!("Destination is already tracked: {}", item.destination)
+            )
+        );
     }
-    tx.rollback()?;
     Ok(())
 }
+
+const RELOCATE_CACHE: &str = "UPDATE media_cache SET standard=json_set(standard,'$.path',(SELECT destination FROM photo_move_paths WHERE source=json_extract(standard,'$.path'))) WHERE library_id=?1 AND asset_id IN (SELECT asset_id FROM photo_move_assets) AND json_extract(standard,'$.path') IN (SELECT source FROM photo_move_paths)";
+
+fn mapping(db: &Connection, moves: &[FileMove]) -> Result<()> {
+    db.execute_batch("CREATE TEMP TABLE photo_move_paths(id TEXT NOT NULL,source TEXT PRIMARY KEY,destination TEXT NOT NULL UNIQUE)")?;
+    let mut insert = db.prepare("INSERT INTO photo_move_paths VALUES(?1,?2,?3)")?;
+    for item in moves {
+        insert.execute(params![item.id, item.source, item.destination])?;
+    }
+    Ok(())
+}
+
+pub(crate) fn reconcile_files(
+    jobs: &Jobs,
+    store: &Store,
+    library: &str,
+    moves: &[FileMove],
+) -> Result<()> {
+    if moves.is_empty() {
+        return Ok(());
+    }
+    let parents: BTreeSet<_> = moves
+        .iter()
+        .flat_map(|m| {
+            [
+                Path::new(&m.source).parent(),
+                Path::new(&m.destination).parent(),
+            ]
+        })
+        .flatten()
+        .collect();
+    for parent in parents {
+        fs::File::open(parent)?
+            .sync_all()
+            .with_context(|| format!("sync moved file parent {}", parent.display()))?;
+    }
+    {
+        let mut db = store.lock()?;
+        let tx = db.transaction()?;
+        mapping(&tx, moves)?;
+        // Restrict cache lookup to the moved identities, including destination paths on replay.
+        tx.execute_batch("CREATE TEMP TABLE photo_move_assets(asset_id TEXT PRIMARY KEY)")?;
+        for table in ["catalog_paths", "catalog_version_paths"] {
+            tx.execute(&format!("INSERT OR IGNORE INTO photo_move_assets SELECT asset_id FROM {table} WHERE library_id=?1 AND path IN (SELECT source FROM photo_move_paths UNION ALL SELECT destination FROM photo_move_paths)"), [library])?;
+        }
+        tx.execute(RELOCATE_CACHE, [library])?;
+        for (table, column) in [
+            ("catalog_paths", "path"),
+            ("catalog_version_paths", "path"),
+            ("catalog_deprecated_files", "path"),
+            ("catalog_deprecated_files", "retained_path"),
+            ("remote_cache_tasks", "input_path"),
+        ] {
+            tx.execute(&format!("UPDATE {table} SET {column}=(SELECT destination FROM photo_move_paths WHERE source={table}.{column}) WHERE library_id=?1 AND {column} IN (SELECT source FROM photo_move_paths)"), [library])?;
+        }
+        tx.execute("INSERT OR IGNORE INTO catalog_revision_updates(library_id,path,owner,last_changed_at) SELECT r.library_id,m.destination,r.owner,r.last_changed_at FROM photo_move_paths m JOIN catalog_revision_updates r ON r.library_id=?1 AND r.path=m.source", [library])?;
+        crate::revisions::flush(&tx)?;
+        tx.execute_batch("DROP TABLE photo_move_assets; DROP TABLE photo_move_paths")?;
+        tx.commit()?;
+    }
+    let mut db = jobs.db.lock().unwrap();
+    let tx = db.transaction()?;
+    mapping(&tx, moves)?;
+    tx.execute("UPDATE files SET path=(SELECT destination FROM photo_move_paths WHERE source=files.path),folder_id=(SELECT id FROM folders WHERE library_id=?1 AND active=1 AND ((SELECT destination FROM photo_move_paths WHERE source=files.path)>=path || '/' AND (SELECT destination FROM photo_move_paths WHERE source=files.path)<path || '0') ORDER BY length(path) DESC LIMIT 1) WHERE folder_id IN (SELECT id FROM folders WHERE library_id=?1) AND path IN (SELECT source FROM photo_move_paths)", [library])?;
+    for column in ["scope_path", "current_path"] {
+        tx.execute(&format!("UPDATE jobs SET {column}=(SELECT destination FROM photo_move_paths WHERE source=jobs.{column}) WHERE folder_id IN (SELECT id FROM folders WHERE library_id=?1) AND {column} IN (SELECT source FROM photo_move_paths)"), [library])?;
+    }
+    tx.execute("UPDATE jobs SET checkpoint=NULL WHERE folder_id IN (SELECT id FROM folders WHERE library_id=?1) AND status IN ('pending','running')", [library])?;
+    tx.execute("UPDATE worker_photo_files SET path=(SELECT destination FROM photo_move_paths WHERE source=worker_photo_files.path) WHERE path IN (SELECT source FROM photo_move_paths)", [])?;
+    tx.execute("UPDATE worker_activity SET current_photo=(SELECT destination FROM photo_move_paths WHERE source=worker_activity.current_photo) WHERE library_id=?1 AND current_photo IN (SELECT source FROM photo_move_paths)", [library])?;
+    tx.execute(
+        "UPDATE directory_moves SET completed=1 WHERE id IN (SELECT id FROM photo_move_paths)",
+        [],
+    )?;
+    tx.execute_batch("DROP TABLE photo_move_paths")?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn execute(jobs: &Jobs, store: &Store, library: &str, request: &Request) -> Result<()> {
     let _guard = jobs.directory_mutation.write().unwrap();
     transition(jobs, &request.request_id, "validating", None)?;
@@ -341,41 +479,60 @@ fn execute(jobs: &Jobs, store: &Store, library: &str, request: &Request) -> Resu
     };
     preflight(jobs, store, library, &moves)?;
     transition(jobs, &request.request_id, "moving", None)?;
-    for item in moves {
-        let completed: bool = jobs.db.lock().unwrap().query_row(
-            "SELECT EXISTS(SELECT 1 FROM directory_moves WHERE id=?1 AND completed=1)",
-            [&item.id],
-            |r| r.get(0),
-        )?;
-        if completed {
-            continue;
-        }
-        jobs.db.lock().unwrap().execute(
-            "INSERT INTO directory_moves(id,library_id,source,destination) VALUES(?1,?2,?3,?4)",
-            params![item.id, library, item.source, item.destination],
-        )?;
-        if let Err(failure) =
-            directory_move::rename_exclusive(Path::new(&item.source), Path::new(&item.destination))
-        {
-            jobs.db
-                .lock()
-                .unwrap()
-                .execute("DELETE FROM directory_moves WHERE id=?1", [&item.id])?;
-            return Err(failure)
-                .with_context(|| format!("move {} to {}", item.source, item.destination));
-        }
-        directory_move::reconcile(
-            jobs,
-            store,
-            &item.id,
-            library,
-            &item.source,
-            &item.destination,
-        )
-        .context("Photo moved on NAS; index reconciliation will resume on retry or restart")?;
-    }
-    Ok(())
+    move_files(jobs, store, library, &request.request_id, moves)
 }
+
+fn move_files(
+    jobs: &Jobs,
+    store: &Store,
+    library: &str,
+    task: &str,
+    moves: Vec<FileMove>,
+) -> Result<()> {
+    let mut moved = Vec::new();
+    let movement = (|| -> Result<()> {
+        for item in moves {
+            let completed: bool = jobs.db.lock().unwrap().query_row(
+                "SELECT EXISTS(SELECT 1 FROM directory_moves WHERE id=?1 AND completed=1)",
+                [&item.id],
+                |r| r.get(0),
+            )?;
+            if completed {
+                continue;
+            }
+            jobs.db.lock().unwrap().execute(
+                "INSERT INTO directory_moves(id,library_id,source,destination) VALUES(?1,?2,?3,?4)",
+                params![item.id, library, item.source, item.destination],
+            )?;
+            if let Err(failure) = directory_move::rename_exclusive(
+                Path::new(&item.source),
+                Path::new(&item.destination),
+            ) {
+                jobs.db
+                    .lock()
+                    .unwrap()
+                    .execute("DELETE FROM directory_moves WHERE id=?1", [&item.id])?;
+                return Err(failure)
+                    .with_context(|| format!("move {} to {}", item.source, item.destination));
+            }
+            moved.push(item);
+        }
+        Ok(())
+    })();
+    transition(jobs, task, "catalog", None)?;
+    let reconciliation = reconcile_files(jobs, store, library, &moved)
+        .context("Photos moved on NAS; index reconciliation will resume on retry or restart");
+    if let Err(failure) = movement {
+        return match reconciliation {
+            Ok(()) => Err(failure),
+            Err(recovery) => {
+                Err(failure).context(format!("Index reconciliation also failed: {recovery:#}"))
+            }
+        };
+    }
+    reconciliation
+}
+
 pub(crate) fn process_next(jobs: &Jobs, store: &Store) -> Result<bool> {
     let next:Option<(String,String)>=jobs.trash_db.lock().unwrap().query_row("SELECT library_id,request FROM asset_move_tasks WHERE status IN ('pending','running') ORDER BY created_at,id LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     let Some((library, encoded)) = next else {
@@ -412,7 +569,7 @@ mod tests {
         let request = Request {
             request_id: uuid::Uuid::new_v4().to_string(),
             asset_ids: vec![],
-            source_path: jobs.root().join("source").to_str().unwrap().into(),
+            source_path: Some(jobs.root().join("source").to_str().unwrap().into()),
             parent_path: jobs.root().join("target").to_str().unwrap().into(),
         };
         Ok((tmp, jobs, store, request))
@@ -435,9 +592,241 @@ mod tests {
         )?)
     }
     #[test]
+    fn optional_source_preserves_old_requests_and_accepts_omission() -> Result<()> {
+        let (_tmp, _jobs, _store, request) = setup()?;
+        let mut json = serde_json::to_value(&request)?;
+        assert_eq!(serde_json::from_value::<Request>(json.clone())?, request);
+        json.as_object_mut().unwrap().remove("sourcePath");
+        assert!(
+            serde_json::from_value::<Request>(json)?
+                .source_path
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn all_photos_moves_multiple_sources_and_leaves_existing_target_alias() -> Result<()> {
+        let (_tmp, jobs, store, mut request) = setup()?;
+        let first = jobs.root().join("source/a.jpg");
+        let second = jobs.root().join("source/nested/b.jpg");
+        let existing = jobs.root().join("target/existing.jpg");
+        request.asset_ids = vec![ingest(&store, &first, "a")?, ingest(&store, &second, "b")?];
+        ingest(&store, &existing, "a")?;
+        fs::write(first.with_extension("xmp"), b"sidecar")?;
+        request.source_path = None;
+        submit(&jobs, "lib", request.clone())?;
+        process_next(&jobs, &store)?;
+        let task = get(&jobs, "lib", &request.request_id)?;
+        assert_eq!(task.status, "completed", "{task:?}");
+        assert!(task.source_path.is_none());
+        assert!(existing.exists());
+        assert!(jobs.root().join("target/a.jpg").exists());
+        assert!(jobs.root().join("target/a.xmp").exists());
+        assert!(jobs.root().join("target/b.jpg").exists());
+        assert!(!first.exists() && !second.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn all_photos_rejects_untracked_and_other_library_sources() -> Result<()> {
+        for other_library in [false, true] {
+            let (_tmp, jobs, store, mut request) = setup()?;
+            jobs.db
+                .lock()
+                .unwrap()
+                .execute("UPDATE folders SET active=0", [])?;
+            jobs.add_folder("lib", &request.parent_path)?;
+            let source = jobs.root().join("source/photo.jpg");
+            request.asset_ids = vec![ingest(&store, &source, "photo")?];
+            if other_library {
+                jobs.add_folder("other", source.parent().unwrap().to_str().unwrap())?;
+            }
+            request.source_path = None;
+            submit(&jobs, "lib", request.clone())?;
+            process_next(&jobs, &store)?;
+            let task = get(&jobs, "lib", &request.request_id)?;
+            assert_eq!(task.status, "failed", "{task:?}");
+            assert!(task.error.unwrap().contains("tracked in this library"));
+            assert!(source.exists());
+            assert!(!jobs.root().join("target/photo.jpg").exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn all_photos_rejects_cross_source_filename_collision_before_move() -> Result<()> {
+        let (_tmp, jobs, store, mut request) = setup()?;
+        let first = jobs.root().join("source/a.jpg");
+        let second = jobs.root().join("source/nested/a.jpg");
+        request.asset_ids = vec![ingest(&store, &first, "a")?, ingest(&store, &second, "b")?];
+        request.source_path = None;
+        submit(&jobs, "lib", request.clone())?;
+        process_next(&jobs, &store)?;
+        assert!(
+            get(&jobs, "lib", &request.request_id)?
+                .error
+                .unwrap()
+                .contains("duplicate filenames")
+        );
+        assert!(first.exists() && second.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn planning_does_not_simulate_catalog_writes() -> Result<()> {
+        let (_tmp, jobs, store, mut request) = setup()?;
+        let source = Path::new(request.source_path.as_deref().unwrap()).join("photo.jpg");
+        request.asset_ids = vec![ingest(&store, &source, "planning")?];
+        store.lock()?.execute_batch("CREATE TRIGGER reject_simulated_move BEFORE UPDATE OF path ON catalog_paths BEGIN SELECT RAISE(ABORT,'preflight must be read only'); END")?;
+        assert_eq!(plan(&jobs, &store, "lib", &request)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn batch_preserves_cache_and_publishes_one_revision() -> Result<()> {
+        let (_tmp, jobs, store, mut request) = setup()?;
+        for name in ["a.jpg", "b.jpg"] {
+            let source = Path::new(request.source_path.as_deref().unwrap()).join(name);
+            let id = ingest(&store, &source, name)?;
+            store.lock()?.execute("INSERT INTO media_cache(library_id,asset_id,source_hash,spec,status,thumbnail,standard) VALUES('lib',?1,?2,'spec','ready',?3,?4) ON CONFLICT(library_id,asset_id) DO UPDATE SET thumbnail=excluded.thumbnail,standard=excluded.standard", params![id,name,json!({"objectRef":{"key":"existing-thumbnail"}}).to_string(),json!({"path":source,"other":"preserved"}).to_string()])?;
+            request.asset_ids.push(id);
+        }
+        let before: i64 = store.lock()?.query_row(
+            "SELECT revision FROM catalog_version_revision WHERE library_id='lib'",
+            [],
+            |r| r.get(0),
+        )?;
+        submit(&jobs, "lib", request.clone())?;
+        process_next(&jobs, &store)?;
+        assert_eq!(get(&jobs, "lib", &request.request_id)?.status, "completed");
+        let db = store.lock()?;
+        assert_eq!(
+            db.query_row(
+                "SELECT revision FROM catalog_version_revision WHERE library_id='lib'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?,
+            before + 1
+        );
+        let rows = db
+            .prepare("SELECT standard,thumbnail FROM media_cache WHERE library_id='lib'")?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (standard, thumbnail) in rows {
+            let standard: serde_json::Value = serde_json::from_str(&standard)?;
+            assert!(
+                Path::new(standard["path"].as_str().unwrap()).starts_with(&request.parent_path)
+            );
+            assert_eq!(standard["other"], "preserved");
+            assert!(thumbnail.contains("existing-thumbnail"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_destination_conflict_prevents_all_renames() -> Result<()> {
+        let (_tmp, jobs, store, mut request) = setup()?;
+        let source = Path::new(request.source_path.as_deref().unwrap()).join("photo.jpg");
+        request.asset_ids.push(ingest(&store, &source, "source")?);
+        let destination = Path::new(&request.parent_path).join("photo.jpg");
+        ingest(&store, &destination, "stale")?;
+        fs::rename(&destination, destination.with_extension("backup"))?;
+        submit(&jobs, "lib", request.clone())?;
+        process_next(&jobs, &store)?;
+        assert!(
+            get(&jobs, "lib", &request.request_id)?
+                .error
+                .unwrap()
+                .contains("already indexed")
+        );
+        assert!(source.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn cache_relocation_work_is_independent_of_unrelated_library_size() -> Result<()> {
+        let (_tmp, _jobs, store, _) = setup()?;
+        let db = store.lock()?;
+        db.execute_batch("CREATE TEMP TABLE photo_move_assets(asset_id TEXT PRIMARY KEY); INSERT INTO photo_move_assets VALUES('moved'); WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<128000) INSERT INTO media_cache(library_id,asset_id,source_hash,spec,standard) SELECT 'lib','unrelated-'||i,'hash','spec','{}' FROM n; INSERT INTO media_cache(library_id,asset_id,source_hash,spec,standard) VALUES('lib','moved','hash','spec','{\"path\":\"/source/a.jpg\"}')")?;
+        mapping(
+            &db,
+            &[FileMove {
+                id: "move".into(),
+                source: "/source/a.jpg".into(),
+                destination: "/target/a.jpg".into(),
+            }],
+        )?;
+        let mut statement = db.prepare(RELOCATE_CACHE)?;
+        assert_eq!(statement.execute(["lib"])?, 1);
+        assert!(
+            statement.get_status(rusqlite::StatementStatus::VmStep) < 1000,
+            "cache relocation must seek moved asset IDs rather than scan the library"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_replays_after_catalog_commit_without_losing_cache_path() -> Result<()> {
+        let (_tmp, jobs, store, mut request) = setup()?;
+        let source = Path::new(request.source_path.as_deref().unwrap()).join("photo.jpg");
+        request.asset_ids = vec![ingest(&store, &source, "recover")?];
+        submit(&jobs, "lib", request.clone())?;
+        jobs.db.lock().unwrap().execute_batch("CREATE TRIGGER interrupt_reconcile BEFORE UPDATE OF completed ON directory_moves BEGIN SELECT RAISE(ABORT,'simulate tracking commit failure'); END")?;
+        process_next(&jobs, &store)?;
+        assert_eq!(get(&jobs, "lib", &request.request_id)?.status, "failed");
+        assert!(!source.exists());
+        assert!(Path::new(&request.parent_path).join("photo.jpg").exists());
+        jobs.db
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER interrupt_reconcile")?;
+        directory_move::recover(&jobs, &store)?;
+        submit(&jobs, "lib", request.clone())?;
+        process_next(&jobs, &store)?;
+        assert_eq!(get(&jobs, "lib", &request.request_id)?.status, "completed");
+        directory_move::ensure_reconciled(&jobs)?;
+        Ok(())
+    }
+
+    #[test]
+    fn late_conflict_reconciles_already_moved_files() -> Result<()> {
+        let (_tmp, jobs, store, mut request) = setup()?;
+        for name in ["a.jpg", "b.jpg"] {
+            request.asset_ids.push(ingest(
+                &store,
+                &Path::new(request.source_path.as_deref().unwrap()).join(name),
+                name,
+            )?);
+        }
+        submit(&jobs, "lib", request.clone())?;
+        let moves = plan(&jobs, &store, "lib", &request)?;
+        preflight(&jobs, &store, "lib", &moves)?;
+        fs::write(&moves[1].destination, b"late conflict")?;
+        let first_destination = moves[0].destination.clone();
+        assert!(move_files(&jobs, &store, "lib", &request.request_id, moves).is_err());
+        directory_move::ensure_reconciled(&jobs)?;
+        assert!(
+            Path::new(request.source_path.as_deref().unwrap())
+                .join("b.jpg")
+                .exists()
+        );
+        assert_eq!(
+            fs::read(Path::new(&request.parent_path).join("b.jpg"))?,
+            b"late conflict"
+        );
+        assert!(store.lock()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM catalog_paths WHERE library_id='lib' AND path=?1)",
+            [first_destination],
+            |r| r.get::<_, bool>(0)
+        )?);
+        Ok(())
+    }
+
+    #[test]
     fn moves_scoped_files_sidecars_and_identity_without_other_aliases() -> Result<()> {
         let (_tmp, jobs, store, mut request) = setup()?;
-        let source = Path::new(&request.source_path).join("nested/photo.jpg");
+        let source = Path::new(request.source_path.as_deref().unwrap()).join("nested/photo.jpg");
         let id = ingest(&store, &source, "same")?;
         let outside = jobs.root().join("outside.jpg");
         assert_eq!(ingest(&store, &outside, "same")?, id);
@@ -493,8 +882,8 @@ mod tests {
     #[test]
     fn collision_is_preflighted_before_any_file_moves_and_retry_recovers() -> Result<()> {
         let (_tmp, jobs, store, mut request) = setup()?;
-        let a = Path::new(&request.source_path).join("a.jpg");
-        let b = Path::new(&request.source_path).join("b.jpg");
+        let a = Path::new(request.source_path.as_deref().unwrap()).join("a.jpg");
+        let b = Path::new(request.source_path.as_deref().unwrap()).join("b.jpg");
         request.asset_ids = vec![ingest(&store, &a, "a")?, ingest(&store, &b, "b")?];
         let collision = Path::new(&request.parent_path).join("b.jpg");
         fs::write(&collision, b"existing")?;
@@ -518,8 +907,8 @@ mod tests {
     #[test]
     fn interrupted_batch_resumes_after_one_rename_and_reopen() -> Result<()> {
         let (tmp, jobs, store, mut request) = setup()?;
-        let a = Path::new(&request.source_path).join("a.jpg");
-        let b = Path::new(&request.source_path).join("b.jpg");
+        let a = Path::new(request.source_path.as_deref().unwrap()).join("a.jpg");
+        let b = Path::new(request.source_path.as_deref().unwrap()).join("b.jpg");
         request.asset_ids = vec![ingest(&store, &a, "a")?, ingest(&store, &b, "b")?];
         submit(&jobs, "lib", request.clone())?;
         let moves = plan(&jobs, &store, "lib", &request)?;
@@ -556,7 +945,7 @@ mod tests {
     #[test]
     fn shared_sidecar_and_duplicate_flattened_names_are_rejected() -> Result<()> {
         let (_tmp, jobs, store, mut request) = setup()?;
-        let a = Path::new(&request.source_path).join("a.jpg");
+        let a = Path::new(request.source_path.as_deref().unwrap()).join("a.jpg");
         request.asset_ids = vec![ingest(&store, &a, "a")?];
         fs::write(a.with_extension("raw"), b"unselected")?;
         fs::write(a.with_extension("xmp"), b"shared")?;
@@ -569,7 +958,7 @@ mod tests {
                 .contains("shares an XMP")
         );
         assert!(a.exists() && a.with_extension("xmp").exists());
-        let nested = Path::new(&request.source_path).join("nested/a.jpg");
+        let nested = Path::new(request.source_path.as_deref().unwrap()).join("nested/a.jpg");
         request.asset_ids.push(ingest(&store, &nested, "b")?);
         request
             .asset_ids
@@ -589,9 +978,9 @@ mod tests {
     #[test]
     fn rebinds_file_tracking_to_destination_root() -> Result<()> {
         let (_tmp, jobs, store, mut request) = setup()?;
-        let source_folder = jobs.add_folder("lib", &request.source_path)?;
+        let source_folder = jobs.add_folder("lib", request.source_path.as_deref().unwrap())?;
         let target_folder = jobs.add_folder("lib", &request.parent_path)?;
-        let source = Path::new(&request.source_path).join("photo.jpg");
+        let source = Path::new(request.source_path.as_deref().unwrap()).join("photo.jpg");
         let id = ingest(&store, &source, "tracking")?;
         jobs.record_file(
             &source_folder.id,

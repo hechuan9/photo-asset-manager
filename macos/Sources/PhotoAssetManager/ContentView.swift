@@ -239,36 +239,38 @@ struct ContentView: View {
     }
 
     private func galleryTile(_ asset: KeepsAsset, height: CGFloat) -> some View {
-        Button {
-            galleryFocused = true
-            let modifiers = NSEvent.modifierFlags
-            library.select(asset.id, extending: modifiers.contains(.command) || modifiers.contains(.control),
-                           range: modifiers.contains(.shift))
-        } label: {
-            RemotePreview(asset: asset)
-                .frame(width: height * JustifiedAssetGridLayout.aspectRatio(asset.gridPreview), height: height)
-                .background(WorkspaceStyle.tile)
-                .overlay(alignment: .bottomLeading) {
-                    if asset.rating > 0 || asset.flagState != "unflagged" {
-                        HStack(spacing: 5) {
-                            if asset.flagState == "picked" { Image(systemName: "flag.fill") }
-                            if asset.flagState == "rejected" { Image(systemName: "xmark") }
-                            if asset.rating > 0 { Text(String(repeating: "★", count: max(0, min(asset.rating, 5)))) }
-                        }.font(.system(size: 10)).padding(5).background(.black.opacity(0.65)).padding(6)
-                    }
+        RemotePreview(asset: asset)
+            .frame(width: height * JustifiedAssetGridLayout.aspectRatio(asset.gridPreview), height: height)
+            .background(WorkspaceStyle.tile)
+            .overlay(alignment: .bottomLeading) {
+                if asset.rating > 0 || asset.flagState != "unflagged" {
+                    HStack(spacing: 5) {
+                        if asset.flagState == "picked" { Image(systemName: "flag.fill") }
+                        if asset.flagState == "rejected" { Image(systemName: "xmark") }
+                        if asset.rating > 0 { Text(String(repeating: "★", count: max(0, min(asset.rating, 5)))) }
+                    }.font(.system(size: 10)).padding(5).background(.black.opacity(0.65)).padding(6)
                 }
-                .overlay {
-                    Rectangle().strokeBorder(library.selectedIDs.contains(asset.id) ? WorkspaceStyle.accent : .clear, lineWidth: 2)
+            }
+            .overlay {
+                Rectangle().strokeBorder(library.selectedIDs.contains(asset.id) ? WorkspaceStyle.accent : .clear, lineWidth: 2)
+            }
+            .contentShape(Rectangle())
+            .overlay {
+                PhotoDragSource(item: { library.photoDragItem(for: asset.id) }) { modifiers in
+                    galleryFocused = true
+                    library.select(asset.id, extending: modifiers.contains(.command) || modifiers.contains(.control),
+                                   range: modifiers.contains(.shift))
                 }
-                .contentShape(Rectangle())
-        }.buttonStyle(.plain).help(asset.originalFilename)
-            .onDrag { library.photoDragProvider(for: asset.id) }
+            }
+            .help(asset.originalFilename)
             .contextMenu {
                 Button("选择此照片") { library.select(asset.id, extending: false) }
                 Button("全选当前目录照片") { library.selectAll() }
                 Button("取消选择") { library.deselectAll() }
             }
             .accessibilityLabel(asset.originalFilename)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { library.select(asset.id) }
             .accessibilityAddTraits(library.selectedIDs.contains(asset.id) ? [.isSelected] : [])
     }
 

@@ -184,6 +184,56 @@ import KeepsAPI
         #expect(!store.isDirectoryOperationBlocking)
     }
 
+    @Test func dropUsesWholeRowAndHighlightsOnlyName() async throws {
+        _ = NSApplication.shared
+        let (store, _) = makeStore()
+        store.refreshNavigation()
+        try await waitUntil { !store.isLoadingNavigation }
+        store.loadChildren(of: "/photos")
+        try await waitUntil { store.loadingDirectories.isEmpty }
+        let outline = DirectoryOutlineView.DirectoryOutline(frame: NSRect(x: 0, y: 0, width: 300, height: 300))
+        let column = NSTableColumn(identifier: .init("directory"))
+        column.width = 300
+        outline.addTableColumn(column)
+        outline.outlineTableColumn = column
+        outline.headerView = nil
+        outline.rowHeight = 30
+        let scroll = NSScrollView(frame: outline.frame)
+        scroll.documentView = outline
+        let window = NSWindow(contentRect: outline.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = scroll
+        let coordinator = DirectoryOutlineView.Coordinator(library: store)
+        coordinator.outline = outline
+        outline.dataSource = coordinator
+        outline.delegate = coordinator
+        coordinator.update()
+        outline.expandItem(try #require(outline.item(atRow: 0)))
+        let source = try #require(outline.item(atRow: 1))
+        let writer = try #require(coordinator.outlineView(outline, pasteboardWriterForItem: source))
+        let info = DirectoryTestDragInfo(source: outline, window: window)
+        info.draggingPasteboard.writeObjects([writer])
+        defer { info.draggingPasteboard.releaseGlobally() }
+        let destinationRow = 2
+        let rect = outline.rect(ofRow: destinationRow)
+        for point in [NSPoint(x: 1, y: rect.minY + 1), NSPoint(x: 150, y: rect.midY), NSPoint(x: 298, y: rect.maxY - 1)] {
+            info.draggingLocation = outline.convert(point, to: nil)
+            let result = coordinator.outlineView(outline, validateDrop: info, proposedItem: nil, proposedChildIndex: 0)
+            #expect(result == .move)
+            #expect(outline.dropTargetRow == destinationRow)
+            let cell = try #require(outline.view(atColumn: 0, row: destinationRow, makeIfNecessary: true) as? DirectoryOutlineView.DirectoryCell)
+            #expect(cell.nameLabel.isDropTarget)
+            #expect(!outline.isRowSelected(destinationRow))
+        }
+        info.draggingLocation = outline.convert(NSPoint(x: 150, y: outline.rect(ofRow: 1).midY), to: nil)
+        #expect(coordinator.outlineView(outline, validateDrop: info, proposedItem: nil, proposedChildIndex: 0).isEmpty)
+        #expect(outline.dropTargetRow == -1)
+        let cell = try #require(outline.view(atColumn: 0, row: destinationRow, makeIfNecessary: true) as? DirectoryOutlineView.DirectoryCell)
+        #expect(!cell.nameLabel.isDropTarget)
+        outline.highlightDropTarget(row: destinationRow)
+        outline.draggingExited(info)
+        #expect(!cell.nameLabel.isDropTarget)
+    }
+
     private func makeStore(fail: Bool = false, hold: Bool = false) -> (LibraryStore, DirectoryMoveState) {
         let host = UUID().uuidString.lowercased() + ".invalid"
         let state = DirectoryMoveState(fail: fail, hold: hold)
@@ -290,4 +340,24 @@ private final class DirectoryMoveProtocol: URLProtocol, @unchecked Sendable {
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
+}
+
+@MainActor private final class DirectoryTestDragInfo: NSObject, NSDraggingInfo {
+    let draggingSource: Any?
+    let draggingDestinationWindow: NSWindow?
+    let draggingPasteboard = NSPasteboard.withUniqueName()
+    var draggingLocation = NSPoint.zero
+    var draggingSourceOperationMask: NSDragOperation { .move }
+    var draggedImageLocation: NSPoint { .zero }
+    nonisolated var draggedImage: NSImage? { nil }
+    var draggingSequenceNumber: Int { 1 }
+    var draggingFormation: NSDraggingFormation = .none
+    var animatesToDestination = false
+    var numberOfValidItemsForDrop = 1
+    var springLoadingHighlight: NSSpringLoadingHighlight { .none }
+    init(source: NSOutlineView, window: NSWindow) { draggingSource = source; draggingDestinationWindow = window }
+    func slideDraggedImage(to screenPoint: NSPoint) {}
+    override func namesOfPromisedFilesDropped(atDestination dropDestination: URL) -> [String]? { nil }
+    func resetSpringLoading() {}
+    func enumerateDraggingItems(options: NSDraggingItemEnumerationOptions = [], for view: NSView?, classes classArray: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any] = [:], using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
 }

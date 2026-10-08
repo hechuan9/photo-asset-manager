@@ -1,11 +1,12 @@
 import Foundation
 import AppKit
+import SwiftUI
 import KeepsAPI
 
 struct PhotoDragPayload: Codable {
     static let pasteboardType = "local.keeps.photos"
     let assetIDs: [UUID]
-    let sourcePath: String
+    let sourcePath: String?
     let baseURL: String
     let libraryID: String
     let query: KeepsAssetQuery
@@ -24,31 +25,35 @@ struct PendingPhotoMove: Codable {
     private static let photoMoveKey = "keeps.pendingPhotoMove"
 
     func photoDragPayload(for id: UUID) -> PhotoDragPayload? {
-        guard let configuration, let sourcePath = query.directory,
+        guard let configuration,
               !query.trashed, !isDirectoryOperationBlocking, !isMutating,
-              !isSelectingAll, !isLoading, assets.contains(where: { $0.id == id }) else { return nil }
+              !isSelectingAll, hasCurrentPhotoResults, assets.contains(where: { $0.id == id }) else { return nil }
         let ids = selectedIDs.contains(id) ? selectedIDs : [id]
         return PhotoDragPayload(assetIDs: ids.sorted { $0.uuidString < $1.uuidString },
-            sourcePath: sourcePath, baseURL: configuration.baseURL.absoluteString,
+            sourcePath: query.directory, baseURL: configuration.baseURL.absoluteString,
             libraryID: configuration.libraryID, query: query)
     }
 
-    func photoDragProvider(for id: UUID) -> NSItemProvider {
-        let provider = NSItemProvider()
-        guard let payload = photoDragPayload(for: id), let data = try? JSONEncoder().encode(payload) else { return provider }
-        provider.registerDataRepresentation(forTypeIdentifier: PhotoDragPayload.pasteboardType, visibility: .ownProcess) { completion in
-            completion(data, nil)
+    func photoDragItem(for id: UUID) -> NSPasteboardItem? {
+        guard let payload = photoDragPayload(for: id) else { return nil }
+        do {
+            let data = try JSONEncoder().encode(payload)
+            let item = NSPasteboardItem()
+            item.setData(data, forType: NSPasteboard.PasteboardType(PhotoDragPayload.pasteboardType))
+            if !selectedIDs.contains(id) { select(id) }
+            return item
+        } catch {
+            lastError = Self.describe(error)
             return nil
         }
-        return provider
     }
 
     func canMovePhotos(_ payload: PhotoDragPayload, to parentPath: String) -> Bool {
-        client != nil && !isDirectoryOperationBlocking && !isMutating && !isSelectingAll &&
+        client != nil && hasCurrentPhotoResults && !isDirectoryOperationBlocking && !isMutating && !isSelectingAll &&
         !isUpdatingHiddenDirectory && !isCheckingConnection && !query.trashed &&
         configuration?.baseURL.absoluteString == payload.baseURL && configuration?.libraryID == payload.libraryID &&
         query == payload.query && query.directory == payload.sourcePath &&
-        payload.sourcePath.hasPrefix("/") && parentPath.hasPrefix("/") && payload.sourcePath != parentPath &&
+        (payload.sourcePath?.hasPrefix("/") ?? true) && parentPath.hasPrefix("/") && payload.sourcePath != parentPath &&
         !payload.assetIDs.isEmpty && Set(payload.assetIDs).count == payload.assetIDs.count &&
         Set(payload.assetIDs).isSubset(of: Set(assets.map(\.id)))
     }
@@ -148,5 +153,67 @@ struct PendingPhotoMove: Codable {
         preferences.removeObject(forKey: Self.photoMoveKey)
         refreshNavigation()
         refresh(force: true)
+    }
+}
+
+struct PhotoDragSource: NSViewRepresentable {
+    let item: () -> NSPasteboardItem?
+    let select: (NSEvent.ModifierFlags) -> Void
+
+    func makeNSView(context: Context) -> SourceView { SourceView() }
+    func updateNSView(_ view: SourceView, context: Context) {
+        view.item = item
+        view.select = select
+    }
+
+    final class SourceView: NSView, NSDraggingSource {
+        var item: (() -> NSPasteboardItem?)?
+        var select: ((NSEvent.ModifierFlags) -> Void)?
+        private var mouseDownEvent: NSEvent?
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            // 右键交给 SwiftUI 的照片上下文菜单。
+            if let type = NSApp.currentEvent?.type,
+               [.rightMouseDown, .rightMouseUp, .rightMouseDragged].contains(type) { return nil }
+            return super.hitTest(point)
+        }
+
+        override func mouseDown(with event: NSEvent) { mouseDownEvent = event }
+
+        override func mouseUp(with event: NSEvent) {
+            guard mouseDownEvent != nil else { return }
+            mouseDownEvent = nil
+            if bounds.contains(convert(event.locationInWindow, from: nil)) { select?(event.modifierFlags) }
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let start = mouseDownEvent,
+                  hypot(event.locationInWindow.x - start.locationInWindow.x,
+                        event.locationInWindow.y - start.locationInWindow.y) >= 4 else { return }
+            // 原生会话接管事件；取消、拒绝和成功都不保留本次鼠标按下状态。
+            mouseDownEvent = nil
+            guard let item = item?() else { return }
+            let image = NSImage(size: bounds.size)
+            if let parent = superview {
+                let rect = convert(bounds, to: parent)
+                if let bitmap = parent.bitmapImageRepForCachingDisplay(in: rect) {
+                    parent.cacheDisplay(in: rect, to: bitmap)
+                    image.addRepresentation(bitmap)
+                }
+            }
+            let draggingItem = NSDraggingItem(pasteboardWriter: item)
+            draggingItem.setDraggingFrame(bounds, contents: image)
+            beginDraggingSession(with: [draggingItem], event: event, source: self)
+        }
+
+        func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+            context == .withinApplication ? .move : []
+        }
+
+        func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+            mouseDownEvent = nil
+        }
     }
 }

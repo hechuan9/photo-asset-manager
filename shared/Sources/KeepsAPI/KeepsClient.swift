@@ -78,8 +78,8 @@ public final class KeepsClient: Sendable {
         let response: CreatedDirectory = try await request("POST", library + ["directories"], body: JSONEncoder().encode(["parentPath": parentPath, "name": name]))
         return response.path
     }
-    public func startPhotoMove(assetIDs: [UUID], sourcePath: String, parentPath: String, requestID: UUID) async throws -> KeepsPhotoMoveTask {
-        struct Move: Encodable { let requestID: String; let assetIDs: [String]; let sourcePath: String; let parentPath: String }
+    public func startPhotoMove(assetIDs: [UUID], sourcePath: String?, parentPath: String, requestID: UUID) async throws -> KeepsPhotoMoveTask {
+        struct Move: Encodable { let requestID: String; let assetIDs: [String]; let sourcePath: String?; let parentPath: String }
         let body = Move(requestID: requestID.uuidString.lowercased(), assetIDs: assetIDs.map { $0.uuidString.lowercased() }, sourcePath: sourcePath, parentPath: parentPath)
         return try await request("POST", library + ["assets", "move-tasks"], body: JSONEncoder().encode(body))
     }

@@ -32,7 +32,7 @@ struct PhotoMoveProgressView: View {
                     .foregroundStyle(library.photoMoveFinished ? .red : .secondary)
             }
             if library.photoMoveFinished {
-                Button("确认并刷新目录") { library.acknowledgePhotoMoveFailure() }
+                Button("关闭") { library.acknowledgePhotoMoveFailure() }
             }
         }
         .padding(20).frame(width: 380)
