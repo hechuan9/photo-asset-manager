@@ -49,9 +49,8 @@ cp "$ROOT_DIR/scripts/runtime-sample/sample.jpg" "$RUNTIME_DIR/sample.jpg"
 cp "$ROOT_DIR/scripts/runtime-sample/SampleLicense.txt" "$RUNTIME_DIR/SampleLicense.txt"
 # Build output only: discard stale engine files before copying the pinned bundle.
 rm -rf "$HELPERS_DIR/darktable.app"
-/usr/bin/ditto "$DARKTABLE_APP" "$HELPERS_DIR/darktable.app"
-# Text resources may carry vendor or prior TestFlight signatures in extended attributes.
-/usr/bin/xattr -cr "$HELPERS_DIR/darktable.app"
+# Text resources must not inherit vendor or prior TestFlight signatures.
+/usr/bin/ditto --noextattr --norsrc "$DARKTABLE_APP" "$HELPERS_DIR/darktable.app"
 chmod +x "$HELPERS_DIR/codex-code-mode-host" "$HELPERS_DIR/codex" "$HELPERS_DIR/keeps-color-mcp"
 
 # Preserve the full dependency layout, then sign nested code before its containing bundles.

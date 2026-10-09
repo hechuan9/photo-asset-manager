@@ -1,5 +1,6 @@
 import os
 import plistlib
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -30,6 +31,29 @@ class AIRuntimePackagingTests(unittest.TestCase):
         self.assertTrue(host["com.apple.security.app-sandbox"])
         self.assertTrue(host["com.apple.security.inherit"])
         self.assertNotIn("com.apple.security.cs.allow-jit", helper)
+
+    def test_runtime_copy_drops_inherited_text_signatures(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "darktable.app"
+            metadata = source / "Contents/Resources/module.la"
+            metadata.parent.mkdir(parents=True)
+            metadata.write_text("# libtool metadata\ndlname='module.so'\n")
+            subprocess.run(["codesign", "--force", "--sign", "-", str(metadata)], check=True,
+                           capture_output=True)
+            self.assertEqual(subprocess.run(["codesign", "--verify", str(metadata)],
+                                            capture_output=True).returncode, 0)
+            helpers = root / "Helpers"
+            helpers.mkdir()
+            copy = next(line for line in SCRIPT.read_text().splitlines()
+                        if line.startswith("/usr/bin/ditto "))
+            arguments = [part.replace("$DARKTABLE_APP", str(source)).replace("$HELPERS_DIR", str(helpers))
+                         for part in shlex.split(copy)]
+            subprocess.run(arguments, check=True, capture_output=True)
+            copied = helpers / "darktable.app/Contents/Resources/module.la"
+            self.assertEqual(copied.read_bytes(), metadata.read_bytes())
+            self.assertNotEqual(subprocess.run(["codesign", "--verify", str(copied)],
+                                               capture_output=True).returncode, 0)
 
     def test_no_explicit_inputs_leaves_runtime_absent(self):
         with tempfile.TemporaryDirectory() as temporary:
