@@ -518,7 +518,7 @@ fn complete_sync(s: &AppState, lib: &str, id: &str) -> Result<Value> {
         .put_generated_role(lib, &t.asset, &hash, &thumb, "thumbnail")?;
     let thumbnail_descriptor = json!({
         "objectRef": object, "width": tm.width, "height": tm.height,
-        "version": format!("{}{}:{}",if media::is_video(&t.path) { "video-v2:" } else { "" },cache::spec()?,hash),
+        "version": format!("{}{}:{}",if media::is_video(&t.path) { "video-v3:" } else { "" },cache::spec()?,hash),
         "sizeBytes":fs::metadata(&thumb)?.len()
     });
     let standard_descriptor = json!({
