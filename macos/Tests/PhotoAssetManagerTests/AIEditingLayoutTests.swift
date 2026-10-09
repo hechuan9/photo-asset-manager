@@ -4,7 +4,8 @@ import Testing
 
 struct AIEditingLayoutTests {
     @Test func landscapePortraitAndSquareHaveEqualPreviewArea() {
-        let sizes = [CGFloat(1.5), 2.0 / 3.0, 1.0].map {
+        let ratios: [CGFloat] = [1.5, 2.0 / 3.0, 1.0]
+        let sizes = ratios.map {
             AIEditingComparisonLayout.previewSize(availableWidth: 1000, aspectRatio: $0, maximumHeight: 540)
         }
         for size in sizes {
@@ -15,7 +16,8 @@ struct AIEditingLayoutTests {
     }
 
     @Test func narrowWindowsAndExtremeRatiosFitWithoutCropping() {
-        for ratio in [CGFloat(0.1), 2.0 / 3.0, 1.5, 10.0] {
+        let ratios: [CGFloat] = [0.1, 2.0 / 3.0, 1.5, 10.0]
+        for ratio in ratios {
             let size = AIEditingComparisonLayout.previewSize(availableWidth: 500, aspectRatio: ratio, maximumHeight: 300)
             #expect(size.width * 2 + 16 <= 500.01)
             #expect(size.height <= 300.01)
