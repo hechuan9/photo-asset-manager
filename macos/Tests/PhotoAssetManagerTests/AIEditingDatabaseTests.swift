@@ -92,8 +92,84 @@ import Testing
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         do { _ = try AIEditingDatabase(root: root) }
-        try sql(root, "PRAGMA user_version=2")
+        try sql(root, "PRAGMA user_version=3")
         #expect(throws: (any Error).self) { _ = try AIEditingDatabase(root: root) }
+    }
+
+    @Test func preferenceSuggestionsSurviveClearAndDismissedTextDoesNotReturn() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try AIEditingDatabase(root: root)
+        var result = AIGradeResult(status: "selected", reason: "done")
+        result.preferenceSuggestions = [" ", "  Natural Skin  ", "Soft highlights", "Cool shadows", "Ignored fourth"]
+        let candidate = AIEditingBatch.Candidate(id: UUID(), result: result, instruction: "", parentID: nil)
+        let item = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "DSC02950", phase: .review, candidates: [candidate])
+        let batch = AIEditingBatch(id: UUID(), baseURL: "https://nas.invalid", libraryID: "local", items: [item])
+        try database.save(batch: batch, preferences: .init(text: "", revision: 0))
+        var suggestions = try database.preferenceSuggestions()
+        #expect(suggestions.map(\.text) == ["Natural Skin", "Soft highlights", "Cool shadows"])
+        #expect(suggestions.first?.sourceName == "DSC02950")
+        #expect(suggestions.first?.sourceCandidateID == candidate.id)
+        let dismissed = try #require(suggestions.first)
+        try database.resolvePreferenceSuggestion(id: dismissed.id, preferences: nil)
+        var duplicate = item
+        duplicate.candidates![0].result.preferenceSuggestions = ["natural   SKIN", "Soft highlights"]
+        try database.save(item: duplicate, position: 0)
+        suggestions = try database.preferenceSuggestions()
+        #expect(suggestions.map(\.text) == ["Soft highlights", "Cool shadows"])
+        let otherCandidate = AIEditingBatch.Candidate(id: UUID(), result: result, instruction: "", parentID: nil)
+        let otherItem = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "second photo", candidates: [otherCandidate])
+        var extended = batch
+        extended.items.append(otherItem)
+        try database.save(batch: extended, preferences: .init(text: "", revision: 0))
+        #expect(try database.preferenceSuggestions() == suggestions)
+        try database.save(batch: nil, preferences: .init(text: "", revision: 0))
+        #expect(try AIEditingDatabase(root: root).preferenceSuggestions() == suggestions)
+    }
+
+    @Test func acceptingSuggestionCommitsPreferencesAndStatusAtomically() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try AIEditingDatabase(root: root)
+        var result = AIGradeResult(status: "selected", reason: "done")
+        result.preferenceSuggestions = ["Natural skin"]
+        let candidate = AIEditingBatch.Candidate(id: UUID(), result: result, instruction: "", parentID: nil)
+        let item = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "photo", phase: .review, candidates: [candidate])
+        let batch = AIEditingBatch(id: UUID(), baseURL: "https://nas.invalid", libraryID: "local", items: [item])
+        try database.save(batch: batch, preferences: .init(text: "before", revision: 1))
+        let suggestion = try #require(try database.preferenceSuggestions().first)
+        try sql(root, "CREATE TRIGGER fail_accept BEFORE UPDATE ON preference_suggestions BEGIN SELECT RAISE(ABORT,'accept failure'); END")
+        #expect(throws: (any Error).self) {
+            try database.resolvePreferenceSuggestion(id: suggestion.id, preferences: .init(text: "Natural skin", revision: 2))
+        }
+        #expect(try database.load()?.preferences.text == "before")
+        #expect(try database.preferenceSuggestions() == [suggestion])
+        try sql(root, "DROP TRIGGER fail_accept")
+        try database.resolvePreferenceSuggestion(id: suggestion.id, preferences: .init(text: "Natural skin", revision: 2))
+        #expect(try database.load()?.preferences.text == "Natural skin")
+        #expect(try database.load()?.preferences.revision == 2)
+        #expect(try database.load()?.batch?.items.first?.id == item.id)
+        #expect(try database.preferenceSuggestions().isEmpty)
+        try database.save(item: item, position: 0)
+        #expect(try database.preferenceSuggestions().isEmpty)
+    }
+
+    @Test func upgradesVersionOneWithoutLosingWorkspaceOrPreferences() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let item = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "photo", phase: .grading)
+        let batch = AIEditingBatch(id: UUID(), baseURL: "https://nas.invalid", libraryID: "local", items: [item])
+        do {
+            let database = try AIEditingDatabase(root: root)
+            try database.save(batch: batch, preferences: .init(text: "existing", revision: 12))
+        }
+        try sql(root, "DROP TABLE preference_suggestions; PRAGMA user_version=1")
+        let database = try AIEditingDatabase(root: root)
+        #expect(try database.load()?.batch?.items.first?.id == item.id)
+        #expect(try database.load()?.batch?.items.first?.phase == .grading)
+        #expect(try database.load()?.preferences.text == "existing")
+        #expect(try database.load()?.preferences.revision == 12)
+        #expect(try database.preferenceSuggestions().isEmpty)
     }
 
     private func temporaryRoot() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString) }

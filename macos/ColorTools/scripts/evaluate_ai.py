@@ -41,7 +41,7 @@ def main():
     root = args.job.resolve()
     root.mkdir(parents=True, exist_ok=False)
     schema = {"type": "object", "properties": {
-        "status": {"type": "string", "enum": ["selected", "unchanged", "needs_review"]},
+        "status": {"type": "string", "enum": ["selected", "needs_review"]},
         "candidateID": {"type": "string"}, "reason": {"type": "string"}},
         "required": ["status", "candidateID", "reason"], "additionalProperties": False}
     (root / "result.schema.json").write_text(json.dumps(schema))

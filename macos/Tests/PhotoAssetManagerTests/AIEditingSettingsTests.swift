@@ -95,7 +95,8 @@ import CryptoKit
         #expect(AIEditingUsageStore(root: root).attempts.first?.usage?.total == 110)
     }
 
-    @Test func completedResultResumesWithoutAccountOrRuntime() async throws {
+    @Test(arguments: [false, true])
+    func completedResultResumesWithoutAccountOrRuntime(withSuggestions: Bool) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let job = root.appendingPathComponent("job"), render = job.appendingPathComponent("render")
@@ -106,7 +107,9 @@ import CryptoKit
         let preview = render.appendingPathComponent("preview.jpg"), full = render.appendingPathComponent("full.jpg")
         try Data([1]).write(to: preview); try Data([1]).write(to: full)
         try Data("<xmp/>".utf8).write(to: full.deletingPathExtension().appendingPathExtension("xmp"))
-        try write(["status": "selected", "candidateID": "one", "reason": "已完成"], "result.json")
+        var output: [String: Any] = ["status": "selected", "candidateID": "one", "reason": "已完成"]
+        if withSuggestions { output["preferenceSuggestions"] = ["偏好自然柔和的肤色"] }
+        try write(output, "result.json")
         try write(["candidates": [["id": "one", "recipe": Data("{}".utf8).base64EncodedString()]]], "render/candidates.json")
         try write(["candidateID": "one", "preview": preview.path, "fullSize": full.path], "render/selection.json")
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
@@ -117,8 +120,16 @@ import CryptoKit
         #expect(result.fullSize == full)
         #expect(result.recipeJSON == "{}")
         #expect(result.xmp == "<xmp/>")
+        #expect(result.preferenceSuggestions == (withSuggestions ? ["偏好自然柔和的肤色"] : nil))
         #expect(store.usage.attempts.isEmpty)
         #expect(!store.isBusy && store.activeGrades == 0)
+    }
+
+    @Test func oldGradeDraftDecodesWithoutPreferenceSuggestions() throws {
+        let old = Data(#"{"status":"selected","reason":"保留氛围"}"#.utf8)
+        let result = try JSONDecoder().decode(AIGradeResult.self, from: old)
+        #expect(result.preferenceSuggestions == nil)
+        #expect(result.status == "selected")
     }
 
     @Test func nasFailureDoesNotExposeRawResponse() {
@@ -208,6 +219,44 @@ import CryptoKit
         #expect(throws: (any Error).self) { try AIEditingSettingsStore.validateResult(in: job) }
     }
 
+    @Test func missingCandidatePreservesToolFailureReason() throws {
+        let job = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: job) }
+        try FileManager.default.createDirectory(at: job.appendingPathComponent("render"), withIntermediateDirectories: true)
+        try Data(#"{"candidates":[]}"#.utf8).write(to: job.appendingPathComponent("render/candidates.json"))
+        try Data(#"{"status":"needs_review","candidateID":"","reason":"inspect_photo 无响应"}"#.utf8).write(to: job.appendingPathComponent("result.json"))
+        do {
+            _ = try AIEditingSettingsStore.validateResult(in: job)
+            Issue.record("Expected missing candidate failure")
+        } catch {
+            #expect(String(reflecting: error).contains("inspect_photo 无响应"))
+        }
+    }
+
+    @Test func freshGradingRequiresAdjustedCandidate() throws {
+        let job = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: job) }
+        let render = job.appendingPathComponent("render")
+        try FileManager.default.createDirectory(at: render, withIntermediateDirectories: true)
+        let candidates: [[String: String]] = [
+            ["id": "raw", "operationID": "baseline", "recipe": "original"],
+            ["id": "base", "operationID": "iteration-base", "recipe": "base"],
+            ["id": "copy", "recipe": "base"],
+            ["id": "adjusted", "recipe": "new"]]
+        try JSONSerialization.data(withJSONObject: ["candidates": candidates]).write(to: render.appendingPathComponent("candidates.json"))
+        for id in ["raw", "base", "copy", "adjusted"] {
+            try Data([1]).write(to: render.appendingPathComponent(id + "-preview.jpg"))
+        }
+        for (status, id) in [("needs_review", "raw"), ("needs_review", "base"), ("needs_review", "copy"), ("unchanged", "adjusted"), ("needs_review", "adjusted")] {
+            try JSONSerialization.data(withJSONObject: ["status": status, "candidateID": id, "reason": "请比较候选"]).write(to: job.appendingPathComponent("result.json"))
+            if status == "needs_review" && id == "adjusted" {
+                #expect(try AIEditingSettingsStore.validateResult(in: job, requiresAdjustment: true).preview != nil)
+            } else {
+                #expect(throws: (any Error).self) { try AIEditingSettingsStore.validateResult(in: job, requiresAdjustment: true) }
+            }
+        }
+    }
+
     @Test func unselectedResultsRetainVerifiedComparisonPreviews() throws {
         let job = FileManager.default.temporaryDirectory.appendingPathComponent("keeps-comparison-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: job) }
@@ -229,6 +278,7 @@ import CryptoKit
             #expect(result.fullSize == nil)
             #expect(result.recipeJSON == "{}")
             #expect(result.isSelectable == (status == "needs_review"))
+            #expect(result.preferenceSuggestions == nil)
         }
         try FileManager.default.removeItem(at: preview)
         #expect(throws: (any Error).self) { try AIEditingSettingsStore.gradeResult(in: job) }
@@ -244,7 +294,7 @@ import CryptoKit
         func write(_ value: [String: Any], _ path: String) throws {
             try JSONSerialization.data(withJSONObject: value).write(to: job.appendingPathComponent(path))
         }
-        try write(["status": "needs_review", "candidateID": "candidate", "reason": "检查靠垫溢出"], "result.json")
+        try write(["status": "needs_review", "candidateID": "candidate", "reason": "检查靠垫溢出", "preferenceSuggestions": ["偏好柔和的高光过渡"]], "result.json")
         try write(["candidates": [["id": "candidate", "recipe": Data("{}".utf8).base64EncodedString()]]], "render/candidates.json")
         let preview = render.appendingPathComponent("candidate-preview.jpg"), full = render.appendingPathComponent("full.jpg")
         try Data([1]).write(to: preview); try Data([2]).write(to: full)
@@ -263,6 +313,8 @@ import CryptoKit
         let completed = try await store.completeReviewResult(reviewed, source: root.appendingPathComponent("source.arw"))
         #expect(completed.status == "needs_review")
         #expect(completed.reason == reviewed.reason)
+        #expect(reviewed.preferenceSuggestions == ["偏好柔和的高光过渡"])
+        #expect(completed.preferenceSuggestions == reviewed.preferenceSuggestions)
         #expect(completed.recipeJSON == reviewed.recipeJSON)
         #expect(completed.fullSize == full.resolvingSymlinksInPath())
         #expect(completed.xmp == "<xmp/>")

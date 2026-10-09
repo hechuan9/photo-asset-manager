@@ -6,6 +6,13 @@ struct AIEditingPreferences: Codable {
     var revision: Int64
 }
 
+struct AIEditingPreferenceSuggestion: Identifiable, Equatable {
+    let id: UUID
+    let text: String
+    let sourceName: String
+    let sourceCandidateID: UUID
+}
+
 @MainActor final class AIEditingDatabase {
     // Operations remain MainActor-isolated; deinit only closes the exclusively owned handle.
     nonisolated(unsafe) private var handle: OpaquePointer?
@@ -28,7 +35,7 @@ struct AIEditingPreferences: Codable {
             sqlite3_extended_result_codes(handle, 1)
             sqlite3_busy_timeout(handle, 5_000)
             let version = try rows("PRAGMA user_version").first?.first ?? "0"
-            guard version == "0" || version == "1" else {
+            guard version == "0" || version == "1" || version == "2" else {
                 throw AIEditingFailure("本机工作台数据库版本 \(version) 较新，请更新 Keeps。")
             }
             try execute("PRAGMA journal_mode=WAL")
@@ -51,7 +58,13 @@ struct AIEditingPreferences: Codable {
                         position INTEGER NOT NULL CHECK(position>=0), payload TEXT NOT NULL)
                     """)
                 try execute("CREATE INDEX IF NOT EXISTS candidates_order ON candidates(item_id,position)")
-                try execute("PRAGMA user_version=1")
+                try execute("""
+                    CREATE TABLE IF NOT EXISTS preference_suggestions (
+                        id TEXT PRIMARY KEY, text TEXT NOT NULL, normalized_text TEXT NOT NULL UNIQUE,
+                        source_name TEXT NOT NULL, source_candidate_id TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','dismissed')))
+                    """)
+                try execute("PRAGMA user_version=2")
             }
         } catch {
             sqlite3_close(handle); handle = nil
@@ -87,11 +100,7 @@ struct AIEditingPreferences: Codable {
 
     func save(batch: AIEditingBatch?, preferences: AIEditingPreferences) throws {
         try transaction {
-            try execute("""
-                INSERT INTO preferences(singleton,text,revision) VALUES(1,?,?)
-                ON CONFLICT(singleton) DO UPDATE SET text=excluded.text,revision=excluded.revision
-                WHERE text<>excluded.text OR revision<>excluded.revision
-                """, [preferences.text, String(preferences.revision)])
+            try write(preferences: preferences)
             guard let batch else { try execute("DELETE FROM workspace"); return }
             var header = batch
             header.items = []
@@ -114,6 +123,33 @@ struct AIEditingPreferences: Codable {
         }
     }
 
+    func preferenceSuggestions() throws -> [AIEditingPreferenceSuggestion] {
+        try rows("SELECT id,text,source_name,source_candidate_id FROM preference_suggestions WHERE status='pending' ORDER BY rowid").map { row in
+            guard let id = UUID(uuidString: row[0]), let candidateID = UUID(uuidString: row[3]) else {
+                throw AIEditingFailure("本机审美偏好建议的标识无效。")
+            }
+            return AIEditingPreferenceSuggestion(id: id, text: row[1], sourceName: row[2], sourceCandidateID: candidateID)
+        }
+    }
+
+    func resolvePreferenceSuggestion(id: UUID, preferences: AIEditingPreferences?) throws {
+        try transaction {
+            guard try !rows("SELECT id FROM preference_suggestions WHERE id=? AND status='pending'", [id.uuidString]).isEmpty else {
+                throw AIEditingFailure("这条审美偏好建议已处理或不存在。")
+            }
+            if let preferences { try write(preferences: preferences) }
+            try execute("UPDATE preference_suggestions SET status=? WHERE id=?", [preferences == nil ? "dismissed" : "accepted", id.uuidString])
+        }
+    }
+
+    private func write(preferences: AIEditingPreferences) throws {
+        try execute("""
+            INSERT INTO preferences(singleton,text,revision) VALUES(1,?,?)
+            ON CONFLICT(singleton) DO UPDATE SET text=excluded.text,revision=excluded.revision
+            WHERE text<>excluded.text OR revision<>excluded.revision
+            """, [preferences.text, String(preferences.revision)])
+    }
+
     private func write(item: AIEditingBatch.Item, position: Int) throws {
         var state = item
         state.candidates = nil
@@ -133,6 +169,15 @@ struct AIEditingPreferences: Codable {
                 ON CONFLICT(id) DO UPDATE SET item_id=excluded.item_id,position=excluded.position,payload=excluded.payload
                 WHERE item_id<>excluded.item_id OR position<>excluded.position OR payload<>excluded.payload
                 """, [candidate.id.uuidString, item.id.uuidString, String(position), try payload(candidate, excluding: ["id"])])
+            let suggestions = (candidate.result.preferenceSuggestions ?? [])
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.prefix(3)
+            for text in suggestions {
+                let normalized = text.split(whereSeparator: \.isWhitespace).joined(separator: " ").lowercased()
+                try execute("""
+                    INSERT INTO preference_suggestions(id,text,normalized_text,source_name,source_candidate_id)
+                    VALUES(?,?,?,?,?) ON CONFLICT(normalized_text) DO NOTHING
+                    """, [UUID().uuidString, text, normalized, item.name, candidate.id.uuidString])
+            }
         }
     }
 

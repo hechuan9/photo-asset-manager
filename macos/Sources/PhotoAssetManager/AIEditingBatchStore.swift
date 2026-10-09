@@ -57,6 +57,7 @@ struct AIEditingBatch: Codable {
     @Published private(set) var diagnosticDirectory: URL?
     @Published private(set) var isRunning = false
     var isBlocking: Bool { false }
+    @Published private(set) var preferenceSuggestions: [AIEditingPreferenceSuggestion] = []
     @Published var preferencesText = ""
     @Published var batchInstruction = "" {
         didSet {
@@ -122,6 +123,7 @@ struct AIEditingBatch: Codable {
             restoreLegacyResults()
             batchInstruction = batch?.instruction ?? ""
             try database.save(batch: batch, preferences: savedPreferences)
+            preferenceSuggestions = try database.preferenceSuggestions()
         } catch { storageError = error; recordFailure(error) }
     }
 
@@ -302,6 +304,41 @@ struct AIEditingBatch: Codable {
         } catch { recordFailure(error); return false }
     }
 
+    @discardableResult func acceptPreferenceSuggestion(id: UUID, text: String) -> Bool {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return false }
+        let current = preferencesText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let merged = current.isEmpty ? text : current + "\n" + text
+        return resolvePreferenceSuggestion(id: id, preferences: .init(text: merged, revision: preferencesRevision + 1))
+    }
+
+    @discardableResult func dismissPreferenceSuggestion(id: UUID) -> Bool {
+        resolvePreferenceSuggestion(id: id, preferences: nil)
+    }
+
+    private func resolvePreferenceSuggestion(id: UUID, preferences: AIEditingPreferences?) -> Bool {
+        do {
+            if let storageError { throw storageError }
+            guard let database else { throw AIEditingFailure("本机工作台数据库未打开。") }
+            try database.resolvePreferenceSuggestion(id: id, preferences: preferences)
+            if let preferences {
+                preferencesText = preferences.text
+                preferencesRevision = preferences.revision
+            }
+            preferenceSuggestions = try database.preferenceSuggestions()
+            errorMessage = nil; errorDetails = nil
+            return true
+        } catch { recordFailure(error); return false }
+    }
+
+    @discardableResult func saveBatchInstruction(text: String) -> Bool {
+        guard batch != nil, storageError == nil else { return false }
+        batchInstruction = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard storageError == nil else { return false }
+        errorMessage = nil; errorDetails = nil
+        return true
+    }
+
     func selectCandidate(itemID: UUID, candidateID: UUID?) {
         guard let index = batch?.items.firstIndex(where: { $0.id == itemID }),
               canInteract(batch!.items[index]) else { return }
@@ -312,16 +349,16 @@ struct AIEditingBatch: Codable {
         do { try persist() } catch { recordFailure(error) }
     }
 
-    func refine(itemID: UUID, instruction: String) {
+    @discardableResult func refine(itemID: UUID, instruction: String) -> Bool {
         let instruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !instruction.isEmpty, let index = batch?.items.firstIndex(where: { $0.id == itemID }),
-              canInteract(batch!.items[index]) else { return }
+              canInteract(batch!.items[index]) else { return false }
         batch!.items[index].pendingInstruction = instruction
         batch!.items[index].pendingCandidateID = UUID()
         batch!.items[index].phase = .grading
         batch!.items[index].failure = nil
         batch!.cancelled = false
-        do { try persist(); start() } catch { recordFailure(error) }
+        do { try persist(); start(); return true } catch { recordFailure(error); return false }
     }
 
     func canInteract(_ item: AIEditingBatch.Item) -> Bool {
@@ -351,11 +388,31 @@ struct AIEditingBatch: Codable {
         catch { batch = previous; recordFailure(error) }
     }
 
-    func retryDecision(itemID: UUID) {
+    func canRestart(_ item: AIEditingBatch.Item) -> Bool {
+        item.phase != .done && !item.isBackgroundDecision && itemWorkers[item.id] == nil && activities[item.id] == nil
+    }
+
+    @discardableResult func restartItem(itemID: UUID) -> Bool {
         guard let index = batch?.items.firstIndex(where: { $0.id == itemID }),
-              batch!.items[index].isBackgroundDecision, batch!.items[index].failure != nil,
+              canRestart(batch!.items[index]) else { return false }
+        let previous = batch
+        let item = batch!.items[index]
+        batch!.items[index] = .init(id: item.id, assetID: item.assetID, name: item.name,
+            originalPreview: item.originalPreview, pendingCandidateID: UUID())
+        batch!.cancelled = false
+        do { try persist(); start(); return true }
+        catch { batch = previous; recordFailure(error); return false }
+    }
+
+    func retryItem(itemID: UUID) {
+        guard let index = batch?.items.firstIndex(where: { $0.id == itemID }),
+              batch!.items[index].phase != .done, batch!.items[index].failure != nil,
               itemWorkers[itemID] == nil else { return }
         let previous = batch
+        if batch!.items[index].phase == .review {
+            batch!.items[index].phase = .grading
+            if batch!.items[index].pendingCandidateID == nil { batch!.items[index].pendingCandidateID = UUID() }
+        }
         batch!.items[index].failure = nil; batch!.items[index].failureDetails = nil
         batch!.cancelled = false
         do { try persist(); start() }
@@ -511,7 +568,10 @@ struct AIEditingBatch: Codable {
     private func writeState(preferences: AIEditingPreferences) throws {
         if let storageError { throw storageError }
         guard let database else { throw AIEditingFailure("本机工作台数据库未打开。") }
-        do { try database.save(batch: batch, preferences: preferences) }
+        do {
+            try database.save(batch: batch, preferences: preferences)
+            preferenceSuggestions = try database.preferenceSuggestions()
+        }
         catch { stopForStorageFailure(error); throw error }
     }
 
@@ -523,6 +583,7 @@ struct AIEditingBatch: Codable {
         preferencesText = saved.preferences.text
         preferencesRevision = saved.preferences.revision
         batchInstruction = batch?.instruction ?? ""
+        preferenceSuggestions = try database.preferenceSuggestions()
     }
 
     private func stopForStorageFailure(_ error: Error) {
@@ -535,7 +596,10 @@ struct AIEditingBatch: Codable {
     private func save(_ item: AIEditingBatch.Item, index: Int) throws {
         if let storageError { throw storageError }
         guard let database else { throw AIEditingFailure("本机工作台数据库未打开。") }
-        do { try database.save(item: item, position: index) }
+        do {
+            try database.save(item: item, position: index)
+            preferenceSuggestions = try database.preferenceSuggestions()
+        }
         catch { stopForStorageFailure(error); throw error }
         batch!.items[index] = item
     }

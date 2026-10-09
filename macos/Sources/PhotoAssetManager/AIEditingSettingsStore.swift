@@ -177,9 +177,10 @@ import CryptoKit
         try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
         let skill = try Data(contentsOf: self.runtime.appendingPathComponent("SKILL.md"))
         let schema: [String: Any] = ["type": "object", "properties": [
-            "status": ["type": "string", "enum": ["selected", "unchanged", "needs_review"]],
-            "candidateID": ["type": "string"], "reason": ["type": "string"]],
-            "required": ["status", "candidateID", "reason"], "additionalProperties": false]
+            "status": ["type": "string", "enum": ["selected", "needs_review"]],
+            "candidateID": ["type": "string"], "reason": ["type": "string"],
+            "preferenceSuggestions": ["type": "array", "items": ["type": "string"], "maxItems": 3]],
+            "required": ["status", "candidateID", "reason", "preferenceSuggestions"], "additionalProperties": false]
         let schemaURL = job.appendingPathComponent("result.schema.json")
         try JSONSerialization.data(withJSONObject: schema).write(to: schemaURL, options: .atomic)
         var arguments = self.execArguments(job: job) + ["--output-schema", schemaURL.path]
@@ -189,6 +190,18 @@ import CryptoKit
             try Data(recipe.utf8).write(to: recipeURL, options: .atomic)
             helperArguments += ["--base-recipe", recipeURL.path]
         }
+        let version = try await runner.run(executable: self.executable, arguments: ["--version"], home: self.home, directory: job, timeout: 15)
+        guard version.exitCode == 0 else { throw AIEditingFailure("无法检查内置 Codex 版本。") }
+        progress?("等待初始预览准备", 0.05, 0.15)
+        let preparationArguments = helperArguments + ["--prepare-preview"]
+        // The parent owns this slot; the helper receives no KEEPS_RENDER_* environment.
+        let preparation = try await withRenderSlot {
+            try await runner.run(executable: self.codeRuntime.appendingPathComponent("keeps-color-mcp"),
+                arguments: preparationArguments, home: self.home, directory: job, timeout: 1200)
+        }
+        try writeLog(preparation, job: job, prefix: "prepare-" + UUID().uuidString + "-")
+        guard preparation.exitCode == 0 else { throw AIEditingFailure.process(preparation, job: job) }
+        progress?("初始预览已准备，开始 AI 调色", 0.15, 0.15)
         let settings: [String: Any] = [
             "mcp_servers.keeps_color.required": true,
             "mcp_servers.keeps_color.default_tools_approval_mode": "auto",
@@ -199,8 +212,6 @@ import CryptoKit
             "mcp_servers.keeps_color.startup_timeout_sec": 7200,
             "mcp_servers.keeps_color.tool_timeout_sec": 7200]
         for key in settings.keys.sorted() { arguments += ["-c", key + "=" + (try Self.json(settings[key]!))] }
-        let version = try await runner.run(executable: self.executable, arguments: ["--version"], home: self.home, directory: job, timeout: 15)
-        guard version.exitCode == 0 else { throw AIEditingFailure("无法检查内置 Codex 版本。") }
         let started = Date()
         var toolStarted: [String: Date] = [:]
         var toolSeconds = 0.0
@@ -231,7 +242,10 @@ import CryptoKit
                 try? data.write(to: job.appendingPathComponent("run.json"), options: .atomic)
             }
         }
-        let prompt = String(decoding: skill, as: UTF8.self) + "\nComplete this photo independently using only Keeps tools. Return the specified result, with reason in Chinese."
+        let prompt = String(decoding: skill, as: UTF8.self) + """
+        \nComplete this photo independently using only Keeps tools. Return the specified result, with reason in Chinese.
+        In this same result, return preferenceSuggestions: at most 3 concise Chinese suggestions summarizing reusable aesthetic preferences explicitly expressed by the user in instruction, batchInstruction, or the user requests in history. Extract only intent that applies across photos; exclude requests specific to this photo or batch, numeric exposure corrections, composition/local-mask instructions, and your own grading advice. Existing preferences are only a deduplication reference: do not extract them again or suggest equivalent preferences. If there is no explicit, sufficiently supported reusable user intent (including an automatic first grade without such requests), return []. These are candidates requiring user confirmation; do not claim they are saved or apply them as newly accepted preferences.
+        """
         let contextualPrompt = prompt + (try context.map { "\nUser grading context (specific instruction takes precedence over batch and long-term preferences):\n" + String(decoding: try JSONEncoder().encode($0), as: UTF8.self) + "\nThe initial candidate already applies the exact base recipe to the original source. Iterate from its candidate ID; do not approximate or reset existing adjustments." } ?? "")
         var steps = AIEditingSteps()
         let result = try await self.runTracked(runner: runner, job: job, arguments: arguments + ["-"],
@@ -251,7 +265,7 @@ import CryptoKit
         runExitCode = result.exitCode
         guard result.exitCode == 0 else { throw AIEditingFailure.process(result, job: job) }
         try self.readAccount(); try self.requireAccount()
-        let validated = try Self.validateResult(in: job)
+        let validated = try Self.validateResult(in: job, requiresAdjustment: true)
         if requestedJob == nil {
             self.resultPreview = validated.preview
             self.resultSummary = validated.reason
@@ -410,6 +424,7 @@ import CryptoKit
         let checked = try validateResult(in: job)
         let result = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("result.json"))) as! [String: Any]
         let state = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("render/candidates.json"))) as! [String: Any]
+        let suggestions = result["preferenceSuggestions"] as? [String]
         guard let id = result["candidateID"] as? String,
               let candidates = state["candidates"] as? [[String: Any]],
               let encoded = candidates.first(where: { $0["id"] as? String == id })?["recipe"] as? String,
@@ -420,14 +435,14 @@ import CryptoKit
         guard checked.selected else {
             return AIGradeResult(status: result["status"] as! String, reason: checked.reason,
                 recipeJSON: String(decoding: recipe, as: UTF8.self), timing: AIGradeTiming.read(job),
-                preview: checked.preview, originalPreview: checked.originalPreview)
+                preview: checked.preview, originalPreview: checked.originalPreview, preferenceSuggestions: suggestions)
         }
         let selection = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("render/selection.json"))) as! [String: Any]
         guard let full = selection["fullSize"] as? String else { throw AIEditingFailure("完整调色结果缺失。") }
         let fullURL = URL(fileURLWithPath: full)
         let xmpURL = fullURL.deletingPathExtension().appendingPathExtension("xmp")
         return AIGradeResult(status: "selected", reason: checked.reason, fullSize: fullURL,
-            recipeJSON: String(decoding: recipe, as: UTF8.self), xmp: try String(contentsOf: xmpURL, encoding: .utf8), timing: AIGradeTiming.read(job), preview: checked.preview, originalPreview: checked.originalPreview)
+            recipeJSON: String(decoding: recipe, as: UTF8.self), xmp: try String(contentsOf: xmpURL, encoding: .utf8), timing: AIGradeTiming.read(job), preview: checked.preview, originalPreview: checked.originalPreview, preferenceSuggestions: suggestions)
     }
 
     func completeReviewResult(_ result: AIGradeResult, source: URL) async throws -> AIGradeResult {
@@ -465,7 +480,7 @@ import CryptoKit
     }
 
     struct ValidatedResult { let selected: Bool; let preview: URL?; let originalPreview: URL?; let reason: String }
-    static func validateResult(in job: URL) throws -> ValidatedResult {
+    static func validateResult(in job: URL, requiresAdjustment: Bool = false) throws -> ValidatedResult {
         func object(_ path: String) throws -> [String: Any] {
             guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent(path))) as? [String: Any] else {
                 throw AIEditingFailure("调色结果格式无效。")
@@ -473,10 +488,22 @@ import CryptoKit
             return value
         }
         let result = try object("result.json"), store = try object("render/candidates.json")
+        if let id = result["candidateID"] as? String, id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let reason = result["reason"] as? String, !reason.isEmpty {
+            throw AIEditingFailure("AI 未生成候选：" + reason)
+        }
         guard let status = result["status"] as? String, ["selected", "unchanged", "needs_review"].contains(status),
               let id = result["candidateID"] as? String, let reason = result["reason"] as? String,
               let candidates = store["candidates"] as? [[String: Any]], candidates.contains(where: { $0["id"] as? String == id }) else {
             throw AIEditingFailure("AI 返回了未知候选或无效状态，结果未被接受。")
+        }
+        if requiresAdjustment {
+            let candidate = candidates.first { $0["id"] as? String == id }!
+            let starting = candidates.filter { ["baseline", "iteration-base"].contains($0["operationID"] as? String ?? "") }
+            guard status != "unchanged", let recipe = candidate["recipe"] as? String,
+                  !starting.contains(where: { $0["id"] as? String == id || $0["recipe"] as? String == recipe }) else {
+                throw AIEditingFailure("AI 未生成有实际调整的候选版本，请重试调色。")
+            }
         }
         let directory = job.appendingPathComponent("render").resolvingSymlinksInPath().path + "/"
         func verifiedPreview(_ candidateID: String) throws -> URL {
@@ -523,6 +550,7 @@ struct AIGradeResult: Codable, Sendable {
     var timing: AIGradeTiming? = nil
     var preview: URL? = nil
     var originalPreview: URL? = nil
+    var preferenceSuggestions: [String]? = nil
 }
 
 struct AIGradeTiming: Codable, Sendable {

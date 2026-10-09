@@ -6,6 +6,75 @@ import Testing
 @testable import PhotoAssetManager
 
 @MainActor struct AIEditingBatchTests {
+    @Test func restartClearsPhotoHistoryAndUsesFreshJob() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let oldID = UUID()
+        let result = AIGradeResult(status: "needs_review", reason: "旧意见")
+        let item = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "test.arw", phase: .review,
+            result: result, failure: "失败", candidates: [.init(id: oldID, result: result, instruction: "旧要求", parentID: nil)],
+            selectedCandidateID: oldID, pendingInstruction: "再暖些", pendingCandidateID: oldID)
+        let database = try AIEditingDatabase(root: root)
+        try database.save(batch: .init(id: UUID(), baseURL: "https://test.invalid", libraryID: "test", items: [item]), preferences: .init(text: "自然", revision: 2))
+        let store = AIEditingBatchStore(root: root)
+        #expect(store.restartItem(itemID: item.id))
+        let restarted = try #require(database.load()?.batch?.items.first)
+        #expect(restarted.id == item.id)
+        #expect(restarted.phase == .preparing)
+        #expect(restarted.result == nil && (restarted.candidates ?? []).isEmpty)
+        #expect(restarted.selectedCandidateID == nil && restarted.pendingInstruction == nil)
+        #expect(restarted.failure == nil)
+        #expect(restarted.pendingCandidateID != nil && restarted.pendingCandidateID != oldID)
+        #expect(store.preferencesText == "自然")
+    }
+
+    @Test func retryOnlyResumesChosenPhotoAndPreservesPendingRequest() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pendingID = UUID()
+        let first = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "first.arw", phase: .review,
+            failure: "工具无响应", pendingInstruction: "柔和一些", pendingCandidateID: pendingID)
+        let second = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "second.arw", phase: .grading, failure: "等待重试")
+        let database = try AIEditingDatabase(root: root)
+        try database.save(batch: .init(id: UUID(), baseURL: "https://test.invalid", libraryID: "test", items: [first, second]), preferences: .init(text: "自然", revision: 1))
+        let store = AIEditingBatchStore(root: root)
+        store.retryItem(itemID: first.id)
+        let items = try #require(database.load()?.batch?.items)
+        #expect(items[0].phase == .grading)
+        #expect(items[0].failure == nil)
+        #expect(items[0].pendingInstruction == "柔和一些")
+        #expect(items[0].pendingCandidateID == pendingID)
+        #expect(items[1].failure == "等待重试")
+    }
+
+    @Test func preferenceCandidatesRequireConfirmationAndSurviveWorkspaceCompletion() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try AIEditingDatabase(root: root)
+        let result = AIGradeResult(status: "selected", reason: "完成", preferenceSuggestions: ["人像保留自然肤色", "避免过强锐化"])
+        let candidate = AIEditingBatch.Candidate(id: UUID(), result: result, instruction: "肤色不要偏橙", parentID: nil)
+        let item = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "portrait.arw", phase: .done,
+            candidates: [candidate], preferences: "自然风格", preferenceRevision: 2)
+        let manifest = AIEditingBatch(id: UUID(), baseURL: "https://preferences.invalid", libraryID: "test", items: [item])
+        try database.save(batch: manifest, preferences: .init(text: "自然风格", revision: 2))
+        let store = AIEditingBatchStore(root: root)
+        #expect(store.preferenceSuggestions.count == 2)
+        #expect(store.preferencesText == "自然风格")
+        let first = try #require(store.preferenceSuggestions.first)
+        #expect(store.acceptPreferenceSuggestion(id: first.id, text: "人像保留自然肤色层次"))
+        #expect(store.preferencesText == "自然风格\n人像保留自然肤色层次")
+        #expect(store.batch?.items[0].preferences == "自然风格")
+        #expect(store.batch?.items[0].preferenceRevision == 2)
+        store.closeCompletedWorkspace()
+        let restored = AIEditingBatchStore(root: root)
+        #expect(restored.batch?.items.isEmpty == true)
+        #expect(restored.preferenceSuggestions.map(\.text) == ["避免过强锐化"])
+        #expect(restored.preferencesText == "自然风格\n人像保留自然肤色层次")
+        #expect(try database.load()?.preferences.revision == 3)
+        #expect(restored.dismissPreferenceSuggestion(id: restored.preferenceSuggestions[0].id))
+        #expect(AIEditingBatchStore(root: root).preferenceSuggestions.isEmpty)
+    }
+
     @Test func jsonMigrationIsAtomicAndOnlyRunsOnce() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

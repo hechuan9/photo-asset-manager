@@ -7,8 +7,19 @@ struct AIEditingWorkspaceView: View {
 
     var autoStart = false
     var returnToLibrary: () -> Void
-    @State private var showsPreferences = false
-    @State private var preferencesDraft = ""
+    private enum Editor: Identifiable {
+        case preferences, instruction, candidates, suggestion(AIEditingPreferenceSuggestion)
+        var id: String {
+            switch self {
+            case .preferences: "preferences"
+            case .instruction: "instruction"
+            case .candidates: "candidates"
+            case .suggestion(let value): value.id.uuidString
+            }
+        }
+    }
+    @State private var editor: Editor?
+    @State private var editorDraft = ""
 
     var body: some View {
         GeometryReader { workspace in
@@ -39,7 +50,7 @@ struct AIEditingWorkspaceView: View {
             store.restore(library: library)
             if autoStart && store.errorMessage == nil { store.start() }
         }
-        .sheet(isPresented: $showsPreferences) { preferencesEditor }
+        .sheet(item: $editor) { target in editingDialog(target).interactiveDismissDisabled() }
     }
 
     private var header: some View {
@@ -49,7 +60,14 @@ struct AIEditingWorkspaceView: View {
                 Spacer()
             }
             VStack(alignment: .leading, spacing: 6) {
-                Text("我的审美偏好").font(.headline)
+                HStack {
+                    Text("我的审美偏好").font(.headline)
+                    Spacer()
+                    if !store.preferenceSuggestions.isEmpty {
+                        Button("偏好候选（\(store.preferenceSuggestions.count)）") { editor = .candidates }
+                    }
+                    Button("编辑偏好") { openEditor(.preferences, text: store.preferencesText) }
+                }
                 Text(store.preferencesText.isEmpty ? "尚未设置，双击添加审美偏好" : store.preferencesText)
                     .foregroundStyle(.secondary).lineLimit(3)
                 Text("双击编辑，保存在这台 Mac，供尚未开始的照片使用").font(.caption).foregroundStyle(.secondary)
@@ -57,32 +75,104 @@ struct AIEditingWorkspaceView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(12).background(WorkspaceStyle.panel, in: RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
-            .onTapGesture(count: 2) { preferencesDraft = store.preferencesText; showsPreferences = true }
-            .accessibilityAction(named: Text("编辑审美偏好")) { preferencesDraft = store.preferencesText; showsPreferences = true }
-            TextField("新增照片要求", text: $store.batchInstruction, axis: .vertical)
-                .lineLimit(1...3).textFieldStyle(.roundedBorder)
+            .onTapGesture(count: 2) { openEditor(.preferences, text: store.preferencesText) }
+            .accessibilityAction(named: Text("编辑审美偏好")) { openEditor(.preferences, text: store.preferencesText) }
+            HStack {
+                Text(store.batchInstruction.isEmpty ? "新增照片要求：未设置" : "新增照片要求：" + store.batchInstruction)
+                    .font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                Spacer()
+                Button("调整要求") { openEditor(.instruction, text: store.batchInstruction) }
+                    .disabled(store.batch == nil)
+            }
             Text("选择采用版本后，该照片立即移出工作台并在后台发布；进度显示在底部状态栏。")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
 
-    private var preferencesEditor: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("编辑审美偏好").font(.title2.bold())
-            TextEditor(text: $preferencesDraft).frame(minHeight: 160)
-            Text("偏好只保存在这台 Mac；已开始的照片保留启动时的偏好。")
-                .font(.caption).foregroundStyle(.secondary)
-            if let error = store.errorMessage { Text(error).foregroundStyle(.red) }
+    private func openEditor(_ target: Editor, text: String) {
+        editorDraft = text
+        editor = target
+    }
+
+    @ViewBuilder private func editingDialog(_ target: Editor) -> some View {
+        if case .candidates = target {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("审美偏好候选").font(.title2.bold())
+                Text("从你提出的调色要求中总结；只有确认加入，才会用于后续照片。")
+                    .font(.callout).foregroundStyle(.secondary)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        if store.preferenceSuggestions.isEmpty { Text("暂无待确认的候选").foregroundStyle(.secondary) }
+                        ForEach(store.preferenceSuggestions) { suggestion in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(suggestion.text).textSelection(.enabled)
+                                Text("来自：" + suggestion.sourceName).font(.caption).foregroundStyle(.secondary)
+                                HStack {
+                                    Button("忽略") { store.dismissPreferenceSuggestion(id: suggestion.id) }
+                                    Spacer()
+                                    Button("编辑并加入") { openEditor(.suggestion(suggestion), text: suggestion.text) }
+                                }
+                                Divider()
+                            }
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if let error = store.errorMessage { Text(error).foregroundStyle(.red).lineLimit(3) }
+                HStack { Spacer(); Button("完成") { editor = nil }.keyboardShortcut(.cancelAction) }
+            }.padding(24).frame(width: 580, height: 480)
+        } else {
+            textEditingDialog(target)
+        }
+    }
+
+    private func textEditingDialog(_ target: Editor) -> some View {
+        let title: String
+        let help: String
+        switch target {
+        case .preferences:
+            title = "编辑审美偏好"
+            help = "确认后保存在这台 Mac；已开始的照片保留原偏好。"
+        case .instruction:
+            title = "调整新增照片要求"
+            help = "确认后仅用于尚未开始的照片，不会直接改写长期偏好。"
+        case .suggestion:
+            title = "确认偏好候选"
+            help = "可以先修改表述；确认后加入长期审美偏好。"
+        case .candidates:
+            title = "审美偏好候选"; help = ""
+        }
+        return VStack(alignment: .leading, spacing: 16) {
+            Text(title).font(.title2.bold())
+            Text(help).font(.callout).foregroundStyle(.secondary)
+            TextEditor(text: $editorDraft).font(.body)
+                .padding(8).background(WorkspaceStyle.panel, in: RoundedRectangle(cornerRadius: 8))
+                .frame(maxHeight: .infinity)
+            if let error = store.errorMessage { Text(error).foregroundStyle(.red).lineLimit(3) }
             HStack {
                 Spacer()
-                Button("取消") { showsPreferences = false }
-                Button("保存") {
-                    Task {
-                        if await store.savePreferences(text: preferencesDraft) { showsPreferences = false }
-                    }
-                }.buttonStyle(.borderedProminent)
+                Button("取消") { editor = nil }.keyboardShortcut(.cancelAction)
+                Button("确认保存") { saveEditor(target) }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    .disabled(isEmptySuggestion(target))
             }
-        }.padding(24).frame(width: 520)
+        }.padding(24).frame(width: 580, height: 440)
+    }
+
+    private func isEmptySuggestion(_ target: Editor) -> Bool {
+        if case .suggestion = target { return editorDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return false
+    }
+
+    private func saveEditor(_ target: Editor) {
+        switch target {
+        case .preferences:
+            Task { if await store.savePreferences(text: editorDraft) { editor = nil } }
+        case .instruction:
+            if store.saveBatchInstruction(text: editorDraft) { editor = nil }
+        case .suggestion(let suggestion):
+            if store.acceptPreferenceSuggestion(id: suggestion.id, text: editorDraft) { editor = nil }
+        case .candidates: break
+        }
     }
 
     private var footer: some View {
@@ -148,7 +238,7 @@ private struct AIEditingPhotoRow: View {
     let maximumPreviewHeight: CGFloat
     @State private var decodedAspectRatio: CGFloat?
     @State private var instruction = ""
-    @State private var expanded = false
+    @State private var showsRefinement = false
     @State private var zoom = 1.0
     @State private var offset = CGSize.zero
     @State private var dragOrigin = CGSize.zero
@@ -202,30 +292,20 @@ private struct AIEditingPhotoRow: View {
             }
             if let failure = item.failure {
                 if item.isBackgroundDecision {
-                    Button("重试后台处理") { store.retryDecision(itemID: item.id) }
+                    Button("重试后台处理") { store.retryItem(itemID: item.id) }
+                        .disabled(store.activities[item.id] != nil)
                 }
                 Text(failure).foregroundStyle(.red).textSelection(.enabled)
                 if let details = item.failureDetails {
                     DisclosureGroup("诊断详情") { Text(details).font(.caption).textSelection(.enabled) }
                 }
             }
-            DisclosureGroup("继续调色", isExpanded: $expanded) {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(Array(candidates.enumerated()), id: \.element.id) { index, candidate in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("第 \(index + 1) 版 · \(candidate.instruction.isEmpty ? "首次调色" : candidate.instruction)").font(.subheadline.bold())
-                            Text(candidate.result.reason).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
-                        }
-                    }
-                    HStack(alignment: .bottom) {
-                        TextField("描述这张照片还需要怎样调整…", text: $instruction, axis: .vertical)
-                            .lineLimit(2...5).textFieldStyle(.roundedBorder)
-                        Button("生成下一版") {
-                            store.refine(itemID: item.id, instruction: instruction)
-                            instruction = ""
-                        }.disabled(!editable || instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
-                }.padding(.top, 8)
+            HStack {
+                Button("继续调色…") { showsRefinement = true }.disabled(!editable)
+                Button("重新开始") {
+                    if store.restartItem(itemID: item.id) { instruction = "" }
+                }.disabled(!store.canRestart(item))
+                    .help("清空这张照片的调色版本、意见和对话，从底片重新调色；保留长期审美偏好。")
             }
             HStack {
                 if let activity = store.activities[item.id] {
@@ -241,6 +321,34 @@ private struct AIEditingPhotoRow: View {
         }
         .padding(18)
         .background(WorkspaceStyle.panel, in: RoundedRectangle(cornerRadius: 12))
+        .sheet(isPresented: $showsRefinement) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("继续调色 · " + item.name).font(.title2.bold()).lineLimit(2)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(Array(candidates.enumerated()), id: \.element.id) { index, candidate in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("第 \(index + 1) 版 · \(candidate.instruction.isEmpty ? "首次调色" : candidate.instruction)").font(.headline)
+                                Text(candidate.result.reason).foregroundStyle(.secondary).textSelection(.enabled)
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }.frame(maxHeight: .infinity)
+                Text("你的调整要求").font(.headline)
+                TextEditor(text: $instruction).frame(height: 110)
+                HStack {
+                    Spacer()
+                    Button("取消") { showsRefinement = false }.keyboardShortcut(.cancelAction)
+                    Button("确认并生成下一版") {
+                        if store.refine(itemID: item.id, instruction: instruction) {
+                            instruction = ""
+                            showsRefinement = false
+                        }
+                    }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                        .disabled(!editable || instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }.padding(24).frame(width: 620, height: 560).interactiveDismissDisabled()
+        }
     }
 
     private var displayedVersionTitle: String {
