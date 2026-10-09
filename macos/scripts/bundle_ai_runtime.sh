@@ -85,9 +85,6 @@ for path in sorted(helpers.rglob("*"), key=lambda item: len(item.parts), reverse
         continue
     with path.open("rb") as stream:
         is_code = stream.read(4) in macho_magic
-    if not is_code and path.suffix == ".la":
-        # Libtool metadata is read by the loader, never executed or code-signed.
-        path.chmod(path.stat().st_mode & ~0o111)
     if is_code:
         command = ["codesign", "--force", "--sign", identity, "--options", "runtime"]
         header = subprocess.check_output(["otool", "-hv", str(path)], text=True)
