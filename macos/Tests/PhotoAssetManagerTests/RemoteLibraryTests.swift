@@ -141,7 +141,7 @@ import KeepsAPI
             let nameAlignment = name.alignmentRect(forFrame: name.frame)
             #expect(abs(countAlignment.maxX - width) < 0.5)
             #expect(cell.countLabel.frame.minX >= 0)
-            #expect(cell.countLabel.frame.width >= cell.countLabel.intrinsicContentSize.width)
+            #expect(countAlignment.width >= cell.countLabel.intrinsicContentSize.width)
             #expect(cell.nameLabel.frame.maxX < cell.countLabel.frame.minX)
             #expect(cell.nameLabel.frame.width > 0)
             #expect(abs(countAlignment.minX - nameAlignment.maxX - 6) < 0.5)
