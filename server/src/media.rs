@@ -281,7 +281,7 @@ impl MediaProcessor {
                 .arg(&source)
                 .args([
                     "-vf",
-                    "thumbnail=60",
+                    &format!("scale={edge}:-2,thumbnail=60"),
                     "-frames:v",
                     "1",
                     "-threads",
