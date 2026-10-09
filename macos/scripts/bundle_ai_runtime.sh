@@ -81,6 +81,18 @@ source_hashes = {
     "codex-code-mode-host": digest(codex_source.parent / "codex-code-mode-host"),
     "darktable-cli": digest(darktable_source / "Contents/MacOS/darktable-cli"),
 }
+# macOS treats files beside a bundle executable as code, including profiling text assets.
+macos_dir = helpers / "darktable.app/Contents/MacOS"
+for path in macos_dir.iterdir():
+    if not path.is_file() or path.is_symlink():
+        continue
+    with path.open("rb") as stream:
+        if stream.read(4) in macho_magic:
+            continue
+    tools = helpers / "darktable.app/Contents/Resources/developer-tools"
+    tools.mkdir(exist_ok=True)
+    path.rename(tools / path.name)
+
 for path in sorted(helpers.rglob("*"), key=lambda item: len(item.parts), reverse=True):
     if not path.is_file() or path.is_symlink():
         continue
