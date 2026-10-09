@@ -10,7 +10,7 @@ struct PhotoAssetManagerApp: App {
     @FocusedValue(\.gallerySelection) private var gallerySelection
     var body: some Scene {
         WindowGroup {
-            ContentView().environmentObject(library).environmentObject(batch).frame(minWidth: 1080, minHeight: 720)
+            LibraryStartupView().environmentObject(library).environmentObject(batch).frame(minWidth: 1080, minHeight: 720)
                 .onReceive(batch.editor.$isBusy, perform: synchronizeEditorActivity)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in batch.stopForExit() }
         }
@@ -22,20 +22,20 @@ struct PhotoAssetManagerApp: App {
                 if let gallerySelection {
                     Button("全选照片", action: gallerySelection.selectAll)
                         .keyboardShortcut("a", modifiers: .command)
-                        .disabled(library.isOperationBlocking)
+                        .disabled(!library.isStartupReady || library.isOperationBlocking)
                     Button("取消选择照片", action: gallerySelection.deselectAll)
                         .keyboardShortcut("a", modifiers: [.command, .shift])
-                        .disabled(library.isOperationBlocking)
+                        .disabled(!library.isStartupReady || library.isOperationBlocking)
                 }
             }
             CommandGroup(after: .sidebar) {
-                Toggle("过滤隐藏目录内容", isOn: $library.hiddenDirectoryFilterEnabled).disabled(library.isOperationBlocking)
+                Toggle("过滤隐藏目录内容", isOn: $library.hiddenDirectoryFilterEnabled).disabled(!library.isStartupReady || library.isOperationBlocking)
             }
             CommandMenu("照片") {
                 Button("打开 AI 调色工作台") { aiWorkspace?.open() }
-                    .disabled(aiWorkspace == nil || library.isOperationBlocking)
+                    .disabled(!library.isStartupReady || aiWorkspace == nil || library.isOperationBlocking)
                 Button("删除所有弃用照片…") { library.showsRejectedTrash = true }
-                    .disabled(library.client == nil || library.isOperationBlocking || library.isMutating || library.isCheckingConnection || library.isImportingPhotos || batch.isRunning || batch.editor.isBusy)
+                    .disabled(!library.isStartupReady || library.client == nil || library.isOperationBlocking || library.isMutating || library.isCheckingConnection || library.isImportingPhotos || batch.isRunning || batch.editor.isBusy)
                 Divider()
                 Group {
                 Button("上一张") { library.selectAdjacent(-1) }
@@ -50,7 +50,7 @@ struct PhotoAssetManagerApp: App {
                 Button("留用") { library.updateSelected(KeepsAssetPatch(flagState: "picked")) }.keyboardShortcut("p", modifiers: [])
                 Button("排除") { library.updateSelected(KeepsAssetPatch(flagState: "rejected")) }.keyboardShortcut("x", modifiers: [])
                 Button("清除标记") { library.updateSelected(KeepsAssetPatch(flagState: "unflagged")) }.keyboardShortcut("u", modifiers: [])
-                }.disabled(library.isOperationBlocking || library.isSelectingAll)
+                }.disabled(!library.isStartupReady || library.isOperationBlocking || library.isSelectingAll)
             }
         }
         Window("任务追踪", id: "nas-tasks") {
@@ -70,7 +70,7 @@ struct PhotoAssetManagerApp: App {
                     .disabled(library.isOperationBlocking)
                     .tabItem { Label("服务器", systemImage: "server.rack") }
                 Group {
-                    if let client = library.client {
+                    if library.isStartupReady, let client = library.client {
                         NASSourceSettingsView(client: client).id(ObjectIdentifier(client))
                     } else {
                         Text("请先在服务器设置中验证并保存连接。")
@@ -101,5 +101,54 @@ struct PhotoAssetManagerApp: App {
         library.isAISettingsBusy = busy
         if busy { library.pauseLibraryForDirectoryOperation() }
         else if !library.isOperationBlocking { library.refresh(force: true) }
+    }
+}
+
+private struct LibraryStartupView: View {
+    @EnvironmentObject private var library: LibraryStore
+    @State private var showsSettings = false
+
+    private struct Request: Equatable {
+        let showsSettings: Bool
+        let configuration: KeepsConfiguration?
+    }
+
+    var body: some View {
+        Group {
+            if library.isStartupReady {
+                ContentView()
+            } else {
+                VStack(spacing: 20) {
+                    ProgressView()
+                    Text("正在载入资料库").font(.title2)
+                    if library.startupAttempt > 0 {
+                        Text("第 \(library.startupAttempt) / 10 次尝试").foregroundStyle(.secondary)
+                    }
+                    if let seconds = library.startupRetrySeconds {
+                        Text("连接失败，\(seconds) 秒后自动重试。")
+                    }
+                    if let error = library.startupError {
+                        Text(error).font(.callout).foregroundStyle(.secondary)
+                            .textSelection(.enabled).frame(maxWidth: 560)
+                    }
+                    Button("修改资料库位置…") { showsSettings = true }
+                }
+                .padding(32).frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .sheet(isPresented: $showsSettings) {
+            VStack {
+                ServerSettingsView()
+                Button("返回") { showsSettings = false }.padding(.bottom, 20)
+            }
+        }
+        .task(id: Request(showsSettings: showsSettings, configuration: library.configuration)) {
+            guard !showsSettings else { return }
+            await library.loadStartupLibrary()
+            if library.startupExhausted, !Task.isCancelled { NSApplication.shared.terminate(nil) }
+        }
+        .onChange(of: library.configuration) { _, _ in
+            if showsSettings { showsSettings = false }
+        }
     }
 }
