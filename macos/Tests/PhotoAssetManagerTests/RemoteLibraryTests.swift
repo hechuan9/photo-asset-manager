@@ -5,6 +5,44 @@ import KeepsAPI
 @testable import PhotoAssetManager
 
 @MainActor struct RemoteLibraryTests {
+    @Test func startupPublishesLibraryOnlyAfterSuccessfulLoad() async {
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://nas.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        #expect(!store.isStartupReady)
+        await store.loadStartupLibrary(sleep: { _ in Issue.record("successful startup should not retry") })
+        #expect(store.isStartupReady)
+        #expect(store.hasLoadedResults)
+        #expect(store.counts != nil)
+        #expect(store.startupAttempt == 1)
+        #expect(!store.startupExhausted)
+    }
+
+    @Test func startupStopsAfterTenFailuresWithExponentialBackoff() async {
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://unauthorized.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false)
+        var delays: [Duration] = []
+        await store.loadStartupLibrary(sleep: { delays.append($0) })
+        #expect(delays == [1, 2, 4, 8, 16, 32, 64, 128, 256].map { Duration.seconds($0) })
+        #expect(store.startupAttempt == 10)
+        #expect(store.startupExhausted)
+        #expect(!store.isStartupReady)
+        #expect(!store.hasLoadedResults)
+        #expect(store.startupError != nil)
+    }
+
+    @Test func cancelledStartupDoesNotExhaustRetriesAndCanResume() async {
+        let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://unauthorized.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, persistConfiguration: { _ in })
+        await store.loadStartupLibrary(sleep: { _ in throw CancellationError() })
+        #expect(store.startupAttempt == 1)
+        #expect(!store.startupExhausted)
+        #expect(!store.isStartupReady)
+        let saved = await store.checkConnection(baseURL: "https://nas.invalid", libraryID: "test", accessCredential: "", save: true)
+        #expect(saved)
+        #expect(!store.isStartupReady)
+        try? await waitUntil { !store.isLoading }
+        await store.loadStartupLibrary()
+        #expect(store.isStartupReady)
+        #expect(store.startupAttempt == 1)
+    }
+
     @Test func missingSavedDirectoryFallsBackAfterSuccessfulListing() async throws {
         let preferences = UserDefaults(suiteName: UUID().uuidString)!
         let config = KeepsConfiguration(baseURL: URL(string: "https://restore-tree.invalid")!, libraryID: "test")
@@ -435,9 +473,10 @@ import KeepsAPI
 
     @Test func revisionPollingRefreshesOnlyWhenChangedAndStopsWhileInactive() async throws {
         let store = LibraryStore(configuration: KeepsConfiguration(baseURL: URL(string: "https://revision.invalid")!, libraryID: "test"), session: stubSession(), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
+        await store.loadStartupLibrary()
         store.setActive(true)
         defer { store.setActive(false) }
-        try await waitUntil { store.assets.count == 2 && !store.isLoading }
+        try await waitUntil { LibraryStubProtocol.treeRequests.count(for: "revision-poll") == 1 && !store.isLoading }
         #expect(LibraryStubProtocol.treeRequests.count(for: "revision-assets") == 1)
         store.setActive(false)
         store.setActive(true)

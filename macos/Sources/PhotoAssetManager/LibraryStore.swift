@@ -5,6 +5,59 @@ import OSLog
 
 @MainActor
 final class LibraryStore: ObservableObject {
+    @Published private(set) var isStartupReady = false
+    @Published private(set) var startupAttempt = 0
+    @Published private(set) var startupRetrySeconds: Int?
+    @Published private(set) var startupError: String?
+    @Published private(set) var startupExhausted = false
+
+    func loadStartupLibrary(sleep: (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) async {
+        guard !isStartupReady else { return }
+        startupExhausted = false
+        startupAttempt = 0
+        startupRetrySeconds = nil
+        startupError = nil
+        guard let client, let configuration else {
+            startupError = lastError ?? "请设置服务器地址和资料库。"
+            return
+        }
+        let requestedQuery = effectiveQuery
+        for attempt in 1...10 {
+            guard !Task.isCancelled else { return }
+            startupAttempt = attempt
+            startupRetrySeconds = nil
+            do {
+                let summary = try await client.counts(showHidden: requestedQuery.showHidden)
+                let page = try await client.assets(query: requestedQuery)
+                try Task.checkCancellation()
+                guard self.configuration == configuration else { return }
+                counts = summary
+                countsShowHidden = requestedQuery.showHidden
+                lastCountsFetch = Date()
+                displayedQuery = requestedQuery
+                display(page)
+                assetCache.store(page, for: requestedQuery)
+                lastAssetFetch = Date()
+                startupError = nil
+                isStartupReady = true
+                setActive(isActive)
+                return
+            } catch {
+                guard !Task.isCancelled, self.configuration == configuration else { return }
+                startupError = Self.describe(error)
+                Self.navigationLogger.error("Startup library attempt \(attempt) failed: \(String(reflecting: error), privacy: .public)")
+            }
+            if attempt == 10 {
+                startupExhausted = true
+                return
+            }
+            let delay = 1 << (attempt - 1)
+            startupRetrySeconds = delay
+            do { try await sleep(.seconds(delay)) }
+            catch { return }
+        }
+    }
+
     @Published var showsRejectedTrash = false
     @Published var rejectedTrashPreview: KeepsRejectedTrashTask?
     var rejectedTrashPreviewConfiguration: KeepsConfiguration?
@@ -131,7 +184,7 @@ final class LibraryStore: ObservableObject {
         isActive = active
         revisionTask?.cancel()
         revisionTask = nil
-        guard active, configuration != nil else { return }
+        guard active, configuration != nil, isStartupReady else { return }
         revisionTask = Task {
             while !Task.isCancelled {
                 if Date().timeIntervalSince(lastNavigationFetch) >= 300 { refreshNavigation(force: false) }
