@@ -278,7 +278,16 @@ impl MediaProcessor {
             run(Command::new("ffmpeg")
                 .args(["-nostdin", "-v", "error", "-threads", "1", "-i"])
                 .arg(&source)
-                .args(["-frames:v", "1", "-threads", "1", "-filter_threads", "1"])
+                .args([
+                    "-vf",
+                    "thumbnail=60",
+                    "-frames:v",
+                    "1",
+                    "-threads",
+                    "1",
+                    "-filter_threads",
+                    "1",
+                ])
                 .arg(&decoded))?;
             decoded.as_path()
         } else if raw_input {

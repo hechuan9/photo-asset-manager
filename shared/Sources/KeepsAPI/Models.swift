@@ -43,6 +43,7 @@ public struct KeepsAsset: Codable, Identifiable, Equatable, Sendable {
     public var negativeContentHash: String? = nil
     public var paths: [String]? = nil
     public var gridPreview: KeepsPreview? { thumbnail ?? preview }
+    public var isVideo: Bool { ["mov", "mp4", "m4v", "avi", "mkv", "mts", "m2ts"].contains(URL(fileURLWithPath: originalFilename).pathExtension.lowercased()) }
 }
 
 public struct KeepsAssetPage: Codable, Sendable {

@@ -177,7 +177,7 @@ class Worker:
                     # The loopback proxy keeps credentials out of ffmpeg and refuses redirects.
                     with self.video_source(prefix) as (url, transfer):
                         self.render(["ffmpeg", "-nostdin", "-v", "error", "-threads", "1", "-i", url,
-                                     "-frames:v", "1", "-threads", "1", "-filter_threads", "1", str(source)],
+                                     "-vf", "thumbnail=60", "-frames:v", "1", "-threads", "1", "-filter_threads", "1", str(source)],
                                     env, directory, lease_lost)
                     count = transfer["bytes"]
                 else:
