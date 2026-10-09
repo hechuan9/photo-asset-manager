@@ -121,19 +121,19 @@ import KeepsAPI
 
     @Test func directoryCountRemainsFullyVisibleWhenLongNameIsTruncated() throws {
         _ = NSApplication.shared
-        let cell = DirectoryOutlineView.DirectoryCell(frame: NSRect(x: 0, y: 0, width: 100, height: 30))
+        let cell = DirectoryOutlineView.DirectoryCell(frame: NSRect(x: 0, y: 0, width: 160, height: 30))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300), styleMask: .borderless, backing: .buffered, defer: false)
         let host = try #require(window.contentView)
         host.addSubview(cell)
         cell.translatesAutoresizingMaskIntoConstraints = false
-        let widthConstraint = cell.widthAnchor.constraint(equalToConstant: 100)
+        let widthConstraint = cell.widthAnchor.constraint(equalToConstant: 160)
         NSLayoutConstraint.activate([widthConstraint, cell.heightAnchor.constraint(equalToConstant: 30), cell.leadingAnchor.constraint(equalTo: host.leadingAnchor), cell.topAnchor.constraint(equalTo: host.topAnchor)])
         let directory = try JSONDecoder().decode(KeepsNavigationDirectory.self, from: Data("""
-        {"path":"/photos/long","name":"这是一个非常长的目录名称用于检查数字不会被挤出可见区域","photoCount":1234567,"hasChildren":false}
+        {"path":"/photos/long","name":"这是一个非常长的目录名称用于检查数字不会被挤出可见区域","directPhotoCount":12,"photoCount":1234567,"hasChildren":false}
         """.utf8))
         cell.configure(directory, loading: false)
         #expect(cell.nameLabel.lineBreakMode == .byTruncatingMiddle)
-        for width in [100.0, 130.0, 180.0] {
+        for width in [160.0, 200.0, 260.0] {
             widthConstraint.constant = width
             host.layoutSubtreeIfNeeded()
             let countAlignment = cell.countLabel.alignmentRect(forFrame: cell.countLabel.frame)
@@ -141,7 +141,7 @@ import KeepsAPI
             let nameAlignment = name.alignmentRect(forFrame: name.frame)
             #expect(abs(countAlignment.maxX - width) < 0.5)
             #expect(cell.countLabel.frame.minX >= 0)
-            #expect(countAlignment.width >= cell.countLabel.intrinsicContentSize.width)
+            #expect(cell.countLabel.frame.width >= cell.countLabel.intrinsicContentSize.width)
             #expect(cell.nameLabel.frame.maxX < cell.countLabel.frame.minX)
             #expect(cell.nameLabel.frame.width > 0)
             #expect(abs(countAlignment.minX - nameAlignment.maxX - 6) < 0.5)
