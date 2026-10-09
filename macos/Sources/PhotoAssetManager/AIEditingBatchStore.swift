@@ -150,7 +150,7 @@ struct AIEditingBatch: Codable {
     func prepare(library: LibraryStore) {
         guard batch == nil, !library.isOperationBlocking, !library.isMutating, !library.isSelectingAll,
               !library.isCheckingConnection, !library.isUpdatingHiddenDirectory, !library.isImportingPhotos,
-              library.directoryToRename == nil, library.directoryToTrash == nil,
+              library.directoryToCreate == nil, library.directoryToRename == nil, library.directoryToTrash == nil,
               !editor.isBusy, !library.selectedIDs.isEmpty, let configuration = library.configuration else { return }
         do {
             if let storageError { throw storageError }

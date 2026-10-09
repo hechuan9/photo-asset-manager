@@ -6,6 +6,7 @@ struct AIEditingComparisonImage: View {
     let url: URL?
     let asset: KeepsAsset?
     let configuration: KeepsConfiguration?
+    var onImageSize: (CGSize) -> Void = { _ in }
     @State private var image: CGImage?
     @State private var loadedURL: URL?
     @State private var error: String?
@@ -36,6 +37,7 @@ struct AIEditingComparisonImage: View {
                 try Task.checkCancellation()
                 image = decoded
                 loadedURL = url
+                onImageSize(CGSize(width: decoded.width, height: decoded.height))
             } catch {
                 guard !Task.isCancelled else { return }
                 self.error = String(reflecting: error)

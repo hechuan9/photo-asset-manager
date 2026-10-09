@@ -14,6 +14,7 @@ final class LibraryStore: ObservableObject {
     @Published var isPreparingRejectedTrash = false
     var rejectedTrashTracking: Task<Void, Never>?
     var rejectedTrashPollInterval: Duration = .seconds(1)
+    @Published var directoryToCreate: KeepsNavigationDirectory?
     @Published var directoryToRename: KeepsNavigationDirectory?
     @Published var directoryToTrash: KeepsNavigationDirectory?
     @Published var directoryTrash: PendingDirectoryTrash?

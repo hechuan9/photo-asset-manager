@@ -401,6 +401,10 @@ struct DirectoryOutlineView: NSViewRepresentable {
                 inherited.isEnabled = false
             }
             menu.addItem(.separator())
+            let create = menu.addItem(withTitle: "添加文件夹…", action: #selector(createDirectory(_:)), keyEquivalent: "")
+            create.target = self
+            create.representedObject = node
+            create.isEnabled = library.client != nil
             let rename = menu.addItem(withTitle: "重命名文件夹…", action: #selector(renameDirectory(_:)), keyEquivalent: "")
             rename.target = self
             rename.representedObject = node
@@ -409,6 +413,12 @@ struct DirectoryOutlineView: NSViewRepresentable {
             trash.target = self
             trash.representedObject = node
             return menu
+        }
+
+        @objc private func createDirectory(_ sender: NSMenuItem) {
+            guard !library.isOperationBlocking, library.client != nil,
+                  let node = sender.representedObject as? Node else { return }
+            library.directoryToCreate = directory(node.path)
         }
 
         @objc private func renameDirectory(_ sender: NSMenuItem) {
@@ -460,6 +470,53 @@ struct DirectoryOutlineView: NSViewRepresentable {
             cell.identifier = identifier
             cell.configure(directory, loading: loading.contains(item.path) || galleryLoadingPath == item.path, hidden: library.isDirectoryHidden(item.path))
             return cell
+        }
+    }
+}
+
+struct DirectoryCreateSheet: View {
+    @ObservedObject var library: LibraryStore
+    let directory: KeepsNavigationDirectory
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var isCreating = false
+    @State private var error: String?
+    @FocusState private var nameFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("添加文件夹").font(.headline)
+            Text("父目录：\(directory.path)")
+                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            TextField("文件夹名称", text: $name).focused($nameFocused).disabled(isCreating)
+            if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+            HStack {
+                if isCreating { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction).disabled(isCreating)
+                Button("创建") { Task { await create() } }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(isCreating || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || library.isOperationBlocking)
+            }
+        }
+        .padding(24).frame(width: 420)
+        .interactiveDismissDisabled(isCreating)
+        .onAppear { nameFocused = true }
+    }
+
+    @MainActor private func create() async {
+        guard !isCreating, !library.isOperationBlocking, let client = library.client else { return }
+        isCreating = true
+        defer { isCreating = false }
+        do {
+            _ = try await client.createDirectory(parentPath: directory.path,
+                                                name: name.trimmingCharacters(in: .whitespacesAndNewlines))
+            library.loadChildren(of: directory.path, refresh: true)
+            library.setDirectoryExpanded(directory.path, expanded: true)
+            dismiss()
+        } catch {
+            self.error = String(reflecting: error) + "\n" + error.localizedDescription
         }
     }
 }

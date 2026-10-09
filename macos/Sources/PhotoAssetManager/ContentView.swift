@@ -114,6 +114,10 @@ struct ContentView: View {
                 PhotoMoveProgressView(library: library)
             }
         }
+        .sheet(item: $library.directoryToCreate) { directory in
+            DirectoryCreateSheet(library: library, directory: directory)
+                .disabled(library.isAIEditingBlocking || library.isAISettingsBusy)
+        }
         .sheet(item: $library.directoryToRename) { directory in
             DirectoryRenameSheet(library: library, directory: directory)
                 .disabled(library.isAIEditingBlocking || library.isAISettingsBusy)
@@ -408,7 +412,7 @@ struct ContentView: View {
     private var canStartAIEditing: Bool {
         (batch.batch != nil || !library.selectedIDs.isEmpty) && library.client != nil && !library.isOperationBlocking &&
         !library.isMutating && !library.isSelectingAll && !library.isCheckingConnection && !library.isUpdatingHiddenDirectory &&
-        !library.isImportingPhotos && library.directoryToRename == nil && library.directoryToTrash == nil
+        !library.isImportingPhotos && library.directoryToCreate == nil && library.directoryToRename == nil && library.directoryToTrash == nil
     }
 
     private var inspectorRail: some View {
