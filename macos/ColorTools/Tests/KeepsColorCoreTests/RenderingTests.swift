@@ -215,7 +215,15 @@ final class RenderingTests: XCTestCase {
         }
         let strip = entries.firstIndex { $0.0 == 273 }! * 12 + 8
         records.replaceSubrange(strip..<(strip + 4), with: u32(UInt32(extraOffset + extra.count)))
-        return Data([73, 73, 42, 0] + u32(8) + u16(UInt16(entries.count)) + records + u32(0) + extra + Array(repeating: u16(16000), count: 256 * 192).flatMap { $0 })
+        var output = Data([73, 73, 42, 0])
+        output.append(contentsOf: u32(8))
+        output.append(contentsOf: u16(UInt16(entries.count)))
+        output.append(contentsOf: records)
+        output.append(contentsOf: u32(0))
+        output.append(contentsOf: extra)
+        let pixel = u16(16000)
+        for _ in 0..<(256 * 192) { output.append(contentsOf: pixel) }
+        return output
     }
 
     private struct Pixels { let bytes: [UInt8]; let width: Int; let height: Int }
