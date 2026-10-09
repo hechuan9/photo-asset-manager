@@ -26,6 +26,14 @@ import KeepsColorCore
         candidateLimit = baseRecipe == nil ? 5 : 6
     }
 
+    func selectCandidate(_ id: String) throws -> [String: Any] {
+        let rendered = try preview(id)
+        let full = try preview(id, full: true)
+        let selection: [String: Any] = ["candidateID": id, "preview": rendered.path, "fullSize": full.path, "published": false]
+        try JSONSerialization.data(withJSONObject: selection, options: [.sortedKeys]).write(to: engine.directory.appendingPathComponent("selection.json"), options: .atomic)
+        return selection
+    }
+
     private func preview(_ id: String, full: Bool = false) throws -> URL {
         let candidate = try engine.store.candidate(id)
         let recipe = try DarktableRecipe.decode(candidate.recipe)
@@ -147,11 +155,7 @@ import KeepsColorCore
         case "select_candidate":
             let id = try string("candidateID")
             guard reviewed.contains(id) else { throw ColorToolError("Review this candidate with render_preview or compare_candidates before selecting it") }
-            let rendered = try preview(id)
-            let full = try preview(id, full: true)
-            let selection: [String: Any] = ["candidateID": id, "preview": rendered.path, "fullSize": full.path, "published": false]
-            try JSONSerialization.data(withJSONObject: selection, options: [.sortedKeys]).write(to: engine.directory.appendingPathComponent("selection.json"), options: .atomic)
-            return [try textBlock(selection)]
+            return [try textBlock(selectCandidate(id))]
         default: throw ColorToolError("Unknown tool")
         }
     }

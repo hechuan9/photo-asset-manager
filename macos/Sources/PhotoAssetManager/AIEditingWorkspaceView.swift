@@ -180,7 +180,7 @@ private struct AIEditingPhotoRow: View {
             }
             versionPicker
             AIEditingComparisonLayout(aspectRatio: aspectRatio, maximumHeight: maximumPreviewHeight) {
-                comparisonPane(url: item.originalPreview ?? displayed?.result.originalPreview, title: "采用调整前版本", original: true, selected: item.selectedCandidateID == nil) {
+                comparisonPane(url: item.originalPreview, title: "采用调整前版本", original: true, selected: item.selectedCandidateID == nil) {
                     store.choose(itemID: item.id, candidateID: nil)
                 }
                 comparisonPane(url: displayed?.result.preview ?? displayed?.result.fullSize, title: displayedVersionTitle, selected: item.selectedCandidateID != nil) {
@@ -195,6 +195,9 @@ private struct AIEditingPhotoRow: View {
                 Spacer()
             }.font(.caption)
             if let result = displayed?.result {
+                if result.status == "needs_review" {
+                    Text("AI 建议人工检查；确认效果后仍可采用此版。").font(.caption).foregroundStyle(.secondary)
+                }
                 Text("调色意见：\(result.reason)").textSelection(.enabled)
             }
             if let failure = item.failure {
@@ -255,7 +258,7 @@ private struct AIEditingPhotoRow: View {
                     ForEach(Array(candidates.enumerated()), id: \.element.id) { index, candidate in
                         Text("第 \(index + 1) 版 · \(candidate.instruction.isEmpty ? "首次调色" : candidate.instruction)")
                             .tag(Optional(candidate.id))
-                            .disabled(candidate.result.status != "selected")
+                            .disabled(!candidate.result.isSelectable)
                     }
                 }
                 .pickerStyle(.menu)

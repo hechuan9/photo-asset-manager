@@ -84,6 +84,13 @@ public final class KeepsClient: Sendable {
     public func commitEdit(assetID: UUID, edit: KeepsEditCommit) async throws -> KeepsEditState {
         try await request("PUT", library + ["assets", assetID.uuidString, "edit"], body: JSONEncoder().encode(edit))
     }
+    public func downloadCurrentStandard(assetID: UUID, to destination: URL) async throws {
+        let descriptor = try await refreshPreviewDescriptor(assetID: assetID, role: .standard)
+        let (data, response) = try await session.data(from: descriptor.downloadURL)
+        let checked = try checkedData(data, response)
+        try Task.checkCancellation()
+        try checked.write(to: destination, options: .atomic)
+    }
     public func downloadNegative(assetID: UUID, contentHash: String, to destination: URL) async throws {
         var request = try makeRequest("GET", library + ["assets", assetID.uuidString, "edit", "source"],
                                       query: [URLQueryItem(name: "contentHash", value: contentHash)])

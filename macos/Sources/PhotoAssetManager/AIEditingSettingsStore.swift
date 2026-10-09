@@ -362,11 +362,11 @@ import CryptoKit
         }
         return arguments
     }
-    private func writeLog(_ result: AIEditingProcess.Result, job: URL) throws {
-        try Data(Self.redacted(result.errors).utf8).write(to: job.appendingPathComponent("stderr.log"), options: .atomic)
+    private func writeLog(_ result: AIEditingProcess.Result, job: URL, prefix: String = "") throws {
+        try Data(Self.redacted(result.errors).utf8).write(to: job.appendingPathComponent(prefix + "stderr.log"), options: .atomic)
         // Keep protocol events for diagnosis, without embedded image data or credentials.
         let lines = result.output.split(separator: "\n").map { Self.redacted(String($0)) }
-        try Data(lines.joined(separator: "\n").utf8).write(to: job.appendingPathComponent("events.jsonl"), options: .atomic)
+        try Data(lines.joined(separator: "\n").utf8).write(to: job.appendingPathComponent(prefix + "events.jsonl"), options: .atomic)
     }
     // Codex parses overrides as TOML, which does not accept JSON escaped slashes.
     static func json(_ value: Any) throws -> String {
@@ -409,23 +409,59 @@ import CryptoKit
     static func gradeResult(in job: URL) throws -> AIGradeResult {
         let checked = try validateResult(in: job)
         let result = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("result.json"))) as! [String: Any]
-        guard checked.selected else {
-            return AIGradeResult(status: result["status"] as! String, reason: checked.reason, timing: AIGradeTiming.read(job), preview: checked.preview, originalPreview: checked.originalPreview)
-        }
-        let selection = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("render/selection.json"))) as! [String: Any]
         let state = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("render/candidates.json"))) as! [String: Any]
-        guard let full = selection["fullSize"] as? String,
-              let id = result["candidateID"] as? String,
+        guard let id = result["candidateID"] as? String,
               let candidates = state["candidates"] as? [[String: Any]],
               let encoded = candidates.first(where: { $0["id"] as? String == id })?["recipe"] as? String,
               let recipe = Data(base64Encoded: encoded),
               (try JSONSerialization.jsonObject(with: recipe)) is [String: Any] else {
             throw AIEditingFailure("调色配方缺失，无法无损保存。")
         }
+        guard checked.selected else {
+            return AIGradeResult(status: result["status"] as! String, reason: checked.reason,
+                recipeJSON: String(decoding: recipe, as: UTF8.self), timing: AIGradeTiming.read(job),
+                preview: checked.preview, originalPreview: checked.originalPreview)
+        }
+        let selection = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("render/selection.json"))) as! [String: Any]
+        guard let full = selection["fullSize"] as? String else { throw AIEditingFailure("完整调色结果缺失。") }
         let fullURL = URL(fileURLWithPath: full)
         let xmpURL = fullURL.deletingPathExtension().appendingPathExtension("xmp")
         return AIGradeResult(status: "selected", reason: checked.reason, fullSize: fullURL,
             recipeJSON: String(decoding: recipe, as: UTF8.self), xmp: try String(contentsOf: xmpURL, encoding: .utf8), timing: AIGradeTiming.read(job), preview: checked.preview, originalPreview: checked.originalPreview)
+    }
+
+    func completeReviewResult(_ result: AIGradeResult, source: URL) async throws -> AIGradeResult {
+        guard result.isSelectable, let preview = result.preview else { throw AIEditingFailure("候选预览或配方缺失。") }
+        let job = preview.deletingLastPathComponent().deletingLastPathComponent()
+        let recovered = try Self.gradeResult(in: job)
+        guard recovered.preview == preview, recovered.recipeJSON == result.recipeJSON else {
+            throw AIEditingFailure("候选配方与本机记录不一致，无法发布。")
+        }
+        let output = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("result.json"))) as! [String: Any]
+        guard let candidateID = output["candidateID"] as? String else { throw AIEditingFailure("候选身份缺失。") }
+        let process = AIEditingProcess(), id = UUID()
+        gradingRunners[id] = process
+        defer { gradingRunners[id] = nil }
+        // This direct helper launch has no KEEPS_RENDER_* environment; the parent owns its slot.
+        let execution = try await withRenderSlot {
+            try await process.run(executable: self.codeRuntime.appendingPathComponent("keeps-color-mcp"),
+                arguments: ["--darktable", self.codeRuntime.appendingPathComponent("darktable.app/Contents/MacOS/darktable-cli").path,
+                            "--source", source.path, "--job", job.appendingPathComponent("render").path,
+                            "--select-candidate", candidateID], home: self.home, directory: job, timeout: 1200)
+        }
+        try writeLog(execution, job: job, prefix: "manual-export-" + id.uuidString + "-")
+        guard execution.exitCode == 0 else { throw AIEditingFailure.process(execution, job: job) }
+        let selection = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("render/selection.json"))) as! [String: Any]
+        guard selection["candidateID"] as? String == candidateID, let full = selection["fullSize"] as? String else {
+            throw AIEditingFailure("完整调色结果与所选候选不一致。")
+        }
+        let fullURL = URL(fileURLWithPath: full).resolvingSymlinksInPath()
+        guard fullURL.path.hasPrefix(job.appendingPathComponent("render").resolvingSymlinksInPath().path + "/"),
+              FileManager.default.isReadableFile(atPath: fullURL.path) else { throw AIEditingFailure("完整调色结果缺失或位于任务目录之外。") }
+        var completed = result
+        completed.fullSize = fullURL
+        completed.xmp = try String(contentsOf: fullURL.deletingPathExtension().appendingPathExtension("xmp"), encoding: .utf8)
+        return completed
     }
 
     struct ValidatedResult { let selected: Bool; let preview: URL?; let originalPreview: URL?; let reason: String }
@@ -478,6 +514,7 @@ struct AIGradeContext: Codable, Sendable {
 }
 
 struct AIGradeResult: Codable, Sendable {
+    var isSelectable: Bool { status == "selected" || (status == "needs_review" && recipeJSON != nil) }
     var status: String
     var reason: String
     var fullSize: URL? = nil

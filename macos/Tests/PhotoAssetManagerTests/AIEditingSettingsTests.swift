@@ -216,7 +216,7 @@ import CryptoKit
         func write(_ value: [String: Any], _ path: String) throws {
             try JSONSerialization.data(withJSONObject: value).write(to: job.appendingPathComponent(path))
         }
-        try write(["candidates": [["id": "raw", "operationID": "baseline"], ["id": "candidate"]]], "render/candidates.json")
+        try write(["candidates": [["id": "raw", "operationID": "baseline"], ["id": "candidate", "recipe": Data("{}".utf8).base64EncodedString()]]], "render/candidates.json")
         let original = render.appendingPathComponent("raw-preview.jpg")
         let preview = render.appendingPathComponent("candidate-preview.jpg")
         try Data([1]).write(to: original)
@@ -227,9 +227,52 @@ import CryptoKit
             #expect(result.preview?.resolvingSymlinksInPath() == preview.resolvingSymlinksInPath())
             #expect(result.originalPreview?.resolvingSymlinksInPath() == original.resolvingSymlinksInPath())
             #expect(result.fullSize == nil)
+            #expect(result.recipeJSON == "{}")
+            #expect(result.isSelectable == (status == "needs_review"))
         }
         try FileManager.default.removeItem(at: preview)
         #expect(throws: (any Error).self) { try AIEditingSettingsStore.gradeResult(in: job) }
+    }
+
+    @Test func humanReviewedCandidateExportsWithoutAIAccountOrAnotherDecision() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("keeps-human-review-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let job = root.appendingPathComponent("job"), render = job.appendingPathComponent("render")
+        let runtime = root.appendingPathComponent("runtime")
+        try FileManager.default.createDirectory(at: render, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+        func write(_ value: [String: Any], _ path: String) throws {
+            try JSONSerialization.data(withJSONObject: value).write(to: job.appendingPathComponent(path))
+        }
+        try write(["status": "needs_review", "candidateID": "candidate", "reason": "检查靠垫溢出"], "result.json")
+        try write(["candidates": [["id": "candidate", "recipe": Data("{}".utf8).base64EncodedString()]]], "render/candidates.json")
+        let preview = render.appendingPathComponent("candidate-preview.jpg"), full = render.appendingPathComponent("full.jpg")
+        try Data([1]).write(to: preview); try Data([2]).write(to: full)
+        try Data("<xmp/>".utf8).write(to: full.deletingPathExtension().appendingPathExtension("xmp"))
+        try write(["candidateID": "candidate", "preview": preview.path, "fullSize": full.path], "render/expected-selection.json")
+        try Data("original events".utf8).write(to: job.appendingPathComponent("events.jsonl"))
+        try Data("original stderr".utf8).write(to: job.appendingPathComponent("stderr.log"))
+        let helper = runtime.appendingPathComponent("keeps-color-mcp")
+        let script = "#!/bin/sh\n[ \"$7\" = --select-candidate ] && [ \"$8\" = candidate ] || exit 9\n[ -z \"$KEEPS_RENDER_LIMIT\" ] && [ -z \"$KEEPS_RENDER_SLOTS\" ] || exit 10\ncp render/expected-selection.json render/selection.json\n"
+        try Data(script.utf8).write(to: helper)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+        let store = AIEditingSettingsStore(root: root.appendingPathComponent("no-account"), runtime: runtime,
+            defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        store.limits.renders = 1
+        let reviewed = try AIEditingSettingsStore.gradeResult(in: job)
+        let completed = try await store.completeReviewResult(reviewed, source: root.appendingPathComponent("source.arw"))
+        #expect(completed.status == "needs_review")
+        #expect(completed.reason == reviewed.reason)
+        #expect(completed.recipeJSON == reviewed.recipeJSON)
+        #expect(completed.fullSize == full.resolvingSymlinksInPath())
+        #expect(completed.xmp == "<xmp/>")
+        #expect(try String(contentsOf: job.appendingPathComponent("events.jsonl"), encoding: .utf8) == "original events")
+        #expect(try String(contentsOf: job.appendingPathComponent("stderr.log"), encoding: .utf8) == "original stderr")
+        let exportLogs = try FileManager.default.contentsOfDirectory(atPath: job.path).filter { $0.hasPrefix("manual-export-") }
+        #expect(exportLogs.count == 2)
+        #expect(store.usage.attempts.isEmpty)
+        let original = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("result.json"))) as! [String: Any]
+        #expect(original["status"] as? String == "needs_review")
     }
 
     @Test func missingOrDifferentAccountNeverStartsCodex() async throws {

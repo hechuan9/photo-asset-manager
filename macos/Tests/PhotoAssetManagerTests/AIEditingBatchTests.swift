@@ -1,10 +1,126 @@
 import Foundation
 import ImageIO
 import KeepsAPI
+import SQLite3
 import Testing
 @testable import PhotoAssetManager
 
 @MainActor struct AIEditingBatchTests {
+    @Test func jsonMigrationIsAtomicAndOnlyRunsOnce() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let legacy = AIEditingBatch(id: UUID(), baseURL: "https://migration.invalid", libraryID: "test",
+            items: [.init(id: UUID(), assetID: UUID(), name: "old.jpg", phase: .review)])
+        let manifest = root.appendingPathComponent("batch.json"), preferences = root.appendingPathComponent("preferences.json")
+        let original = try JSONEncoder().encode(legacy)
+        try original.write(to: manifest)
+        try Data("broken".utf8).write(to: preferences)
+        let failed = AIEditingBatchStore(root: root)
+        #expect(failed.errorMessage != nil)
+        #expect(try AIEditingDatabase(root: root).load() == nil)
+        try JSONEncoder().encode(AIEditingPreferences(text: "暖色", revision: 4)).write(to: preferences)
+        let migrated = AIEditingBatchStore(root: root)
+        #expect(migrated.errorMessage == nil)
+        #expect(migrated.batch?.id == legacy.id)
+        #expect(migrated.batch?.items.first?.id == legacy.items[0].id)
+        #expect(migrated.preferencesText == "暖色")
+        #expect(await migrated.savePreferences(text: "自然"))
+        migrated.dismiss()
+        #expect(try Data(contentsOf: manifest) == original)
+        try Data("invalid legacy backup".utf8).write(to: manifest)
+        try Data("invalid legacy backup".utf8).write(to: preferences)
+        let restored = AIEditingBatchStore(root: root)
+        #expect(restored.errorMessage == nil)
+        #expect(restored.batch == nil)
+        #expect(restored.preferencesText == "自然")
+        #expect(try AIEditingDatabase(root: root).load()?.preferences.revision == 5)
+    }
+
+    @Test func failedDecisionTransactionRestoresVisiblePhotoAndDoesNotPublish() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try AIEditingDatabase(root: root)
+        let item = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "ready.jpg", phase: .review)
+        let batch = AIEditingBatch(id: UUID(), baseURL: "https://transaction.invalid", libraryID: "test", items: [item])
+        try database.save(batch: batch, preferences: .init(text: "", revision: 0))
+        let store = AIEditingBatchStore(root: root)
+        try sqlite(root: root, sql: "CREATE TRIGGER fail_decision BEFORE UPDATE ON items BEGIN SELECT RAISE(ABORT,'simulated disk write failure'); END;")
+        store.choose(itemID: item.id, candidateID: nil)
+        #expect(store.errorDetails?.contains("simulated disk write failure") == true)
+        #expect(!store.isRunning)
+        #expect(store.workspaceItems.count == 1)
+        #expect(store.batch?.items.first?.phase == .review)
+        #expect(store.batch?.items.first?.confirmedAt == nil)
+        #expect(try database.load()?.batch?.items.first?.phase == .review)
+    }
+
+    private func sqlite(root: URL, sql: String) throws {
+        var connection: OpaquePointer?
+        guard sqlite3_open(root.appendingPathComponent("workspace.sqlite").path, &connection) == SQLITE_OK else {
+            throw AIEditingFailure("测试数据库无法打开")
+        }
+        defer { sqlite3_close(connection) }
+        guard sqlite3_exec(connection, sql, nil, nil, nil) == SQLITE_OK else {
+            throw AIEditingFailure(String(cString: sqlite3_errmsg(connection)))
+        }
+    }
+
+    @Test func freshGradingStartsFromNegativeAndRefinementUsesSelectedRecipe() {
+        let recipe = KeepsEditRecipe(recipeJSON: "published recipe", xmp: "published xmp")
+        var item = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "photo.arw",
+            source: .init(negativeContentHash: "negative", revision: 3, hasEdit: true, sourceAvailable: true, recipe: recipe))
+        #expect(AIEditingBatchStore.gradingContext(for: item).baseRecipeJSON == nil)
+        let candidate = AIEditingBatch.Candidate(id: UUID(), result: .init(status: "selected", reason: "", recipeJSON: "candidate recipe"), instruction: "", parentID: nil)
+        item.candidates = [candidate]
+        item.selectedCandidateID = candidate.id
+        #expect(AIEditingBatchStore.gradingContext(for: item).baseRecipeJSON == "candidate recipe")
+        item.selectedCandidateID = nil
+        #expect(AIEditingBatchStore.gradingContext(for: item).baseRecipeJSON == nil)
+    }
+
+    @Test func upstreamPhotoHasPriorityEvenWhenLowerPhotoIsReadyForAI() {
+        let first = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "top", phase: .downloading)
+        let second = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "lower", phase: .grading)
+        var items = [first, second]
+        #expect(AIEditingBatchStore.hasPriority(first.id, for: "download", items: items))
+        #expect(!AIEditingBatchStore.hasPriority(second.id, for: "ai", items: items))
+        #expect(AIEditingBatchStore.hasPriority(second.id, for: "ai", items: [second]))
+        items[0].phase = .grading
+        #expect(AIEditingBatchStore.hasPriority(second.id, for: "ai", items: items, holders: [first.id]))
+        items[0].failure = "下载失败"
+        #expect(AIEditingBatchStore.hasPriority(second.id, for: "ai", items: items))
+        items[0].failure = nil
+        items[0].phase = .uploading
+        #expect(AIEditingBatchStore.hasPriority(second.id, for: "ai", items: items))
+    }
+
+    @Test func legacyNeedsReviewCandidateCanBeSelectedWithoutRegrading() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let job = root.appendingPathComponent("ai"), render = job.appendingPathComponent("render")
+        try FileManager.default.createDirectory(at: render, withIntermediateDirectories: true)
+        let preview = render.appendingPathComponent("candidate-preview.jpg")
+        let before = root.appendingPathComponent("before.heic")
+        try Data("candidate".utf8).write(to: preview)
+        try Data("current display".utf8).write(to: before)
+        try Data("{\"status\":\"needs_review\",\"candidateID\":\"candidate\",\"reason\":\"请人工检查\"}".utf8).write(to: job.appendingPathComponent("result.json"))
+        let state: [String: Any] = ["candidates": [["id": "candidate", "recipe": Data("{\"exposureEV\":0.5}".utf8).base64EncodedString()]]]
+        try JSONSerialization.data(withJSONObject: state).write(to: render.appendingPathComponent("candidates.json"))
+        let candidate = AIEditingBatch.Candidate(id: UUID(), result: .init(status: "needs_review", reason: "请人工检查", preview: preview), instruction: "", parentID: nil)
+        let item = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "DSC02950.ARW", phase: .review,
+            candidates: [candidate], originalPreview: before)
+        let manifest = AIEditingBatch(id: UUID(), baseURL: "https://review.invalid", libraryID: "test", items: [item])
+        try JSONEncoder().encode(manifest).write(to: root.appendingPathComponent("batch.json"))
+        let store = AIEditingBatchStore(root: root)
+        #expect(store.batch?.items[0].candidates?[0].result.isSelectable == true)
+        store.selectCandidate(itemID: item.id, candidateID: candidate.id)
+        #expect(store.batch?.items[0].selectedCandidateID == candidate.id)
+        #expect(store.canPublish(store.batch!.items[0]))
+        #expect(!store.isRunning)
+        #expect(AIEditingBatchStore(root: root).batch?.items[0].result?.recipeJSON == "{\"exposureEV\":0.5}")
+    }
+
     @Test func recoveryWaitsForPendingPhotoRecycling() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -567,6 +683,14 @@ private func respondToWorkspaceRequest(_ handler: URLProtocol) -> Bool {
     if handler.request.url?.path.contains("/ai-editing/") == true {
         Issue.record("AI workspace and preferences must stay on this Mac")
         handler.client?.urlProtocol(handler, didFailWithError: URLError(.badURL))
+        return true
+    }
+    if handler.request.url?.path.contains("/derivatives/") == true {
+        respond(handler, data: Data("{\"downloadURL\":\"https://snapshot.invalid/comparison\",\"width\":10,\"height\":10,\"version\":\"display\"}".utf8))
+        return true
+    }
+    if handler.request.url?.path == "/comparison" {
+        respond(handler, data: Data("current displayed photo".utf8))
         return true
     }
     if handler.request.httpMethod == "GET", handler.request.url?.path.contains("/edit") != true {
