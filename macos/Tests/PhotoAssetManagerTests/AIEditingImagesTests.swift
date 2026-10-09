@@ -5,6 +5,21 @@ import Testing
 @testable import PhotoAssetManager
 
 struct AIEditingImagesTests {
+    @Test func comparisonPreviewAppliesOrientationAndBoundsDecodedPixels() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jpg")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let context = CIContext()
+        let input = CIImage(color: CIColor(red: 0.2, green: 0.5, blue: 0.7))
+            .cropped(to: CGRect(x: 0, y: 0, width: 4000, height: 2000))
+        let pixels = try #require(context.createCGImage(input, from: input.extent))
+        let destination = try #require(CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, pixels, [kCGImagePropertyOrientation: 6] as CFDictionary)
+        #expect(CGImageDestinationFinalize(destination))
+        let decoded = try AIEditingImages.comparisonPreview(url)
+        #expect(decoded.width == 1280)
+        #expect(decoded.height == 2560)
+    }
+
     @Test(arguments: [(7032, 4688), (1001, 667), (667, 1001), (511, 341), (1, 1)])
     func heifDimensionsMatchEncodedCanvas(dimensions: (Int, Int)) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

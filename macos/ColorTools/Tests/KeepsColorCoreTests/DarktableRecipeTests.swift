@@ -1,7 +1,40 @@
 import XCTest
+import ImageIO
+import CoreGraphics
 @testable import KeepsColorCore
 
 final class DarktableRecipeTests: XCTestCase {
+    func testPortraitRasterRotationPreservesSoftCoverage() throws {
+        let values: [UInt8] = [64, 128, 191]
+        let pixels: [UInt8] = values.flatMap { [$0, $0, $0, UInt8(255)] }
+        let provider = try XCTUnwrap(CGDataProvider(data: Data(pixels) as CFData))
+        let image = try XCTUnwrap(CGImage(width: 3, height: 1, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: 12, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+        let png = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(png, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let recipe = ColorRecipe(localAdjustments: [.init(id: "soft-subject", exposureEV: 1,
+            mask: .raster(pngBase64: (png as Data).base64EncodedString(), invert: false))])
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("keeps-soft-mask-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for orientation in [6, 8] {
+            let masks = directory.appendingPathComponent(String(orientation))
+            _ = try DarktableRecipe.apply(recipe, to: Self.baseline, maskDirectory: masks, maskOrientation: orientation)
+            let file = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: masks, includingPropertiesForKeys: nil).first)
+            let source = try XCTUnwrap(CGImageSourceCreateWithURL(file as CFURL, nil))
+            let rotated = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+            XCTAssertEqual(rotated.width, 1)
+            XCTAssertEqual(rotated.height, 3)
+            XCTAssertEqual(rotated.bitsPerComponent, 8)
+            let raw = try XCTUnwrap(rotated.dataProvider?.data) as Data
+            let coverage = (0..<3).map { raw[$0 * rotated.bytesPerRow] }
+            XCTAssertEqual(coverage.sorted(), values, "Rotation must preserve 25%, 50% and 75% coverage bytes")
+        }
+    }
+
     func testRejectsUnknownParameter() throws {
         XCTAssertThrowsError(try DarktableRecipe.decode(Data(#"{"exposureEV":1,"mystery":4}"#.utf8)))
     }
@@ -10,6 +43,12 @@ final class DarktableRecipeTests: XCTestCase {
         var recipe = ColorRecipe()
         recipe.localAdjustments = [.init(id: "face", exposureEV: 1, mask: .ellipse(centerX: 0.5, centerY: 0.5, radiusX: -1, radiusY: 0.1, rotation: 0, feather: 0.1))]
         XCTAssertThrowsError(try recipe.validate())
+    }
+    func testRejectsMalformedAndOversizedRasterMasks() {
+        for base64 in ["invalid", Data([137, 80, 78, 71, 13, 10, 26, 10]).base64EncodedString(), String(repeating: "A", count: 700_000)] {
+            let recipe = ColorRecipe(localAdjustments: [.init(id: "subject", exposureEV: 1, mask: .raster(pngBase64: base64, invert: false))])
+            XCTAssertThrowsError(try recipe.validate())
+        }
     }
     func testRejectsUnsupportedBaseline() {
         XCTAssertThrowsError(try DarktableRecipe.apply(ColorRecipe(), to: "<root/>"))

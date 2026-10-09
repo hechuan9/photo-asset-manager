@@ -39,6 +39,7 @@ HELPER_BIN_DIR="$(swift build --package-path "$ROOT_DIR/ColorTools" -c release -
 RUNTIME_DIR="$RESOURCES_DIR/AIEditing"
 HELPERS_DIR="$(dirname "$RESOURCES_DIR")/Helpers"
 mkdir -p "$RUNTIME_DIR" "$HELPERS_DIR"
+python3 "$ROOT_DIR/scripts/prepare_sky_model.py" "$RUNTIME_DIR"
 cp "$CODEX_BINARY" "$HELPERS_DIR/codex"
 cp "$CODE_MODE_HOST" "$HELPERS_DIR/codex-code-mode-host"
 cp "$HELPER_BIN_DIR/keeps-color-mcp" "$HELPERS_DIR/keeps-color-mcp"

@@ -6,7 +6,7 @@ struct PhotoAssetManagerApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var library = LibraryStore()
     @StateObject private var batch = AIEditingBatchStore()
-    @Environment(\.openWindow) private var openWindow
+    @FocusedValue(\.aiWorkspace) private var aiWorkspace
     @FocusedValue(\.gallerySelection) private var gallerySelection
     var body: some Scene {
         WindowGroup {
@@ -32,7 +32,8 @@ struct PhotoAssetManagerApp: App {
                 Toggle("过滤隐藏目录内容", isOn: $library.hiddenDirectoryFilterEnabled).disabled(library.isOperationBlocking)
             }
             CommandMenu("照片") {
-                Button("打开 AI 调色工作台") { openWindow(id: "ai-editing-workspace") }
+                Button("打开 AI 调色工作台") { aiWorkspace?.open() }
+                    .disabled(aiWorkspace == nil || library.isOperationBlocking)
                 Button("删除所有弃用照片…") { library.showsRejectedTrash = true }
                     .disabled(library.client == nil || library.isOperationBlocking || library.isMutating || library.isCheckingConnection || library.isImportingPhotos || batch.isRunning || batch.editor.isBusy)
                 Divider()
@@ -52,13 +53,6 @@ struct PhotoAssetManagerApp: App {
                 }.disabled(library.isOperationBlocking || library.isSelectingAll)
             }
         }
-        Window("AI 调色工作台", id: "ai-editing-workspace") {
-            AIEditingWorkspaceView()
-                .environmentObject(library)
-                .environmentObject(batch)
-                .frame(minWidth: 960, minHeight: 680)
-        }
-        .defaultSize(width: 1280, height: 900)
         Window("任务追踪", id: "nas-tasks") {
             Group {
                 if let client = library.client {

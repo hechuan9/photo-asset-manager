@@ -6,6 +6,10 @@ public final class DarktableProcess {
     public let directory: URL
     public let input: URL
     public let baseline: String
+    public let sourceOrientation: Int?
+    public let supportsSemanticMasks: Bool
+    public let sourcePixelWidth: Int?
+    public let sourcePixelHeight: Int?
     public let supportsLocalMasks: Bool
     public let isDisplayReferred: Bool
     public let store: CandidateStore
@@ -23,6 +27,9 @@ public final class DarktableProcess {
         guard flock(lock.fileDescriptor, LOCK_EX | LOCK_NB) == 0 else { throw ColorToolError("Task already has an active worker") }
         let imageSource = CGImageSourceCreateWithURL(source as CFURL, nil)
         let properties = imageSource.flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [CFString: Any] }
+        sourceOrientation = (properties?[kCGImagePropertyOrientation] as? NSNumber)?.intValue
+        sourcePixelWidth = (properties?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue
+        sourcePixelHeight = (properties?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue
         let digest = try contentHash(source)
         store = try CandidateStore(directory: directory, sourceHash: digest)
         input = directory.appendingPathComponent("input." + source.pathExtension.lowercased())
@@ -59,7 +66,8 @@ public final class DarktableProcess {
         let document = try XMLDocument(xmlString: baseline)
         let description = try document.nodes(forXPath: "//*[local-name()='Description']").first as? XMLElement
         isDisplayReferred = description?.attribute(forName: "darktable:iop_order_version")?.stringValue == "5"
-        supportsLocalMasks = !isDisplayReferred && (properties?[kCGImagePropertyOrientation] as? NSNumber)?.intValue == 1
+        supportsLocalMasks = !isDisplayReferred && sourceOrientation == 1
+        supportsSemanticMasks = !isDisplayReferred && (1...8).contains(sourceOrientation ?? 0)
     }
 
     public func render(xmp: String, candidateID: String, full: Bool = false) throws -> URL {

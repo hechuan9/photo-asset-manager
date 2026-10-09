@@ -1,5 +1,8 @@
 import Foundation
 import zlib
+import ImageIO
+import CryptoKit
+import CoreImage
 
 public enum RecipeError: Error, CustomStringConvertible {
     case invalid(String)
@@ -9,6 +12,7 @@ public enum RecipeError: Error, CustomStringConvertible {
 public enum ColorMask: Codable, Equatable, Sendable {
     case ellipse(centerX: Double, centerY: Double, radiusX: Double, radiusY: Double, rotation: Double, feather: Double)
     case gradient(anchorX: Double, anchorY: Double, rotation: Double, compression: Double)
+    case raster(pngBase64: String, invert: Bool)
 }
 public struct LocalExposure: Codable, Equatable, Sendable {
     public var id: String
@@ -41,6 +45,8 @@ public struct ColorRecipe: Codable, Equatable, Sendable {
             switch local.mask {
             case let .ellipse(x,y,rx,ry,rotation,feather):
                 try check(x,0...1,"centerX"); try check(y,0...1,"centerY"); try check(rx,0.002...1,"radiusX"); try check(ry,0.002...1,"radiusY"); try check(rotation,-180...180,"rotation"); try check(feather,0.001...1,"feather")
+            case let .raster(pngBase64, _):
+                _ = try DarktableRecipe.rasterPNG(pngBase64)
             case let .gradient(x,y,rotation,compression):
                 try check(x,0...1,"anchorX"); try check(y,0...1,"anchorY"); try check(rotation,-180...180,"rotation"); try check(compression,0.001...1,"compression")
             }
@@ -64,6 +70,7 @@ public enum DarktableRecipe {
                 switch kind {
                 case "ellipse": keys = ["centerX","centerY","radiusX","radiusY","rotation","feather"]
                 case "gradient": keys = ["anchorX","anchorY","rotation","compression"]
+                case "raster": keys = ["pngBase64", "invert"]
                 default: throw RecipeError.invalid("Unknown mask type")
                 }
                 guard Set(fields.keys) == keys else { throw RecipeError.invalid("Unknown or missing mask parameter") }
@@ -74,7 +81,7 @@ public enum DarktableRecipe {
         let recipe = try JSONDecoder().decode(ColorRecipe.self, from: JSONSerialization.data(withJSONObject: merged))
         try recipe.validate(); return recipe
     }
-    public static func apply(_ recipe: ColorRecipe, to baselineXMP: String) throws -> String {
+    public static func apply(_ recipe: ColorRecipe, to baselineXMP: String, maskDirectory: URL? = nil, maskOrientation: Int = 1) throws -> String {
         try recipe.validate()
         let doc = try XMLDocument(xmlString: baselineXMP, options: [.nodePreserveAll])
         guard let description = try doc.nodes(forXPath: "//*[local-name()='Description']").first as? XMLElement,
@@ -126,11 +133,36 @@ public enum DarktableRecipe {
             set(node,"num",String(num)); set(node,"operation","colorbalancergb"); set(node,"modversion","5"); set(node,"params",hex(params)); set(node,"multi_name","Keeps saturation")
             history.addChild(node); num += 1
         }
+        var rasterInstances: [Int] = []
         for (index,local) in recipe.localAdjustments.enumerated() {
             let shapeID = 1000 + index*2, groupID = shapeID+1
             var shape = [UInt8](repeating:0,count:28)
+            var blend = initialBlend
             let type: Int
             switch local.mask {
+            case let .raster(pngBase64, invert):
+                guard let maskDirectory else { throw RecipeError.invalid("Raster masks require a private mask directory") }
+                let file = try materializeRaster(pngBase64, directory: maskDirectory, orientation: maskOrientation)
+                let instance = index + 1
+                rasterInstances.append(instance)
+                var rasterParams = [UInt8](repeating: 0, count: 4100)
+                put(7, into: &rasterParams, at: 0)
+                try putCString(file.deletingLastPathComponent().path, into: &rasterParams, at: 4, capacity: 2048)
+                try putCString(file.lastPathComponent, into: &rasterParams, at: 2052, capacity: 2048)
+                let raster = exposure.copy() as! XMLElement
+                set(raster, "num", String(num)); set(raster, "operation", "rasterfile")
+                set(raster, "modversion", "1"); set(raster, "params", hex(rasterParams))
+                set(raster, "multi_priority", String(instance)); set(raster, "multi_name", local.id + " mask")
+                var rasterBlend = initialBlend; put(0, into: &rasterBlend, at: 0)
+                set(raster, "blendop_params", hex(rasterBlend))
+                history.addChild(raster); num += 1
+                // blend v14 ends with source[20], instance, raster id and inversion.
+                put(9, into: &blend, at: 0)
+                try putCString("rasterfile", into: &blend, at: 388, capacity: 20)
+                put(UInt32(instance), into: &blend, at: 408)
+                put(0, into: &blend, at: 412)
+                put(invert ? 1 : 0, into: &blend, at: 416)
+                type = 0
             case let .ellipse(x,y,rx,ry,rotation,feather):
                 type = 32
                 for (i,v) in [x,y,rx,ry,rotation,feather].enumerated() { putFloat(v,into:&shape,at:i*4) }
@@ -142,14 +174,16 @@ public enum DarktableRecipe {
             }
             var group = [UInt8](repeating:0,count:16)
             put(UInt32(shapeID),into:&group,at:0); put(UInt32(groupID),into:&group,at:4); put(3,into:&group,at:8); putFloat(1,into:&group,at:12)
-            for (id,t,bytes,name) in [(shapeID,type,shape,local.id),(groupID,4,group,local.id+" group")] {
-                let node = XMLElement(name:"rdf:li")
-                for (key,value) in ["mask_num":String(num),"mask_id":String(id),"mask_type":String(t),"mask_name":name,"mask_version":"6","mask_points":hex(bytes),"mask_nb":"1","mask_src":"0000000000000000"] { set(node,key,value) }
-                masks.addChild(node)
+            if type != 0 {
+                for (id,t,bytes,name) in [(shapeID,type,shape,local.id),(groupID,4,group,local.id+" group")] {
+                    let node = XMLElement(name:"rdf:li")
+                    for (key,value) in ["mask_num":String(num),"mask_id":String(id),"mask_type":String(t),"mask_name":name,"mask_version":"6","mask_points":hex(bytes),"mask_nb":"1","mask_src":"0000000000000000"] { set(node,key,value) }
+                    masks.addChild(node)
+                }
+                put(3,into:&blend,at:0); put(UInt32(groupID),into:&blend,at:24)
             }
             var params = originalExposure
             put(0,into:&params,at:0); putFloat(0,into:&params,at:4); putFloat(local.exposureEV,into:&params,at:8); put(0,into:&params,at:20); put(0,into:&params,at:24)
-            var blend = initialBlend; put(3,into:&blend,at:0); put(UInt32(groupID),into:&blend,at:24)
             let node = exposure.copy() as! XMLElement
             set(node,"num",String(num)); set(node,"params",hex(params)); set(node,"blendop_params",hex(blend)); set(node,"multi_priority",String(index+1)); set(node,"multi_name",local.id)
             history.addChild(node); num += 1
@@ -157,11 +191,68 @@ public enum DarktableRecipe {
         set(description,"history_end",String(num))
         if !recipe.localAdjustments.isEmpty {
             var entries = rawOrder.map { "\($0),0" }
+            let rasterPosition = entries.firstIndex(of: "rasterfile,0")! + 1
+            entries.insert(contentsOf: rasterInstances.map { "rasterfile,\($0)" }, at: rasterPosition)
             let position = entries.firstIndex(of:"exposure,0")! + 1
             entries.insert(contentsOf: recipe.localAdjustments.indices.map { "exposure,\($0+1)" }, at: position)
             set(description,"iop_order_list",entries.joined(separator:","))
         }
         return doc.xmlString(options: [])
+    }
+    static func rasterPNG(_ base64: String) throws -> Data {
+        guard base64.utf8.count <= 699_052, let data = Data(base64Encoded: base64), data.count <= 512 * 1024,
+              data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              (1...2048).contains(width), (1...2048).contains(height),
+              CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else {
+            throw RecipeError.invalid("Raster mask must be a valid PNG, at most 512 KiB and 2048 pixels per edge")
+        }
+        return data
+    }
+    private static func materializeRaster(_ base64: String, directory: URL, orientation: Int) throws -> URL {
+        let original = try rasterPNG(base64)
+        guard (1...8).contains(orientation) else { throw RecipeError.invalid("Unsupported raster mask orientation") }
+        let data: Data
+        if orientation == 1 { data = original }
+        else {
+            // Segmentation uses the upright preview; rasterfile precedes darktable's flip module.
+            let inverse: [Int32] = [1, 2, 3, 4, 5, 8, 7, 6]
+            guard let image = CIImage(data: original, options: [.colorSpace: NSNull()]) else { throw RecipeError.invalid("Cannot decode raster mask") }
+            let transformed = image.oriented(forExifOrientation: inverse[orientation - 1])
+            // Coverage must remain numeric; a display transfer curve would change soft mask edges.
+            let context = CIContext(options: [.workingColorSpace: NSNull(), .outputColorSpace: NSNull()])
+            let width = Int(transformed.extent.width), height = Int(transformed.extent.height)
+            var pixels = [UInt8](repeating: 0, count: width * height * 4)
+            pixels.withUnsafeMutableBytes { bytes in
+                context.render(transformed, toBitmap: bytes.baseAddress!, rowBytes: width * 4,
+                               bounds: transformed.extent, format: .RGBA8, colorSpace: nil)
+            }
+            guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+                  let cgImage = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                                        bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                                        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else {
+                throw RecipeError.invalid("Cannot orient raster mask")
+            }
+            let output = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(output, "public.png" as CFString, 1, nil) else { throw RecipeError.invalid("Cannot encode raster mask") }
+            CGImageDestinationAddImage(destination, cgImage, nil)
+            guard CGImageDestinationFinalize(destination) else { throw RecipeError.invalid("Cannot finalize raster mask") }
+            data = output as Data
+        }
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent(digest + ".png")
+        if !FileManager.default.fileExists(atPath: file.path) { try data.write(to: file, options: .atomic) }
+        return file
+    }
+    private static func putCString(_ value: String, into data: inout [UInt8], at offset: Int, capacity: Int) throws {
+        let bytes = Array(value.utf8)
+        guard bytes.count < capacity, !bytes.contains(0) else { throw RecipeError.invalid("Raster mask path exceeds darktable limits") }
+        data.replaceSubrange(offset..<(offset + capacity), with: bytes + Array(repeating: 0, count: capacity - bytes.count))
     }
     // The v5 pipeline is already display-referred: retain its color profile and
     // tone response rather than adding the RAW white balance and sigmoid stages.

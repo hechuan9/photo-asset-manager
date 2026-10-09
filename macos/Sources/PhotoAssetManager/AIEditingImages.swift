@@ -11,6 +11,19 @@ struct AIEditingImageInfo: Sendable {
 }
 
 enum AIEditingImages {
+    static func comparisonPreview(_ url: URL) throws -> CGImage {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: 2560
+              ] as CFDictionary) else {
+            throw AIEditingFailure("无法读取调色预览：\(url.lastPathComponent)")
+        }
+        return image
+    }
+
     static func inspect(_ url: URL, image: Bool) async throws -> AIEditingImageInfo {
         let task = Task.detached(priority: .utility) {
             let file = try FileHandle(forReadingFrom: url)

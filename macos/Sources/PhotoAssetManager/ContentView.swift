@@ -6,11 +6,24 @@ struct GallerySelectionActions {
     let deselectAll: () -> Void
 }
 
+struct AIWorkspaceActions {
+    let open: () -> Void
+}
+
+private struct AIWorkspaceKey: FocusedValueKey {
+    typealias Value = AIWorkspaceActions
+}
+
 private struct GallerySelectionKey: FocusedValueKey {
     typealias Value = GallerySelectionActions
 }
 
 extension FocusedValues {
+    var aiWorkspace: AIWorkspaceActions? {
+        get { self[AIWorkspaceKey.self] }
+        set { self[AIWorkspaceKey.self] = newValue }
+    }
+
     var gallerySelection: GallerySelectionActions? {
         get { self[GallerySelectionKey.self] }
         set { self[GallerySelectionKey.self] = newValue }
@@ -21,6 +34,8 @@ struct ContentView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var batch: AIEditingBatchStore
     @Environment(\.openWindow) private var openWindow
+    @State private var showsAIWorkspace = false
+    @State private var startsAIWorkspace = false
     @State private var showsImport = false
     @State private var importWindowID = UUID()
     @State private var importStore: ImportStore?
@@ -33,6 +48,23 @@ struct ContentView: View {
     @State private var detailMode = false
 
     var body: some View {
+        Group {
+            if showsAIWorkspace {
+                AIEditingWorkspaceView(autoStart: startsAIWorkspace, returnToLibrary: { showsAIWorkspace = false })
+            } else {
+                libraryScreen
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            AIEditingBackgroundStatus(store: batch) { showsAIWorkspace = true }
+        }
+        .focusedSceneValue(\.aiWorkspace, AIWorkspaceActions(open: openAIWorkspace))
+        .sheet(isPresented: $library.showsRejectedTrash) {
+            RejectedTrashSheet(library: library)
+        }
+    }
+
+    private var libraryScreen: some View {
         VStack(spacing: 0) {
             topBar
             Divider()
@@ -89,9 +121,6 @@ struct ContentView: View {
         .sheet(item: $library.directoryToTrash) { directory in
             DirectoryTrashSheet(library: library, directory: directory)
                 .disabled(library.isAIEditingBlocking || library.isAISettingsBusy)
-        }
-        .sheet(isPresented: $library.showsRejectedTrash) {
-            RejectedTrashSheet(library: library)
         }
         .onChange(of: library.isDirectoryOperationBlocking) { _, blocking in
             if !blocking { batch.restore(library: library) }
@@ -364,8 +393,12 @@ struct ContentView: View {
     }
 
     private func openAIWorkspace() {
-        if batch.batch == nil { batch.prepare(library: library) }
-        openWindow(id: "ai-editing-workspace")
+        if batch.batch?.items.allSatisfy({ $0.phase == .done }) == true { batch.closeCompletedWorkspace() }
+        let selected = library.selectedIDs
+        let matchesDraft = batch.isAwaitingConfirmation && Set(batch.batch?.items.map(\.assetID) ?? []) == selected
+        startsAIWorkspace = !selected.isEmpty && (batch.batch == nil || matchesDraft)
+        if batch.batch == nil && startsAIWorkspace { batch.prepare(library: library) }
+        showsAIWorkspace = true
     }
 
     private var aiEditingTitle: String {

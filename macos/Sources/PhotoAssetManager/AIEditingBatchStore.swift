@@ -1,4 +1,5 @@
 import Combine
+import CryptoKit
 import Foundation
 import KeepsAPI
 
@@ -13,7 +14,7 @@ struct AIEditingBatch: Codable {
         var batchInstruction: String = ""
     }
     struct Item: Codable, Identifiable {
-        enum Phase: String, Codable { case preparing, downloading, grading, uploading, done, review }
+        enum Phase: String, Codable { case preparing, downloading, grading, uploading, discarding, done, review }
         let id: UUID
         let assetID: UUID
         let name: String
@@ -29,6 +30,8 @@ struct AIEditingBatch: Codable {
         var pendingInstruction: String?
         var pendingCandidateID: UUID?
         var confirmedAt: String?
+        var isBackgroundDecision: Bool { phase == .uploading || phase == .discarding }
+        var isVisibleInWorkspace: Bool { phase != .done && (!isBackgroundDecision || failure != nil) }
         var terminal: Bool { phase == .done || phase == .review }
     }
     let id: UUID
@@ -73,6 +76,9 @@ struct AIEditingBatch: Codable {
     var isAwaitingUpload: Bool { batch?.items.first(where: { !$0.terminal })?.phase == .uploading }
     var pendingResultURL: URL? { isAwaitingUpload ? batch?.items.first(where: { !$0.terminal })?.result?.fullSize : nil }
     var isAwaitingConfirmation: Bool { batch != nil && batch?.confirmed == false && batch?.cancelled == false }
+    var workspaceItems: [AIEditingBatch.Item] { batch?.items.filter(\.isVisibleInWorkspace) ?? [] }
+    var backgroundDecisionCount: Int { batch?.items.filter { $0.isBackgroundDecision && $0.failure == nil }.count ?? 0 }
+    var failedDecisionCount: Int { batch?.items.filter { $0.isBackgroundDecision && $0.failure != nil }.count ?? 0 }
     var totalCount: Int { batch?.items.count ?? 0 }
     var completedCount: Int { batch?.items.filter(\.terminal).count ?? 0 }
     var isFinished: Bool { batch != nil && !isRunning && (batch!.cancelled || batch!.items.allSatisfy(\.terminal)) }
@@ -80,6 +86,7 @@ struct AIEditingBatch: Codable {
     private var manifest: URL { root.appendingPathComponent("batch.json") }
     private weak var library: LibraryStore?
     private var worker: Task<Void, Never>?
+    private var itemWorkers: [UUID: Task<Void, Never>] = [:]
     struct Activity: Identifiable {
         let id: UUID
         let name: String
@@ -190,7 +197,6 @@ struct AIEditingBatch: Codable {
                     batch!.preferenceRevision = saved.revision
                     batch!.instruction = batchInstruction
                 }
-                for index in batch!.items.indices { batch!.items[index].failure = nil; batch!.items[index].failureDetails = nil }
                 batch!.confirmed = true; batch!.cancelled = false; batch!.ownerID = ownerID
                 try persist()
                 try await awaitWorkspaceSync()
@@ -271,16 +277,21 @@ struct AIEditingBatch: Codable {
         } catch { recordFailure(error) }
     }
 
-    func savePreferences() async {
-        guard !isSyncing, let client = library?.client, workspaceLoaded, client.configuration == loadedConfiguration else { return }
+    @discardableResult func savePreferences(text: String? = nil) async -> Bool {
+        guard !isSyncing, let client = library?.client, workspaceLoaded, client.configuration == loadedConfiguration else {
+            recordFailure(AIEditingFailure("工作台尚未完成同步，请稍后重试保存。"))
+            return false
+        }
         isSyncing = true
         defer { isSyncing = false }
         do {
-            let saved = try await client.saveAIPreferences(text: preferencesText, expectedRevision: preferencesRevision)
+            let saved = try await client.saveAIPreferences(text: text ?? preferencesText, expectedRevision: preferencesRevision)
             preferencesRevision = saved.revision
             preferencesText = saved.text
             status = "长期审美偏好已保存；当前批次继续使用开始时的偏好"
-        } catch { recordFailure(error) }
+            errorMessage = nil; errorDetails = nil
+            return true
+        } catch { recordFailure(error); return false }
     }
 
     private func scheduleSync() {
@@ -304,6 +315,9 @@ struct AIEditingBatch: Codable {
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
             let document = try batch.map { String(decoding: try encoder.encode($0), as: UTF8.self) }
             do {
+                if let document, document.utf8.count > 64 * 1024 * 1024 {
+                    throw AIEditingFailure("工作台草稿超过 64 MiB，请结束当前批次后分批调色；本机结果已保留。")
+                }
                 let saved = try await client.saveAIWorkspace(document: document, expectedRevision: workspaceRevision)
                 workspaceRevision = saved.revision
                 try JSONEncoder().encode(workspaceRevision).write(to: checkpoint, options: .atomic)
@@ -320,7 +334,7 @@ struct AIEditingBatch: Codable {
 
     func selectCandidate(itemID: UUID, candidateID: UUID?) {
         guard let index = batch?.items.firstIndex(where: { $0.id == itemID }),
-              batch!.items[index].phase == .review else { return }
+              canInteract(batch!.items[index]) else { return }
         if let candidateID, !(batch!.items[index].candidates ?? []).contains(where: { $0.id == candidateID && $0.result.status == "selected" }) { return }
         batch!.items[index].failure = nil; batch!.items[index].failureDetails = nil
         batch!.items[index].selectedCandidateID = candidateID
@@ -330,8 +344,8 @@ struct AIEditingBatch: Codable {
 
     func refine(itemID: UUID, instruction: String) {
         let instruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isRunning, !instruction.isEmpty, let index = batch?.items.firstIndex(where: { $0.id == itemID }),
-              batch!.items[index].phase == .review else { return }
+        guard !instruction.isEmpty, let index = batch?.items.firstIndex(where: { $0.id == itemID }),
+              canInteract(batch!.items[index]) else { return }
         batch!.items[index].pendingInstruction = instruction
         batch!.items[index].pendingCandidateID = UUID()
         batch!.items[index].phase = .grading
@@ -340,8 +354,12 @@ struct AIEditingBatch: Codable {
         do { try persist(); start() } catch { recordFailure(error) }
     }
 
+    func canInteract(_ item: AIEditingBatch.Item) -> Bool {
+        item.phase == .review && activities[item.id] == nil && itemWorkers[item.id] == nil
+    }
+
     func canPublish(_ item: AIEditingBatch.Item) -> Bool {
-        guard item.phase == .review else { return false }
+        guard canInteract(item) else { return false }
         guard let selected = item.selectedCandidateID else { return true }
         guard let candidate = item.candidates?.first(where: { $0.id == selected }),
               let before = item.originalPreview ?? candidate.result.originalPreview,
@@ -350,12 +368,47 @@ struct AIEditingBatch: Codable {
     }
 
     func publish(itemID: UUID) {
-        guard !isRunning, workspaceLoaded, batch?.ownerID == nil || batch?.ownerID == ownerID else { return }
+        guard workspaceLoaded, batch?.ownerID == nil || batch?.ownerID == ownerID else { return }
         do { try confirm(itemID: itemID); start() } catch { recordFailure(error) }
     }
 
+    func choose(itemID: UUID, candidateID: UUID?) {
+        guard workspaceLoaded, batch?.ownerID == nil || batch?.ownerID == ownerID,
+              let index = batch?.items.firstIndex(where: { $0.id == itemID }), canInteract(batch!.items[index]) else { return }
+        if let candidateID, !(batch!.items[index].candidates ?? []).contains(where: { $0.id == candidateID && $0.result.status == "selected" }) { return }
+        let previous = batch
+        batch!.items[index].selectedCandidateID = candidateID
+        batch!.items[index].result = batch!.items[index].candidates?.first { $0.id == candidateID }?.result
+        do { try confirm(itemID: itemID); start() }
+        catch { batch = previous; recordFailure(error) }
+    }
+
+    func retryDecision(itemID: UUID) {
+        guard let index = batch?.items.firstIndex(where: { $0.id == itemID }),
+              batch!.items[index].isBackgroundDecision, batch!.items[index].failure != nil,
+              itemWorkers[itemID] == nil else { return }
+        let previous = batch
+        batch!.items[index].failure = nil; batch!.items[index].failureDetails = nil
+        batch!.cancelled = false
+        do { try persist(); start() }
+        catch { batch = previous; recordFailure(error) }
+    }
+
+    func reject(itemID: UUID) {
+        guard workspaceLoaded, batch?.ownerID == nil || batch?.ownerID == ownerID,
+              let index = batch?.items.firstIndex(where: { $0.id == itemID }),
+              canInteract(batch!.items[index]) else { return }
+        let previous = batch
+        batch!.items[index].phase = .discarding
+        batch!.items[index].confirmedAt = ISO8601DateFormatter().string(from: Date())
+        batch!.items[index].failure = nil
+        batch!.items[index].failureDetails = nil
+        batch!.cancelled = false
+        do { try persist(); start() } catch { batch = previous; recordFailure(error) }
+    }
+
     func publishReady() {
-        guard !isRunning, workspaceLoaded, batch?.ownerID == nil || batch?.ownerID == ownerID else { return }
+        guard workspaceLoaded, batch?.ownerID == nil || batch?.ownerID == ownerID else { return }
         do {
             for item in batch?.items ?? [] where canPublish(item) && item.failure == nil { try confirm(itemID: item.id) }
             start()
@@ -394,9 +447,29 @@ struct AIEditingBatch: Codable {
             "preferenceRevision": candidate?.preferenceRevision ?? batch?.preferenceRevision ?? 0,
             "batchInstruction": candidate?.batchInstruction ?? batch?.instruction ?? "",
             "selection": item.selectedCandidateID?.uuidString ?? "original", "confirmedAt": item.confirmedAt ?? "",
-            "history": (item.candidates ?? []).map { ["id": $0.id.uuidString, "reason": $0.result.reason,
-                "instruction": $0.instruction, "parentID": $0.parentID?.uuidString ?? "", "status": $0.result.status, "recipeJSON": $0.result.recipeJSON ?? ""] }]
+            "history": try (item.candidates ?? []).map { ["id": $0.id.uuidString, "reason": $0.result.reason,
+                "instruction": $0.instruction, "parentID": $0.parentID?.uuidString ?? "", "status": $0.result.status, "recipeJSON": try Self.historyRecipe($0.result.recipeJSON) ?? ""] }]
         return String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), as: UTF8.self)
+    }
+
+    static func historyRecipe(_ recipe: String?) throws -> String? {
+        guard let recipe else { return nil }
+        func summarize(_ value: Any) throws -> Any {
+            if var object = value as? [String: Any] {
+                if var raster = object["raster"] as? [String: Any], let encoded = raster["pngBase64"] as? String {
+                    guard let data = Data(base64Encoded: encoded) else { throw AIEditingFailure("遮板 PNG 数据无效。") }
+                    raster.removeValue(forKey: "pngBase64")
+                    raster["pngSHA256"] = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                    raster["pngSizeBytes"] = data.count
+                    object["raster"] = raster
+                }
+                return try object.mapValues { try summarize($0) }
+            }
+            if let array = value as? [Any] { return try array.map { try summarize($0) } }
+            return value
+        }
+        let object = try JSONSerialization.jsonObject(with: Data(recipe.utf8))
+        return String(decoding: try JSONSerialization.data(withJSONObject: summarize(object), options: [.sortedKeys]), as: UTF8.self)
     }
 
     func retry() {
@@ -405,6 +478,9 @@ struct AIEditingBatch: Codable {
             for index in items.indices where items[index].failure != nil && items[index].phase == .review && items[index].pendingCandidateID != nil {
                 batch!.items[index].phase = .grading
             }
+        }
+        if batch != nil {
+            for index in batch!.items.indices { batch!.items[index].failure = nil; batch!.items[index].failureDetails = nil }
         }
         syncFailure = nil
         do { try persist() } catch { recordFailure(error); return }
@@ -469,23 +545,26 @@ struct AIEditingBatch: Codable {
             isRunning = false; worker = nil
             editor.batchActive = false
             if batch?.cancelled == true { status = "已取消；已提交的结果保留" }
+            else if !Task.isCancelled, batch?.items.contains(where: { !$0.terminal && $0.failure == nil }) == true { start() }
         }
-        let pending = batch!.items.filter { !$0.terminal }.map(\.id)
-        let limit = max(1, limits.photos)
-        await withTaskGroup(of: Void.self) { group in
-            var next = 0
-            for _ in 0..<min(limit, pending.count) {
-                let id = pending[next]; next += 1
-                group.addTask { await self.process(id: id, client: client) }
-            }
-            while await group.next() != nil {
-                if Task.isCancelled { group.cancelAll(); continue }
-                if next < pending.count {
-                    let id = pending[next]; next += 1
-                    group.addTask { await self.process(id: id, client: client) }
+        while !Task.isCancelled, batch?.cancelled == false {
+            let pending = batch!.items.filter { !$0.terminal && $0.failure == nil && itemWorkers[$0.id] == nil }
+            for item in pending {
+                let decision = item.phase == .uploading || item.phase == .discarding
+                let running = batch!.items.filter { itemWorkers[$0.id] != nil }
+                let laneCount = running.filter { ($0.phase == .uploading || $0.phase == .discarding) == decision }.count
+                guard laneCount < max(1, limits.photos) else { continue }
+                itemWorkers[item.id] = Task {
+                    await self.process(id: item.id, client: client)
+                    self.itemWorkers[item.id] = nil
                 }
             }
+            if itemWorkers.isEmpty { break }
+            do { try await Task.sleep(for: .milliseconds(50)) } catch { break }
         }
+        let remaining = Array(itemWorkers.values)
+        for task in remaining { task.cancel() }
+        for task in remaining { await task.value }
         do { try await awaitWorkspaceSync() } catch { recordFailure(error) }
         library?.refresh(force: true)
         if batch?.cancelled == false {
@@ -510,6 +589,10 @@ struct AIEditingBatch: Codable {
                 item.phaseSeconds = item.phaseSeconds ?? [:]
                 item.phaseSeconds![phase, default: 0] += Date().timeIntervalSince(started)
                 try save(item, index: index)
+                if item.phase == .done {
+                    library?.refresh(force: true)
+                    library?.refreshNavigation()
+                }
             } catch {
                 item.phaseSeconds = item.phaseSeconds ?? [:]
                 item.phaseSeconds![phase, default: 0] += Date().timeIntervalSince(started)
@@ -586,6 +669,13 @@ struct AIEditingBatch: Codable {
                 item.originalPreview = preview
             }
             item.phase = .downloading
+            return
+        }
+        if item.phase == .discarding {
+            try await awaitWorkspaceSync()
+            stage(item.id, "标记为弃用", 0.9, 0.95)
+            _ = try await client.updateAsset(id: item.assetID, patch: KeepsAssetPatch(flagState: "rejected"))
+            item.phase = .done
             return
         }
         guard let sourceState = item.source, let hash = sourceState.negativeContentHash,
@@ -673,7 +763,7 @@ struct AIEditingBatch: Codable {
                 algorithmVersion: "keeps-ai-v1", rendererVersion: "darktable-5.6.2", outputs: outputs,
                 recipe: .init(recipeJSON: recipe, xmp: xmp, metadata: try editMetadata(item))))
             item.phase = .done
-        case .preparing, .done, .review: break
+        case .preparing, .discarding, .done, .review: break
         }
     }
 

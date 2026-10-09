@@ -5,14 +5,21 @@ struct AIEditingWorkspaceView: View {
     @EnvironmentObject private var store: AIEditingBatchStore
     @Environment(\.openSettings) private var openSettings
 
+    var autoStart = false
+    var returnToLibrary: () -> Void
+    @State private var showsPreferences = false
+    @State private var preferencesDraft = ""
+
     var body: some View {
         VStack(spacing: 0) {
             header.padding(20)
             Divider()
-            if let batch = store.batch {
+            if store.batch != nil, store.workspaceItems.isEmpty {
+                Spacer()
+            } else if store.batch != nil {
                 ScrollView {
                     LazyVStack(spacing: 20) {
-                        ForEach(batch.items) { item in
+                        ForEach(store.workspaceItems) { item in
                             AIEditingPhotoRow(item: item, store: store)
                         }
                     }.padding(20)
@@ -26,42 +33,61 @@ struct AIEditingWorkspaceView: View {
         .background(WorkspaceStyle.canvas)
         .preferredColorScheme(.dark)
         .tint(WorkspaceStyle.accent)
-        .task { await store.loadWorkspace(library: library) }
+        .task {
+            await store.loadWorkspace(library: library)
+            if autoStart && store.isAwaitingConfirmation && store.errorMessage == nil { store.start() }
+        }
+        .sheet(isPresented: $showsPreferences) { preferencesEditor }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
+                Button(action: returnToLibrary) { Label("返回图库", systemImage: "chevron.left") }
                 Text("AI 调色工作台").font(.title2.bold())
                 Spacer()
-                if store.isRunning || store.isSyncing { ProgressView().controlSize(.small) }
-                Text(store.status).font(.callout).foregroundStyle(.secondary)
             }
-            DisclosureGroup("我的审美与本批要求") {
-                HStack(alignment: .top, spacing: 20) {
-                    VStack(alignment: .leading) {
-                        Text("长期审美偏好").font(.headline)
-                        TextField("描述你希望之后的照片参考的审美", text: $store.preferencesText, axis: .vertical)
-                            .lineLimit(3...6).textFieldStyle(.roundedBorder)
-                        Button("保存长期偏好") { Task { await store.savePreferences() } }.disabled(store.isSyncing)
-                    }
-                    VStack(alignment: .leading) {
-                        Text("本批要求").font(.headline)
-                        TextField("仅用于这批照片", text: $store.batchInstruction, axis: .vertical)
-                            .lineLimit(3...6).textFieldStyle(.roundedBorder)
-                            .disabled(!store.isAwaitingConfirmation || store.isSyncing)
-                        Text("单张对话不会自动改变长期偏好。")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }.padding(.top, 8)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("我的审美偏好").font(.headline)
+                Text(store.preferencesText.isEmpty ? "尚未设置，双击添加审美偏好" : store.preferencesText)
+                    .foregroundStyle(.secondary).lineLimit(3)
+                Text("双击编辑，保存后用于下一批照片").font(.caption).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12).background(WorkspaceStyle.panel, in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { preferencesDraft = store.preferencesText; showsPreferences = true }
+            .accessibilityAction(named: Text("编辑审美偏好")) { preferencesDraft = store.preferencesText; showsPreferences = true }
+            if store.isAwaitingConfirmation {
+                TextField("本批要求", text: $store.batchInstruction, axis: .vertical)
+                    .lineLimit(1...3).textFieldStyle(.roundedBorder)
             }
             if let batch = store.batch, batch.confirmed {
                 Text("本批使用的审美偏好：\((batch.preferences ?? "").isEmpty ? "未设置" : batch.preferences!)")
                     .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             }
-            Text("比较后确认所选版本，才会发布新的展示图和缩略图。关闭窗口可稍后继续。")
+            Text("选择采用版本后，该照片立即移出工作台并在后台发布；进度显示在底部状态栏。")
                 .font(.caption).foregroundStyle(.secondary)
         }
+    }
+
+    private var preferencesEditor: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("编辑审美偏好").font(.title2.bold())
+            TextEditor(text: $preferencesDraft).frame(minHeight: 160)
+            Text("偏好会保存到资料库；当前已开始的照片保留启动时的偏好。")
+                .font(.caption).foregroundStyle(.secondary)
+            if let error = store.errorMessage { Text(error).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button("取消") { showsPreferences = false }
+                Button("保存") {
+                    Task {
+                        if await store.savePreferences(text: preferencesDraft) { showsPreferences = false }
+                    }
+                }.buttonStyle(.borderedProminent).disabled(store.isSyncing)
+            }
+        }.padding(24).frame(width: 520)
     }
 
     private var footer: some View {
@@ -97,11 +123,9 @@ struct AIEditingWorkspaceView: View {
                         .buttonStyle(.borderedProminent).disabled(store.isSyncing)
                 } else if let items = store.batch?.items {
                     let ready = items.filter { store.canPublish($0) && $0.failure == nil }.count
-                    if items.allSatisfy({ $0.phase == .done }) {
-                        Button("完成本批", action: store.closeCompletedWorkspace)
-                    } else {
+                    if ready > 0 {
                         Button("确认并发布这 \(ready) 张", action: store.publishReady)
-                            .buttonStyle(.borderedProminent).disabled(ready == 0 || store.isRunning || store.isSyncing)
+                            .buttonStyle(.borderedProminent).disabled(ready == 0 || store.isSyncing)
                     }
                 }
             }
@@ -110,6 +134,7 @@ struct AIEditingWorkspaceView: View {
 }
 
 private struct AIEditingPhotoRow: View {
+    @EnvironmentObject private var library: LibraryStore
     let item: AIEditingBatch.Item
     @ObservedObject var store: AIEditingBatchStore
     @State private var instruction = ""
@@ -121,7 +146,7 @@ private struct AIEditingPhotoRow: View {
     private var candidates: [AIEditingBatch.Candidate] { item.candidates ?? [] }
     private var selected: AIEditingBatch.Candidate? { candidates.first { $0.id == item.selectedCandidateID } }
     private var displayed: AIEditingBatch.Candidate? { selected ?? candidates.last }
-    private var editable: Bool { item.phase == .review && !store.isRunning && !store.isSyncing }
+    private var editable: Bool { store.canInteract(item) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -131,11 +156,11 @@ private struct AIEditingPhotoRow: View {
                 Text(phaseTitle).foregroundStyle(.secondary)
             }
             HStack(spacing: 16) {
-                comparisonPane(url: item.originalPreview ?? displayed?.result.originalPreview, title: "调整前", selected: item.selectedCandidateID == nil) {
-                    store.selectCandidate(itemID: item.id, candidateID: nil)
+                comparisonPane(url: item.originalPreview ?? displayed?.result.originalPreview, title: "采用调整前版本", original: true, selected: item.selectedCandidateID == nil) {
+                    store.choose(itemID: item.id, candidateID: nil)
                 }
-                comparisonPane(url: displayed?.result.preview ?? displayed?.result.fullSize, title: "AI 结果", selected: item.selectedCandidateID != nil) {
-                    if let candidate = displayed { store.selectCandidate(itemID: item.id, candidateID: candidate.id) }
+                comparisonPane(url: displayed?.result.preview ?? displayed?.result.fullSize, title: "采用 AI 结果", selected: item.selectedCandidateID != nil) {
+                    if let candidate = displayed { store.choose(itemID: item.id, candidateID: candidate.id) }
                 }
             }
             HStack {
@@ -158,6 +183,9 @@ private struct AIEditingPhotoRow: View {
                 Text("调色意见：\(result.reason)").textSelection(.enabled)
             }
             if let failure = item.failure {
+                if item.isBackgroundDecision {
+                    Button("重试后台处理") { store.retryDecision(itemID: item.id) }
+                }
                 Text(failure).foregroundStyle(.red).textSelection(.enabled)
                 if let details = item.failureDetails {
                     DisclosureGroup("诊断详情") { Text(details).font(.caption).textSelection(.enabled) }
@@ -187,7 +215,9 @@ private struct AIEditingPhotoRow: View {
                     Text(activity.title).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button(item.selectedCandidateID == nil ? "确认保留调整前版本" : "确认并发布") { store.publish(itemID: item.id) }
+                Button("弃用") { store.reject(itemID: item.id) }
+                    .disabled(!editable)
+                Button(item.selectedCandidateID == nil ? "确认保留调整前版本" : "采用当前版本") { store.publish(itemID: item.id) }
                     .buttonStyle(.borderedProminent).disabled(!editable || !store.canPublish(item))
             }
         }
@@ -202,23 +232,22 @@ private struct AIEditingPhotoRow: View {
         case .downloading: return "准备照片"
         case .grading: return "正在调色"
         case .uploading: return "正在发布"
+        case .discarding: return "正在弃用"
         case .review: return "待确认"
         case .done: return "已确认"
         }
     }
 
-    private func comparisonPane(url: URL?, title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func comparisonPane(url: URL?, title: String, original: Bool = false, selected: Bool, action: @escaping () -> Void) -> some View {
         VStack(spacing: 8) {
             GeometryReader { geometry in
                 ZStack {
                     Color.black.opacity(0.35)
-                    if let url, let image = NSImage(contentsOf: url) {
-                        Image(nsImage: image).resizable().scaledToFit()
-                            .frame(width: geometry.size.width, height: geometry.size.height)
-                            .scaleEffect(zoom).offset(offset)
-                    } else {
-                        Text("等待预览").foregroundStyle(.secondary)
-                    }
+                    AIEditingComparisonImage(url: url,
+                        asset: original ? library.assets.first(where: { $0.id == item.assetID }) : nil,
+                        configuration: library.configuration)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .scaleEffect(zoom).offset(offset)
                 }
                 .clipped().contentShape(Rectangle())
                 .gesture(DragGesture().onChanged { value in
@@ -230,5 +259,30 @@ private struct AIEditingPhotoRow: View {
                     .frame(maxWidth: .infinity)
             }.buttonStyle(.plain).disabled(!editable || url == nil)
         }.frame(maxWidth: .infinity)
+    }
+}
+
+struct AIEditingBackgroundStatus: View {
+    @ObservedObject var store: AIEditingBatchStore
+    let showWorkspace: () -> Void
+
+    var body: some View {
+        if store.backgroundDecisionCount > 0 || store.failedDecisionCount > 0 {
+            VStack(spacing: 0) {
+                Divider()
+                HStack(spacing: 10) {
+                    if store.backgroundDecisionCount > 0 {
+                        if store.batch?.cancelled != true { ProgressView().controlSize(.small) }
+                        Text("后台处理 \(store.backgroundDecisionCount) 张\(store.batch?.cancelled == true ? " · 已暂停" : "")")
+                            .foregroundStyle(.secondary)
+                    }
+                    if store.failedDecisionCount > 0 {
+                        Button("\(store.failedDecisionCount) 张处理失败 · 查看") { showWorkspace() }
+                            .foregroundStyle(.red).buttonStyle(.plain)
+                    }
+                    Spacer()
+                }.font(.caption).padding(.horizontal, 16).padding(.vertical, 8)
+            }.background(WorkspaceStyle.canvas)
+        }
     }
 }

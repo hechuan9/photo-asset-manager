@@ -69,9 +69,9 @@ impl Store {
                 } else {
                     let document = value["document"]
                         .as_str()
-                        .filter(|s| s.len() <= 16 * 1024 * 1024)
+                        .filter(|s| s.len() <= 64 * 1024 * 1024)
                         .ok_or_else(|| {
-                            invalid(422, "document must be JSON text (maximum 16 MiB)")
+                            invalid(422, "document must be JSON text (maximum 64 MiB)")
                         })?;
                     if !serde_json::from_str::<Value>(document).is_ok_and(|v| v.is_object()) {
                         return Err(invalid(422, "document must encode an object"));
@@ -131,7 +131,7 @@ pub fn router() -> Router<Arc<AppState>> {
         get(load)
             .put(save)
             .layer(axum::extract::DefaultBodyLimit::max(
-                32 * 1024 * 1024 + 64 * 1024,
+                128 * 1024 * 1024 + 64 * 1024,
             )),
     )
 }
@@ -159,7 +159,7 @@ mod tests {
             library_id: "lib".into(),
             original_root_names: Default::default(),
         });
-        let document = json!({"xmp":"x".repeat(2*1024*1024)}).to_string();
+        let document = json!({"xmp":"x".repeat(17*1024*1024)}).to_string();
         let response = crate::api::router(state)
             .oneshot(
                 axum::http::Request::builder()
@@ -212,13 +212,13 @@ mod tests {
     fn workspace_accepts_large_batches_and_rejects_oversized_documents() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let store = Store::open(&dir.path().join("catalog.sqlite"), true)?;
-        let document = json!({"xmp":"x".repeat(2*1024*1024)}).to_string();
+        let document = json!({"xmp":"x".repeat(17*1024*1024)}).to_string();
         store.save_ai_editing_state(
             "lib",
             "workspace",
             &json!({"expectedRevision":0,"document":document}),
         )?;
-        let oversized = json!({"xmp":"x".repeat(16*1024*1024)}).to_string();
+        let oversized = json!({"xmp":"x".repeat(64*1024*1024)}).to_string();
         assert_eq!(
             store
                 .save_ai_editing_state(

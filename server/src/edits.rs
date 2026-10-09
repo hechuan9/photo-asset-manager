@@ -246,8 +246,8 @@ fn validate_recipe(value: &Value) -> Result<Option<String>> {
     }
     let json = value["recipeJSON"]
         .as_str()
-        .filter(|s| s.len() <= 64 * 1024)
-        .ok_or_else(|| error(422, "recipeJSON required (maximum 64 KiB)"))?;
+        .filter(|s| s.len() <= 12 * 1024 * 1024)
+        .ok_or_else(|| error(422, "recipeJSON required (maximum 12 MiB)"))?;
     if !serde_json::from_str::<Value>(json).is_ok_and(|v| v.is_object()) {
         return Err(error(422, "recipeJSON must encode an object"));
     }
@@ -458,7 +458,7 @@ pub fn router() -> Router<Arc<AppState>> {
             get(get_edit)
                 .put(commit)
                 .delete(reset)
-                .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)),
+                .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
         )
         .route(
             "/libraries/{library}/assets/{asset}/negative-version",
@@ -708,6 +708,37 @@ mod tests {
         invalid = recipe;
         invalid["xmp"] = json!("");
         assert!(validate_recipe(&invalid).is_err());
+        Ok(())
+    }
+    #[test]
+    fn recipe_accepts_embedded_masks_with_a_bounded_total_size() -> Result<()> {
+        let mut recipe = json!({"engine":"darktable","engineVersion":"5.6.2",
+            "recipeJSON":json!({"mask":"A".repeat(2*1024*1024)}).to_string(),
+            "xmp":"<rdf:Description darktable:xmp_version=\"5\"/>"});
+        assert!(validate_recipe(&recipe)?.is_some());
+        recipe["recipeJSON"] = json!(json!({"mask":"A".repeat(12*1024*1024)}).to_string());
+        assert!(validate_recipe(&recipe).is_err());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn edit_route_accepts_embedded_mask_payload_above_two_mib() -> Result<()> {
+        let (_dir, state, id) = setup()?;
+        let before = state.store.edit_state("lib", &id)?;
+        let body = json!({"requestID":uuid::Uuid::new_v4().to_string(),"expectedRevision":before["revision"],"recipe":{"recipeJSON":json!({"mask":"A".repeat(3*1024*1024)}).to_string()}});
+        let response = crate::api::router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri(format!("/libraries/lib/assets/{id}/edit"))
+                    .header("authorization", "Bearer test")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))?,
+            )
+            .await?;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
         Ok(())
     }
     #[tokio::test]
