@@ -518,6 +518,15 @@ async fn navigation_photo_counts_are_distinct_recursive_live_catalog_counts() {
             name => panic!("unexpected {name}"),
         };
         assert_eq!(directory["photoCount"], expected, "{directory}");
+        let expected_direct = if directory["name"] == "foo" {
+            1
+        } else {
+            expected
+        };
+        assert_eq!(
+            directory["directPhotoCount"], expected_direct,
+            "{directory}"
+        );
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("directory", directory["path"].as_str().unwrap())
             .finish();
@@ -548,7 +557,7 @@ async fn navigation_photo_counts_are_distinct_recursive_live_catalog_counts() {
         .store
         .directory_photo_counts("other", &[root.join("foo").to_string_lossy().into_owned()])
         .unwrap();
-    assert_eq!(other, vec![0]);
+    assert_eq!(other, vec![(0, 0)]);
 }
 
 #[tokio::test]

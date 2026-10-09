@@ -60,20 +60,6 @@ public final class KeepsClient: Sendable {
         let response: KeepsAssetVersions = try await request("PUT", library + ["assets", assetID.uuidString, "default-version"], body: JSONEncoder().encode(["contentHash": contentHash]))
         return response.items
     }
-    public func aiPreferences() async throws -> KeepsAIPreferences {
-        try await request("GET", library + ["ai-editing", "preferences"])
-    }
-    public func saveAIPreferences(text: String, expectedRevision: Int64) async throws -> KeepsAIPreferences {
-        struct Change: Encodable { let text: String; let expectedRevision: Int64 }
-        return try await request("PUT", library + ["ai-editing", "preferences"], body: JSONEncoder().encode(Change(text: text, expectedRevision: expectedRevision)))
-    }
-    public func aiWorkspace() async throws -> KeepsAIWorkspace {
-        try await request("GET", library + ["ai-editing", "workspace"])
-    }
-    public func saveAIWorkspace(document: String?, expectedRevision: Int64) async throws -> KeepsAIWorkspace {
-        let body = try JSONSerialization.data(withJSONObject: ["document": document as Any? ?? NSNull(), "expectedRevision": expectedRevision])
-        return try await request("PUT", library + ["ai-editing", "workspace"], body: body)
-    }
     public func confirmOriginalEdit(assetID: UUID, requestID: UUID, expectedRevision: Int64, metadata: String) async throws -> KeepsEditState {
         struct Decision: Encodable { let requestID: String; let expectedRevision: Int64; let metadata: String }
         return try await request("POST", library + ["assets", assetID.uuidString, "edit", "decisions"], body: JSONEncoder().encode(Decision(requestID: requestID.uuidString.lowercased(), expectedRevision: expectedRevision, metadata: metadata)))

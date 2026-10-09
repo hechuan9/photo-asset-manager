@@ -146,7 +146,7 @@ struct DirectoryOutlineView: NSViewRepresentable {
             countLabel.textColor = .secondaryLabelColor
             countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
             countLabel.setContentHuggingPriority(.required, for: .horizontal)
-            countLabel.toolTip = "已索引照片，包含子目录，不含回收站"
+            countLabel.toolTip = "当前目录照片数（包含所有子目录的照片总数），不含回收站"
             icon.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
             spinner.style = .spinning
             spinner.controlSize = .small
@@ -170,7 +170,7 @@ struct DirectoryOutlineView: NSViewRepresentable {
             nameLabel.textColor = hidden ? .secondaryLabelColor : .labelColor
             icon.contentTintColor = hidden ? .tertiaryLabelColor : .secondaryLabelColor
             countLabel.textColor = hidden ? .tertiaryLabelColor : .secondaryLabelColor
-            countLabel.stringValue = String(directory.photoCount)
+            countLabel.stringValue = directory.photoCountLabel
             toolTip = directory.path + (hidden ? "（隐藏目录：仅进入此目录或其子目录时显示内容）" : "")
             icon.isHidden = loading
             spinner.isHidden = !loading

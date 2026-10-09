@@ -397,7 +397,7 @@ import KeepsAPI
         coordinator.update()
         let cell = try #require(coordinator.outlineView(outline, viewFor: nil, item: item) as? DirectoryOutlineView.DirectoryCell)
         #expect(!cell.spinner.isHidden)
-        #expect(cell.countLabel.stringValue == "0")
+        #expect(cell.countLabel.stringValue == "—（0）")
         #expect(store.directoryChildren["2026"] == nil)
         try await waitUntil { store.loadingDirectories.isEmpty }
         coordinator.update()
@@ -406,7 +406,7 @@ import KeepsAPI
         cell.configure(directory, loading: false)
         #expect(cell.spinner.isHidden)
         #expect(cell.icon.isHidden == false)
-        #expect(cell.countLabel.stringValue == "0")
+        #expect(cell.countLabel.stringValue == "—（0）")
         cell.configure(directory, loading: true)
         #expect(!cell.spinner.isHidden)
         cell.configure(directory, loading: false)

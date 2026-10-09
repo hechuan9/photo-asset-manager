@@ -30,6 +30,9 @@ struct AIEditingBatch: Codable {
         var pendingInstruction: String?
         var pendingCandidateID: UUID?
         var confirmedAt: String?
+        var preferences: String?
+        var preferenceRevision: Int64?
+        var batchInstruction: String?
         var isBackgroundDecision: Bool { phase == .uploading || phase == .discarding }
         var isVisibleInWorkspace: Bool { phase != .done && (!isBackgroundDecision || failure != nil) }
         var terminal: Bool { phase == .done || phase == .review }
@@ -43,7 +46,6 @@ struct AIEditingBatch: Codable {
     var preferences: String?
     var preferenceRevision: Int64?
     var instruction: String?
-    var ownerID: String?
 }
 
 @MainActor final class AIEditingBatchStore: ObservableObject {
@@ -58,21 +60,17 @@ struct AIEditingBatch: Codable {
     @Published var preferencesText = ""
     @Published var batchInstruction = "" {
         didSet {
-            guard batch?.confirmed == false else { return }
-            batch?.instruction = batchInstruction
+            guard batch != nil else { return }
+            batch!.instruction = batchInstruction
             do { try persist() } catch { recordFailure(error) }
         }
     }
-    @Published private(set) var isSyncing = false
+    private struct LocalPreferences: Codable {
+        var text: String
+        var revision: Int64
+    }
     private var preferencesRevision: Int64 = 0
-    private var workspaceRevision: Int64 = 0
-    private var workspaceLoaded = false
-    private var loadedConfiguration: KeepsConfiguration?
-    private var ownerID = ""
-    private var checkpoint: URL { root.appendingPathComponent("workspace-revision.json") }
-    private var syncFailure: Error?
-    private var syncTask: Task<Void, Never>?
-    private var syncDirty = false
+    private var preferencesFile: URL { root.appendingPathComponent("preferences.json") }
     var isAwaitingUpload: Bool { batch?.items.first(where: { !$0.terminal })?.phase == .uploading }
     var pendingResultURL: URL? { isAwaitingUpload ? batch?.items.first(where: { !$0.terminal })?.result?.fullSize : nil }
     var isAwaitingConfirmation: Bool { batch != nil && batch?.confirmed == false && batch?.cancelled == false }
@@ -109,7 +107,6 @@ struct AIEditingBatch: Codable {
     private var limits = AIEditingLimits()
     private var aiResumeAfter = Date.distantPast
     private var storageError: Error?
-    private var restored = false
     var retryInterval: Duration = .seconds(5)
 
     init(root: URL? = nil, editor: AIEditingSettingsStore = AIEditingSettingsStore()) {
@@ -117,12 +114,16 @@ struct AIEditingBatch: Codable {
         self.root = root ?? editor.root.appendingPathComponent("batches", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: self.root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let ownerFile = self.root.appendingPathComponent("owner-id")
-            if FileManager.default.fileExists(atPath: ownerFile.path) { ownerID = try String(contentsOf: ownerFile, encoding: .utf8) }
-            else { ownerID = UUID().uuidString; try ownerID.write(to: ownerFile, atomically: true, encoding: .utf8) }
             if FileManager.default.fileExists(atPath: manifest.path) {
                 batch = try JSONDecoder().decode(AIEditingBatch?.self, from: Data(contentsOf: manifest))
                 if let saved = batch {
+                    for index in saved.items.indices {
+                        if batch!.items[index].preferences == nil && batch!.items[index].phase != .preparing {
+                            batch!.items[index].preferences = saved.preferences ?? ""
+                            batch!.items[index].preferenceRevision = saved.preferenceRevision ?? 0
+                            batch!.items[index].batchInstruction = saved.instruction ?? ""
+                        }
+                    }
                     for index in saved.items.indices where saved.items[index].phase == .uploading && saved.items[index].confirmedAt == nil {
                         batch!.items[index].phase = .review
                         if var result = saved.items[index].result {
@@ -144,39 +145,51 @@ struct AIEditingBatch: Codable {
                     }
                 }
             }
+            if FileManager.default.fileExists(atPath: preferencesFile.path) {
+                let saved = try JSONDecoder().decode(LocalPreferences.self, from: Data(contentsOf: preferencesFile))
+                preferencesText = saved.text; preferencesRevision = saved.revision
+            } else if let text = batch?.preferences {
+                preferencesText = text; preferencesRevision = batch?.preferenceRevision ?? 0
+                try JSONEncoder().encode(LocalPreferences(text: text, revision: preferencesRevision)).write(to: preferencesFile, options: .atomic)
+            }
+            batchInstruction = batch?.instruction ?? ""
         } catch { storageError = error; recordFailure(error) }
     }
 
     func prepare(library: LibraryStore) {
-        guard batch == nil, !library.isOperationBlocking, !library.isMutating, !library.isSelectingAll,
+        guard !library.isOperationBlocking, !library.isMutating, !library.isSelectingAll,
               !library.isCheckingConnection, !library.isUpdatingHiddenDirectory, !library.isImportingPhotos,
               library.directoryToCreate == nil, library.directoryToRename == nil, library.directoryToTrash == nil,
-              !editor.isBusy, !library.selectedIDs.isEmpty, let configuration = library.configuration else { return }
+              !library.selectedIDs.isEmpty, let configuration = library.configuration else { return }
+        let previous = batch
         do {
             if let storageError { throw storageError }
-            if loadedConfiguration != configuration { workspaceLoaded = false; workspaceRevision = 0 }
-            let selected = library.selectedIDs
+            if let batch, batch.baseURL != configuration.baseURL.absoluteString || batch.libraryID != configuration.libraryID {
+                guard !isRunning, batch.items.allSatisfy({ $0.phase == .done }) else {
+                    throw AIEditingFailure("本机工作台还有另一资料库的照片，请先完成后再切换资料库。")
+                }
+                self.batch = nil
+            }
             let names = Dictionary(uniqueKeysWithValues: library.assets.map { ($0.id, $0.originalFilename) })
-            batch = AIEditingBatch(id: UUID(), baseURL: configuration.baseURL.absoluteString, libraryID: configuration.libraryID,
-                items: selected.sorted { $0.uuidString < $1.uuidString }.map { .init(id: UUID(), assetID: $0, name: names[$0] ?? $0.uuidString) })
-            batch!.ownerID = ownerID
+            if batch == nil {
+                batch = AIEditingBatch(id: UUID(), baseURL: configuration.baseURL.absoluteString, libraryID: configuration.libraryID, items: [])
+            }
+            let existing = Set(batch!.items.filter { $0.phase != .done }.map(\.assetID))
+            let added = library.selectedIDs.subtracting(existing).sorted { $0.uuidString < $1.uuidString }
+            batch!.items += added.map { .init(id: UUID(), assetID: $0, name: names[$0] ?? $0.uuidString) }
             self.library = library
             try persist()
-
             errorMessage = nil; errorDetails = nil; diagnosticDirectory = nil
-            status = "确认对所选 \(totalCount) 张照片进行 AI 调色"
-        } catch { batch = nil; library.lastError = String(reflecting: error) }
+            status = added.isEmpty ? "已打开本机调色工作台" : "已追加 \(added.count) 张照片"
+        } catch { batch = previous; recordFailure(error) }
     }
 
     func restore(library: LibraryStore) {
-        guard !restored, !library.isDirectoryOperationBlocking else { return }
-        restored = true
+        guard !library.isDirectoryOperationBlocking else { return }
         self.library = library
-        guard let batch else { return }
-
-        preferencesText = batch.preferences ?? ""
-        batchInstruction = batch.instruction ?? ""
-        if batch.confirmed && !batch.cancelled && !isFinished { start() }
+        guard let client = library.client, batch != nil else { return }
+        guard matches(client) else { recordFailure(AIEditingFailure("请切回本机工作台所属的资料库。")); return }
+        if batch!.confirmed && !batch!.cancelled && !isFinished { start() }
     }
 
     func start() {
@@ -186,20 +199,9 @@ struct AIEditingBatch: Codable {
         worker = Task {
             do {
                 guard let library, let client = library.client, matches(client) else { throw AIEditingFailure("请使用创建此任务时的资料库连接。") }
-                if !workspaceLoaded { await loadWorkspace(library: library) }
-                guard workspaceLoaded, batch?.ownerID == nil || batch?.ownerID == ownerID else {
-                    throw AIEditingFailure("工作台尚未同步，或由另一台 Mac 创建。请在原 Mac 继续。")
-                }
-                if !batch!.confirmed {
-                    let saved = try await client.saveAIPreferences(text: preferencesText, expectedRevision: preferencesRevision)
-                    preferencesRevision = saved.revision
-                    batch!.preferences = saved.text
-                    batch!.preferenceRevision = saved.revision
-                    batch!.instruction = batchInstruction
-                }
-                batch!.confirmed = true; batch!.cancelled = false; batch!.ownerID = ownerID
+                if let storageError { throw storageError }
+                batch!.confirmed = true; batch!.cancelled = false
                 try persist()
-                try await awaitWorkspaceSync()
                 errorMessage = nil; errorDetails = nil; diagnosticDirectory = nil
                 limits = editor.limits.bounded
                 editor.batchActive = true
@@ -220,116 +222,16 @@ struct AIEditingBatch: Codable {
         }
     }
 
-    func loadWorkspace(library: LibraryStore) async {
-        self.library = library
-        if loadedConfiguration != library.configuration { workspaceLoaded = false }
-        guard !isSyncing, let client = library.client else { return }
-        if batch != nil, !matches(client) { recordFailure(AIEditingFailure("请切回创建工作台的资料库。")); return }
-        isSyncing = true
-        defer { isSyncing = false }
-        do {
-            if workspaceLoaded {
-                scheduleSync()
-                try await awaitWorkspaceSync()
-                errorMessage = nil
-                return
-            }
-            let prefs = try await client.aiPreferences()
-            let remote = try await client.aiWorkspace()
-            guard library.client?.configuration == client.configuration else { return }
-            preferencesText = prefs.text; preferencesRevision = prefs.revision
-            if let document = remote.document {
-                let saved = try JSONDecoder().decode(AIEditingBatch.self, from: Data(document.utf8))
-                if let batch, batch.id != saved.id { throw AIEditingFailure("NAS 上存在另一份工作台草稿；本机草稿已保留，请先完成当前工作台。") }
-                if let local = batch {
-                    let known = (try? Data(contentsOf: checkpoint)).flatMap { try? JSONDecoder().decode(Int64.self, from: $0) }
-                    let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-                    let same = try encoder.encode(local) == encoder.encode(saved)
-                    if local.confirmed && known != remote.revision && !same {
-                        throw AIEditingFailure("NAS 草稿版本已改变，本机进度已保留，不能覆盖远端草稿。")
-                    }
-                } else { batch = saved; batchInstruction = saved.instruction ?? "" }
-                guard saved.ownerID == nil || saved.ownerID == ownerID else {
-                    throw AIEditingFailure("此工作台由另一台 Mac 创建，调色缓存保存在原 Mac，请在原 Mac 继续。")
-                }
-            }
-            workspaceRevision = remote.revision
-            try JSONEncoder().encode(workspaceRevision).write(to: checkpoint, options: .atomic)
-            loadedConfiguration = client.configuration
-            workspaceLoaded = true
-            try persist()
-            if batch?.confirmed == true, batch?.cancelled == false, worker == nil,
-               batch?.items.contains(where: { !$0.terminal }) == true { start() }
-        } catch { recordFailure(error) }
-    }
-
-    func reloadRemoteWorkspace() async {
-        guard !isRunning, !isSyncing, let library else { return }
-        do {
-            if let syncTask { await syncTask.value }
-            if let batch {
-                let copy = root.appendingPathComponent("recovery-" + UUID().uuidString + ".json")
-                try JSONEncoder().encode(batch).write(to: copy, options: .atomic)
-            }
-            batch = nil; workspaceLoaded = false; syncDirty = false; syncFailure = nil
-            try JSONEncoder().encode(batch).write(to: manifest, options: .atomic)
-            await loadWorkspace(library: library)
-        } catch { recordFailure(error) }
-    }
-
     @discardableResult func savePreferences(text: String? = nil) async -> Bool {
-        guard !isSyncing, let client = library?.client, workspaceLoaded, client.configuration == loadedConfiguration else {
-            recordFailure(AIEditingFailure("工作台尚未完成同步，请稍后重试保存。"))
-            return false
-        }
-        isSyncing = true
-        defer { isSyncing = false }
         do {
-            let saved = try await client.saveAIPreferences(text: text ?? preferencesText, expectedRevision: preferencesRevision)
-            preferencesRevision = saved.revision
-            preferencesText = saved.text
-            status = "长期审美偏好已保存；当前批次继续使用开始时的偏好"
+            if let storageError { throw storageError }
+            let next = LocalPreferences(text: text ?? preferencesText, revision: preferencesRevision + 1)
+            try JSONEncoder().encode(next).write(to: preferencesFile, options: .atomic)
+            preferencesText = next.text; preferencesRevision = next.revision
+            status = "审美偏好已保存在这台 Mac，尚未开始的照片将使用新偏好"
             errorMessage = nil; errorDetails = nil
             return true
         } catch { recordFailure(error); return false }
-    }
-
-    private func scheduleSync() {
-        guard workspaceLoaded else { return }
-        syncDirty = true
-        guard syncTask == nil else { return }
-        syncTask = Task { [weak self] in
-            guard let self else { return }
-            self.syncFailure = nil
-            defer { self.syncTask = nil }
-            do { try await self.flushWorkspace(); self.syncFailure = nil }
-            catch { self.syncFailure = error; self.recordFailure(error) }
-        }
-    }
-
-    private func flushWorkspace() async throws {
-        guard let client = library?.client, workspaceLoaded, client.configuration == loadedConfiguration,
-              batch == nil || matches(client) else { throw AIEditingFailure("资料库连接已变化，草稿保留在本机，请切回原连接后同步。") }
-        while syncDirty {
-            syncDirty = false
-            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-            let document = try batch.map { String(decoding: try encoder.encode($0), as: UTF8.self) }
-            do {
-                if let document, document.utf8.count > 64 * 1024 * 1024 {
-                    throw AIEditingFailure("工作台草稿超过 64 MiB，请结束当前批次后分批调色；本机结果已保留。")
-                }
-                let saved = try await client.saveAIWorkspace(document: document, expectedRevision: workspaceRevision)
-                workspaceRevision = saved.revision
-                try JSONEncoder().encode(workspaceRevision).write(to: checkpoint, options: .atomic)
-            } catch { syncDirty = true; throw error }
-        }
-    }
-
-    private func awaitWorkspaceSync() async throws {
-        if let syncTask { await syncTask.value }
-        if let syncFailure { throw syncFailure }
-        if syncDirty { scheduleSync(); if let syncTask { await syncTask.value } }
-        if let syncFailure { throw syncFailure }
     }
 
     func selectCandidate(itemID: UUID, candidateID: UUID?) {
@@ -368,13 +270,11 @@ struct AIEditingBatch: Codable {
     }
 
     func publish(itemID: UUID) {
-        guard workspaceLoaded, batch?.ownerID == nil || batch?.ownerID == ownerID else { return }
         do { try confirm(itemID: itemID); start() } catch { recordFailure(error) }
     }
 
     func choose(itemID: UUID, candidateID: UUID?) {
-        guard workspaceLoaded, batch?.ownerID == nil || batch?.ownerID == ownerID,
-              let index = batch?.items.firstIndex(where: { $0.id == itemID }), canInteract(batch!.items[index]) else { return }
+        guard let index = batch?.items.firstIndex(where: { $0.id == itemID }), canInteract(batch!.items[index]) else { return }
         if let candidateID, !(batch!.items[index].candidates ?? []).contains(where: { $0.id == candidateID && $0.result.status == "selected" }) { return }
         let previous = batch
         batch!.items[index].selectedCandidateID = candidateID
@@ -395,8 +295,7 @@ struct AIEditingBatch: Codable {
     }
 
     func reject(itemID: UUID) {
-        guard workspaceLoaded, batch?.ownerID == nil || batch?.ownerID == ownerID,
-              let index = batch?.items.firstIndex(where: { $0.id == itemID }),
+        guard let index = batch?.items.firstIndex(where: { $0.id == itemID }),
               canInteract(batch!.items[index]) else { return }
         let previous = batch
         batch!.items[index].phase = .discarding
@@ -408,7 +307,6 @@ struct AIEditingBatch: Codable {
     }
 
     func publishReady() {
-        guard workspaceLoaded, batch?.ownerID == nil || batch?.ownerID == ownerID else { return }
         do {
             for item in batch?.items ?? [] where canPublish(item) && item.failure == nil { try confirm(itemID: item.id) }
             start()
@@ -437,15 +335,17 @@ struct AIEditingBatch: Codable {
 
     func closeCompletedWorkspace() {
         guard !isRunning, batch?.items.allSatisfy({ $0.phase == .done }) == true else { return }
-        dismiss()
+        let previous = batch
+        batch!.items = []
+        do { try persist() } catch { batch = previous; recordFailure(error) }
     }
 
     private func editMetadata(_ item: AIEditingBatch.Item) throws -> String {
         let candidate = item.candidates?.first { $0.id == item.selectedCandidateID }
         let object: [String: Any] = ["reason": candidate?.result.reason ?? item.candidates?.last?.result.reason ?? "保留调整前版本",
-            "instruction": candidate?.instruction ?? "", "preferences": candidate?.preferences ?? batch?.preferences ?? "",
-            "preferenceRevision": candidate?.preferenceRevision ?? batch?.preferenceRevision ?? 0,
-            "batchInstruction": candidate?.batchInstruction ?? batch?.instruction ?? "",
+            "instruction": candidate?.instruction ?? "", "preferences": candidate?.preferences ?? item.preferences ?? "",
+            "preferenceRevision": candidate?.preferenceRevision ?? item.preferenceRevision ?? 0,
+            "batchInstruction": candidate?.batchInstruction ?? item.batchInstruction ?? "",
             "selection": item.selectedCandidateID?.uuidString ?? "original", "confirmedAt": item.confirmedAt ?? "",
             "history": try (item.candidates ?? []).map { ["id": $0.id.uuidString, "reason": $0.result.reason,
                 "instruction": $0.instruction, "parentID": $0.parentID?.uuidString ?? "", "status": $0.result.status, "recipeJSON": try Self.historyRecipe($0.result.recipeJSON) ?? ""] }]
@@ -482,7 +382,6 @@ struct AIEditingBatch: Codable {
         if batch != nil {
             for index in batch!.items.indices { batch!.items[index].failure = nil; batch!.items[index].failureDetails = nil }
         }
-        syncFailure = nil
         do { try persist() } catch { recordFailure(error); return }
         start()
     }
@@ -530,7 +429,6 @@ struct AIEditingBatch: Codable {
 
     private func persist() throws {
         try JSONEncoder().encode(batch).write(to: manifest, options: .atomic)
-        scheduleSync()
     }
 
     private func save(_ item: AIEditingBatch.Item, index: Int) throws {
@@ -565,7 +463,6 @@ struct AIEditingBatch: Codable {
         let remaining = Array(itemWorkers.values)
         for task in remaining { task.cancel() }
         for task in remaining { await task.value }
-        do { try await awaitWorkspaceSync() } catch { recordFailure(error) }
         library?.refresh(force: true)
         if batch?.cancelled == false {
             status = failedItems.isEmpty
@@ -654,6 +551,11 @@ struct AIEditingBatch: Codable {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         if item.phase == .preparing {
             stage(item.id, "读取底片（\(completedCount + 1)/\(totalCount)）", 0.01, 0.04)
+            if item.preferences == nil {
+                item.preferences = preferencesText
+                item.preferenceRevision = preferencesRevision
+                item.batchInstruction = batchInstruction
+            }
             let state = try await client.editState(assetID: item.assetID)
             if state.lastRequestID == item.id.uuidString.lowercased() { item.phase = .done; return }
             guard state.sourceAvailable, state.negativeContentHash != nil, state.sourceFilename != nil else {
@@ -672,7 +574,6 @@ struct AIEditingBatch: Codable {
             return
         }
         if item.phase == .discarding {
-            try await awaitWorkspaceSync()
             stage(item.id, "标记为弃用", 0.9, 0.95)
             _ = try await client.updateAsset(id: item.assetID, patch: KeepsAssetPatch(flagState: "rejected"))
             item.phase = .done
@@ -699,7 +600,7 @@ struct AIEditingBatch: Codable {
             let itemID = item.id
             stage(item.id, "连接 AI，准备观察照片", 0.15, 0.25)
             let selected = item.candidates?.first { $0.id == item.selectedCandidateID }
-            let context = AIGradeContext(preferences: batch?.preferences ?? "", batchInstruction: batch?.instruction ?? "",
+            let context = AIGradeContext(preferences: item.preferences ?? "", batchInstruction: item.batchInstruction ?? "",
                 instruction: item.pendingInstruction ?? "", baseRecipeJSON: selected?.result.recipeJSON ?? item.source?.recipe?.recipeJSON,
                 history: (item.candidates ?? []).map { $0.instruction + "\n" + $0.result.reason })
             let jobName = item.pendingCandidateID.map { "ai-" + $0.uuidString.lowercased() } ?? "ai"
@@ -708,8 +609,8 @@ struct AIEditingBatch: Codable {
             })
                         let candidate = AIEditingBatch.Candidate(id: item.pendingCandidateID ?? UUID(), result: item.result!,
                 instruction: item.pendingInstruction ?? "", parentID: item.selectedCandidateID,
-                preferences: batch?.preferences ?? "", preferenceRevision: batch?.preferenceRevision ?? 0,
-                batchInstruction: batch?.instruction ?? "")
+                preferences: item.preferences ?? "", preferenceRevision: item.preferenceRevision ?? 0,
+                batchInstruction: item.batchInstruction ?? "")
             item.candidates = (item.candidates ?? []) + [candidate]
             if item.result?.status == "selected" { item.selectedCandidateID = candidate.id }
             if item.originalPreview == nil { item.originalPreview = item.result?.originalPreview }
@@ -718,14 +619,13 @@ struct AIEditingBatch: Codable {
             item.phase = .review
         case .uploading:
             guard item.confirmedAt != nil else { item.phase = .review; return }
-            try await awaitWorkspaceSync()
             stage(item.id, "调色已完成，等待保存", 0.85, 0.85)
             try await acquire("upload", limit: limits.uploads)
             defer { gates["upload", default: 0] -= 1 }
             stage(item.id, "调色已完成，准备保存到 NAS", 0.85, 0.88)
             let state = try await client.editState(assetID: item.assetID)
             if state.lastRequestID == item.id.uuidString.lowercased() { item.phase = .done; return }
-            guard state.revision == sourceState.revision else { throw AIEditingFailure("照片已被其它客户端修改，本次结果未覆盖。请取消后重新开始。") }
+            guard state.revision == sourceState.revision else { throw AIEditingFailure("照片已被其它客户端修改，本机调色结果已保留，未覆盖 NAS 照片。请先核对图库中的最新版本。") }
             if item.selectedCandidateID == nil {
                 _ = try await client.confirmOriginalEdit(assetID: item.assetID, requestID: item.id,
                     expectedRevision: sourceState.revision, metadata: try editMetadata(item))

@@ -53,6 +53,110 @@ import Testing
         #expect(AIEditingBatchStore(root: root).batch == nil)
     }
 
+    @Test func appendingSelectionDeduplicatesAndPreservesWorkspaceIdentity() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let library = LibraryStore(configuration: .init(baseURL: URL(string: "https://append.invalid")!, libraryID: "test"), loadSavedSettings: false,
+            preferences: UserDefaults(suiteName: UUID().uuidString)!)
+        let first = UUID(), second = UUID()
+        let store = AIEditingBatchStore(root: root)
+        library.selectedIDs = [first]
+        store.prepare(library: library)
+        let identity = store.batch?.id
+        let itemIdentity = store.batch?.items.first?.id
+        library.selectedIDs = [first, second]
+        store.prepare(library: library)
+        #expect(store.batch?.id == identity)
+        #expect(store.batch?.items.count == 2)
+        #expect(store.batch?.items.first?.id == itemIdentity)
+        let restored = AIEditingBatchStore(root: root)
+        #expect(restored.batch?.id == identity)
+        #expect(Set(restored.batch!.items.map(\.assetID)) == [first, second])
+    }
+
+    @Test func completingWorkspaceKeepsIdentityAndLocalPreferencesForNextSelection() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let completed = AIEditingBatch(id: UUID(), baseURL: "https://local.invalid", libraryID: "test",
+            items: [.init(id: UUID(), assetID: UUID(), name: "done.jpg", phase: .done)])
+        try JSONEncoder().encode(completed).write(to: root.appendingPathComponent("batch.json"))
+        let store = AIEditingBatchStore(root: root)
+        #expect(await store.savePreferences(text: "保留现场氛围"))
+        store.closeCompletedWorkspace()
+        #expect(store.batch?.id == completed.id)
+        #expect(store.batch?.items.isEmpty == true)
+        let restored = AIEditingBatchStore(root: root)
+        #expect(restored.batch?.id == completed.id)
+        #expect(restored.preferencesText == "保留现场氛围")
+        let library = LibraryStore(configuration: .init(baseURL: URL(string: completed.baseURL)!, libraryID: "test"), loadSavedSettings: false,
+            preferences: UserDefaults(suiteName: UUID().uuidString)!)
+        library.selectedIDs = [UUID()]
+        restored.prepare(library: library)
+        #expect(restored.batch?.id == completed.id)
+        #expect(restored.batch?.items.count == 1)
+    }
+
+    @Test func selectionCanAppendWhileAnotherPhotoIsProcessing() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [WaitingBatchProtocol.self]
+        let library = LibraryStore(configuration: .init(baseURL: URL(string: "https://append-running.invalid")!, libraryID: "test"),
+            session: URLSession(configuration: config), loadSavedSettings: false,
+            preferences: UserDefaults(suiteName: UUID().uuidString)!)
+        let store = AIEditingBatchStore(root: root)
+        let first = UUID(), second = UUID()
+        library.selectedIDs = [first]
+        store.prepare(library: library)
+        store.start()
+        for _ in 0..<200 where store.activeCount == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(store.isRunning)
+        let identity = store.batch?.id
+        library.selectedIDs = [first, second]
+        store.prepare(library: library)
+        #expect(store.batch?.id == identity)
+        #expect(store.batch?.items.count == 2)
+        for _ in 0..<200 where store.activeCount < 2 { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(store.activeCount == 2)
+        store.cancel()
+        for _ in 0..<200 where store.isRunning { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(!store.isRunning)
+        #expect(AIEditingBatchStore(root: root).batch?.items.count == 2)
+    }
+
+    @Test func preferencesStayLocalAndEachPhotoKeepsItsStartSnapshot() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocalSnapshotProtocol.self]
+        let library = LibraryStore(configuration: .init(baseURL: URL(string: "https://local.invalid")!, libraryID: "test"),
+            session: URLSession(configuration: configuration), loadSavedSettings: false,
+            preferences: UserDefaults(suiteName: UUID().uuidString)!)
+        let store = AIEditingBatchStore(root: root)
+        #expect(await store.savePreferences(text: "自然肤色"))
+        library.selectedIDs = [UUID()]
+        store.prepare(library: library)
+        store.batchInstruction = "保留暖光"
+        store.start()
+        for _ in 0..<200 where store.isRunning { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(store.batch?.items.first?.preferences == "自然肤色")
+        #expect(store.batch?.items.first?.batchInstruction == "保留暖光")
+        #expect(await store.savePreferences(text: "低饱和"))
+        let identity = store.batch?.id
+        library.selectedIDs = [UUID()]
+        store.prepare(library: library)
+        store.batchInstruction = "提亮阴影"
+        store.start()
+        for _ in 0..<200 where store.isRunning { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(store.batch?.id == identity)
+        #expect(store.batch?.items.first?.preferences == "自然肤色")
+        #expect(store.batch?.items.last?.preferences == "低饱和")
+        #expect(store.batch?.items.last?.batchInstruction == "提亮阴影")
+        let restored = AIEditingBatchStore(root: root)
+        #expect(restored.preferencesText == "低饱和")
+        #expect(restored.batch?.items.first?.preferences == "自然肤色")
+    }
+
     @Test func importingOrOtherOperationCannotStartBatch() {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -255,7 +359,7 @@ import Testing
             session: URLSession(configuration: config), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         let store = AIEditingBatchStore(root: root)
         store.restore(library: library)
-        await store.loadWorkspace(library: library)
+        store.restore(library: library)
         store.selectCandidate(itemID: item.id, candidateID: first.id)
         let restored = AIEditingBatchStore(root: root)
         #expect(restored.batch?.items[0].selectedCandidateID == first.id)
@@ -268,7 +372,7 @@ import Testing
         store.selectCandidate(itemID: item.id, candidateID: nil)
         #expect(AIEditingBatchStore(root: root).batch?.items[0].selectedCandidateID == nil)
         #expect(AIEditingBatchStore(root: root).batch?.items[0].result == nil)
-        await store.loadWorkspace(library: library)
+        store.restore(library: library)
     }
 
     @Test func confirmingOriginalRecordsDecisionWithoutImageUpload() async throws {
@@ -287,7 +391,7 @@ import Testing
             session: URLSession(configuration: config), loadSavedSettings: false, preferences: UserDefaults(suiteName: UUID().uuidString)!)
         let store = AIEditingBatchStore(root: root)
         store.restore(library: library)
-        await store.loadWorkspace(library: library)
+        store.restore(library: library)
         OriginalDecisionProtocol.reset()
         store.publish(itemID: item.id)
         for _ in 0..<200 where store.isRunning { try await Task.sleep(for: .milliseconds(5)) }
@@ -460,18 +564,16 @@ private final class ConcurrentBatchProtocol: URLProtocol, @unchecked Sendable {
 }
 
 private func respondToWorkspaceRequest(_ handler: URLProtocol) -> Bool {
-    guard handler.request.url?.path.contains("/ai-editing/") == true else {
-        if handler.request.httpMethod == "GET", handler.request.url?.path.contains("/edit") != true {
-            handler.client?.urlProtocol(handler, didFailWithError: URLError(.cancelled))
-            return true
-        }
-        return false
+    if handler.request.url?.path.contains("/ai-editing/") == true {
+        Issue.record("AI workspace and preferences must stay on this Mac")
+        handler.client?.urlProtocol(handler, didFailWithError: URLError(.badURL))
+        return true
     }
-    let isPreferences = handler.request.url?.lastPathComponent == "preferences"
-    let revision = handler.request.httpMethod == "GET" ? 0 : 1
-    let body = isPreferences ? "{\"revision\":\(revision),\"text\":\"自然肤色\"}" : "{\"revision\":\(revision),\"document\":null}"
-    respond(handler, data: Data(body.utf8))
-    return true
+    if handler.request.httpMethod == "GET", handler.request.url?.path.contains("/edit") != true {
+        handler.client?.urlProtocol(handler, didFailWithError: URLError(.cancelled))
+        return true
+    }
+    return false
 }
 
 private func respond(_ handler: URLProtocol, data: Data) {
@@ -536,6 +638,21 @@ private final class IndependentDecisionProtocol: URLProtocol, @unchecked Sendabl
             Issue.record("Decisions must only update a flag or confirm the selected version")
             client?.urlProtocol(self, didFailWithError: URLError(.badURL))
         }
+    }
+    override func stopLoading() {}
+}
+
+private final class LocalSnapshotProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        if respondToWorkspaceRequest(self) { return }
+        guard request.httpMethod == "GET", request.url?.lastPathComponent == "edit" else {
+            Issue.record("Local workspaces must only read photo source information before confirmation")
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL)); return
+        }
+        let state = KeepsEditState(negativeContentHash: nil, revision: 1, hasEdit: false, sourceAvailable: false)
+        respond(self, data: try! JSONEncoder().encode(state))
     }
     override func stopLoading() {}
 }

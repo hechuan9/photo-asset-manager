@@ -71,7 +71,6 @@ pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .merge(crate::remote_worker::router())
         .merge(crate::edits::router())
-        .merge(crate::ai_editing::router())
         .merge(crate::rejected_trash::router())
         .merge(crate::imports::router())
         .merge(crate::offline_rebuild::router(state.clone()))
@@ -502,8 +501,9 @@ async fn navigation(
                 })
                 .collect();
             let counts = state.store.directory_photo_counts(&library, &paths)?;
-            for (directory, count) in directories.iter_mut().zip(counts) {
-                directory["photoCount"] = json!(count);
+            for (directory, (direct, recursive)) in directories.iter_mut().zip(counts) {
+                directory["directPhotoCount"] = json!(direct);
+                directory["photoCount"] = json!(recursive);
             }
             Ok(result)
         })

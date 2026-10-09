@@ -36,8 +36,8 @@ struct AIEditingWorkspaceView: View {
         .preferredColorScheme(.dark)
         .tint(WorkspaceStyle.accent)
         .task {
-            await store.loadWorkspace(library: library)
-            if autoStart && store.isAwaitingConfirmation && store.errorMessage == nil { store.start() }
+            store.restore(library: library)
+            if autoStart && store.errorMessage == nil { store.start() }
         }
         .sheet(isPresented: $showsPreferences) { preferencesEditor }
     }
@@ -52,21 +52,15 @@ struct AIEditingWorkspaceView: View {
                 Text("我的审美偏好").font(.headline)
                 Text(store.preferencesText.isEmpty ? "尚未设置，双击添加审美偏好" : store.preferencesText)
                     .foregroundStyle(.secondary).lineLimit(3)
-                Text("双击编辑，保存后用于下一批照片").font(.caption).foregroundStyle(.secondary)
+                Text("双击编辑，保存在这台 Mac，供尚未开始的照片使用").font(.caption).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(12).background(WorkspaceStyle.panel, in: RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
             .onTapGesture(count: 2) { preferencesDraft = store.preferencesText; showsPreferences = true }
             .accessibilityAction(named: Text("编辑审美偏好")) { preferencesDraft = store.preferencesText; showsPreferences = true }
-            if store.isAwaitingConfirmation {
-                TextField("本批要求", text: $store.batchInstruction, axis: .vertical)
-                    .lineLimit(1...3).textFieldStyle(.roundedBorder)
-            }
-            if let batch = store.batch, batch.confirmed {
-                Text("本批使用的审美偏好：\((batch.preferences ?? "").isEmpty ? "未设置" : batch.preferences!)")
-                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-            }
+            TextField("新增照片要求", text: $store.batchInstruction, axis: .vertical)
+                .lineLimit(1...3).textFieldStyle(.roundedBorder)
             Text("选择采用版本后，该照片立即移出工作台并在后台发布；进度显示在底部状态栏。")
                 .font(.caption).foregroundStyle(.secondary)
         }
@@ -76,7 +70,7 @@ struct AIEditingWorkspaceView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("编辑审美偏好").font(.title2.bold())
             TextEditor(text: $preferencesDraft).frame(minHeight: 160)
-            Text("偏好会保存到资料库；当前已开始的照片保留启动时的偏好。")
+            Text("偏好只保存在这台 Mac；已开始的照片保留启动时的偏好。")
                 .font(.caption).foregroundStyle(.secondary)
             if let error = store.errorMessage { Text(error).foregroundStyle(.red) }
             HStack {
@@ -86,7 +80,7 @@ struct AIEditingWorkspaceView: View {
                     Task {
                         if await store.savePreferences(text: preferencesDraft) { showsPreferences = false }
                     }
-                }.buttonStyle(.borderedProminent).disabled(store.isSyncing)
+                }.buttonStyle(.borderedProminent)
             }
         }.padding(24).frame(width: 520)
     }
@@ -97,29 +91,24 @@ struct AIEditingWorkspaceView: View {
                 Text(error).foregroundStyle(.red).textSelection(.enabled)
             }
             HStack {
-                Button("AI 设置") { openSettings() }.disabled(store.isRunning || store.isSyncing)
-                if store.errorMessage != nil {
-                    Button("重试同步工作台") { Task { await store.loadWorkspace(library: library) } }.disabled(store.isSyncing || store.isRunning)
-                    Button("保留本机副本并载入 NAS 草稿") { Task { await store.reloadRemoteWorkspace() } }
-                        .disabled(store.isRunning || store.isSyncing)
-                }
+                Button("AI 设置") { openSettings() }.disabled(store.isRunning)
                 if store.isRunning {
                     Button("暂停", action: store.cancel)
                 } else if store.batch?.cancelled == true {
-                    Button("继续处理", action: store.retry).disabled(store.isSyncing)
+                    Button("继续处理", action: store.retry)
                 }
                 if !store.failedItems.isEmpty || store.errorMessage != nil {
-                    Button("重试未完成任务", action: store.retry).disabled(store.isRunning || store.isSyncing)
+                    Button("重试未完成任务", action: store.retry).disabled(store.isRunning)
                 }
                 Spacer()
                 if store.isAwaitingConfirmation {
                     Button("开始调色（\(store.totalCount) 张）", action: store.start)
-                        .buttonStyle(.borderedProminent).disabled(store.isSyncing)
+                        .buttonStyle(.borderedProminent)
                 } else if let items = store.batch?.items {
                     let ready = items.filter { store.canPublish($0) && $0.failure == nil }.count
                     if ready > 0 {
                         Button("确认并发布这 \(ready) 张", action: store.publishReady)
-                            .buttonStyle(.borderedProminent).disabled(ready == 0 || store.isSyncing)
+                            .buttonStyle(.borderedProminent).disabled(ready == 0)
                     }
                 }
             }
@@ -134,7 +123,7 @@ struct AIEditingWorkspaceView: View {
                 Button("完成") {
                     guard !cannotLeaveWorkspace else { return }
                     if store.batch != nil { store.closeCompletedWorkspace() }
-                    if store.batch == nil { returnToLibrary() }
+                    if store.batch?.items.isEmpty != false { returnToLibrary() }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(cannotLeaveWorkspace || (store.batch?.items.contains { $0.phase != .done } ?? false))
@@ -143,7 +132,7 @@ struct AIEditingWorkspaceView: View {
     }
 
     private var cannotLeaveWorkspace: Bool {
-        store.isRunning || store.isSyncing || store.backgroundDecisionCount > 0
+        store.isRunning || store.backgroundDecisionCount > 0
     }
 
     private func leaveWorkspace() {

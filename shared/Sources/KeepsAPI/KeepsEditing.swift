@@ -95,15 +95,3 @@ public struct KeepsEditCommit: Codable, Sendable {
         self.algorithmVersion = algorithmVersion; self.rendererVersion = rendererVersion; self.outputs = outputs
     }
 }
-
-public struct KeepsAIPreferences: Codable, Equatable, Sendable {
-    public var revision: Int64
-    public var text: String
-    public init(revision: Int64 = 0, text: String = "") { self.revision = revision; self.text = text }
-}
-
-public struct KeepsAIWorkspace: Codable, Equatable, Sendable {
-    public var revision: Int64
-    public var document: String?
-    public init(revision: Int64 = 0, document: String? = nil) { self.revision = revision; self.document = document }
-}

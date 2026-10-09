@@ -105,13 +105,16 @@ public struct KeepsDirectory: Decodable, Identifiable, Equatable, Sendable {
 public struct KeepsNavigationDirectory: Codable, Identifiable, Equatable, Sendable {
     public var path: String
     public var name: String
+    public var directPhotoCount: Int?
     public var photoCount: Int
     public var hasChildren: Bool
     public var id: String { path }
+    public var photoCountLabel: String { "\(directPhotoCount.map(String.init) ?? "—")（\(photoCount)）" }
 
-    public init(path: String, name: String, photoCount: Int, hasChildren: Bool) {
+    public init(path: String, name: String, photoCount: Int, hasChildren: Bool, directPhotoCount: Int? = nil) {
         self.path = path
         self.name = name
+        self.directPhotoCount = directPhotoCount
         self.photoCount = photoCount
         self.hasChildren = hasChildren
     }

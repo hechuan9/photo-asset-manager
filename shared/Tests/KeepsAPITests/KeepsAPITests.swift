@@ -7,18 +7,13 @@ private let assetJSON = """
 """
 
 struct KeepsAPITests {
-    @Test func aiWorkspaceClearSendsExplicitNullAndRevision() async throws {
-        let fixture = Fixture { request in
-            #expect(request.httpMethod == "PUT")
-            #expect(request.url!.path == "/api/libraries/library/ai-editing/workspace")
-            let value = try JSONSerialization.jsonObject(with: request.bodyData) as! [String: Any]
-            #expect(value["document"] is NSNull)
-            #expect(value["expectedRevision"] as? Int == 4)
-            return (200, "{\"revision\":5,\"document\":null}")
-        }
-        let workspace = try await fixture.client.saveAIWorkspace(document: nil, expectedRevision: 4)
-        #expect(workspace.revision == 5)
-        #expect(workspace.document == nil)
+    @Test func navigationCountsShowDirectAndRecursiveTotals() throws {
+        let data = Data(#"{"path":"/photos","name":"photos","photoCount":85,"directPhotoCount":12,"hasChildren":true}"#.utf8)
+        let directory = try JSONDecoder().decode(KeepsNavigationDirectory.self, from: data)
+        #expect(directory.photoCountLabel == "12（85）")
+        #expect(try JSONDecoder().decode(KeepsNavigationDirectory.self, from: JSONEncoder().encode(directory)) == directory)
+        let old = Data(#"{"path":"/photos","name":"photos","photoCount":85,"hasChildren":true}"#.utf8)
+        #expect(try JSONDecoder().decode(KeepsNavigationDirectory.self, from: old).photoCountLabel == "—（85）")
     }
 
     @Test func editRecipeMetadataPreservesOpinionWithParameters() throws {

@@ -397,11 +397,8 @@ struct ContentView: View {
     }
 
     private func openAIWorkspace() {
-        if batch.batch?.items.allSatisfy({ $0.phase == .done }) == true { batch.closeCompletedWorkspace() }
-        let selected = library.selectedIDs
-        let matchesDraft = batch.isAwaitingConfirmation && Set(batch.batch?.items.map(\.assetID) ?? []) == selected
-        startsAIWorkspace = !selected.isEmpty && (batch.batch == nil || matchesDraft)
-        if batch.batch == nil && startsAIWorkspace { batch.prepare(library: library) }
+        startsAIWorkspace = !library.selectedIDs.isEmpty
+        if startsAIWorkspace { batch.prepare(library: library) }
         showsAIWorkspace = true
     }
 

@@ -150,7 +150,7 @@ pub fn ensure_schema(db: &mut Connection, allow_migrate: bool) -> Result<()> {
         crate::edits::migrate(&tx)?;
     }
     if version < 13 {
-        crate::ai_editing::migrate(&tx)?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS ai_editing_state(library_id TEXT NOT NULL,kind TEXT NOT NULL,revision INTEGER NOT NULL,content TEXT,PRIMARY KEY(library_id,kind)); CREATE TABLE IF NOT EXISTS photo_edit_decisions(library_id TEXT NOT NULL,asset_id TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(library_id,asset_id));")?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
@@ -452,16 +452,16 @@ impl Store {
         Ok(result)
     }
     /// Indexed descendant counts; each asset counts once even with multiple paths.
-    pub fn directory_photo_counts(&self, lib: &str, paths: &[String]) -> Result<Vec<i64>> {
+    pub fn directory_photo_counts(&self, lib: &str, paths: &[String]) -> Result<Vec<(i64, i64)>> {
         let db = self.lock()?;
-        let mut statement = db.prepare("SELECT count(DISTINCT p.asset_id) FROM catalog_paths p JOIN catalog_assets a ON a.library_id=p.library_id AND a.id=p.asset_id WHERE p.library_id=?1 AND p.path>=?2 AND p.path<?3 AND a.trashed=0")?;
+        let mut statement = db.prepare("SELECT count(DISTINCT CASE WHEN instr(substr(p.path,length(?2)+1),'/')=0 THEN p.asset_id END), count(DISTINCT p.asset_id) FROM catalog_paths p JOIN catalog_assets a ON a.library_id=p.library_id AND a.id=p.asset_id WHERE p.library_id=?1 AND p.path>=?2 AND p.path<?3 AND a.trashed=0")?;
         paths
             .iter()
             .map(|path| {
                 let root = path.trim_end_matches('/');
                 Ok(statement.query_row(
                     params![lib, format!("{root}/"), format!("{root}0")],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )?)
             })
             .collect()
@@ -1069,6 +1069,38 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_ai_state_survives_reopen_and_schema_twelve_migration() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("catalog.sqlite");
+        let store = Store::open(&path, true)?;
+        store.lock()?.execute(
+            "INSERT INTO ai_editing_state VALUES ('lib','workspace',7,'saved draft')",
+            [],
+        )?;
+        drop(store);
+        let store = Store::open(&path, false)?;
+        let content: String = store.lock()?.query_row(
+            "SELECT content FROM ai_editing_state WHERE library_id='lib' AND kind='workspace'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(content, "saved draft");
+        store
+            .lock()?
+            .execute_batch("DROP TABLE ai_editing_state; PRAGMA user_version=12;")?;
+        drop(store);
+        assert!(Store::open(&path, false).is_err());
+        let store = Store::open(&path, true)?;
+        let count: i64 =
+            store
+                .lock()?
+                .query_row("SELECT COUNT(*) FROM ai_editing_state", [], |row| {
+                    row.get(0)
+                })?;
+        assert_eq!(count, 0);
+        Ok(())
+    }
     fn snapshot() -> Value {
         json!({"assetID":Uuid::new_v4(),"captureTime":"2024-01-01T00:00:00Z","cameraMake":"Canon","cameraModel":"R3","lensModel":"50mm","originalFilename":"photo.jpg","contentFingerprint":"photo-hash","metadataFingerprint":"2024|Canon|R3|photo","rating":1,"flagState":"unflagged","tags":[],"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z"})
     }
