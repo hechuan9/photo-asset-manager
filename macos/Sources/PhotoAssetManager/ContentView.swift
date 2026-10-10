@@ -480,7 +480,8 @@ struct RemotePreview: View {
     @EnvironmentObject private var library: LibraryStore
 
     var body: some View {
-        KeepsPreviewImage(asset: asset, configuration: library.configuration, loadStandard: loadStandard)
+        KeepsPreviewImage(asset: asset, configuration: library.configuration, loadStandard: loadStandard,
+                          placeholderDelay: loadStandard ? .milliseconds(150) : .zero)
     }
 }
 
