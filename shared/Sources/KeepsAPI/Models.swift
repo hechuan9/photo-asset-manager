@@ -109,7 +109,10 @@ public struct KeepsNavigationDirectory: Codable, Identifiable, Equatable, Sendab
     public var photoCount: Int
     public var hasChildren: Bool
     public var id: String { path }
-    public var photoCountLabel: String { "\(directPhotoCount.map(String.init) ?? "—")（\(photoCount)）" }
+    public var photoCountLabel: String {
+        if directPhotoCount == photoCount { return String(photoCount) }
+        return "\(photoCount)（\(directPhotoCount.map(String.init) ?? "—")）"
+    }
 
     public init(path: String, name: String, photoCount: Int, hasChildren: Bool, directPhotoCount: Int? = nil) {
         self.path = path

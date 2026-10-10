@@ -7,13 +7,15 @@ private let assetJSON = """
 """
 
 struct KeepsAPITests {
-    @Test func navigationCountsShowDirectAndRecursiveTotals() throws {
+    @Test func navigationCountsShowRecursiveThenDirectTotals() throws {
         let data = Data(#"{"path":"/photos","name":"photos","photoCount":85,"directPhotoCount":12,"hasChildren":true}"#.utf8)
         let directory = try JSONDecoder().decode(KeepsNavigationDirectory.self, from: data)
-        #expect(directory.photoCountLabel == "12（85）")
+        #expect(directory.photoCountLabel == "85（12）")
+        #expect(KeepsNavigationDirectory(path: "/photos", name: "photos", photoCount: 3334, hasChildren: true, directPhotoCount: 3334).photoCountLabel == "3334")
+        #expect(KeepsNavigationDirectory(path: "/empty", name: "empty", photoCount: 0, hasChildren: false, directPhotoCount: 0).photoCountLabel == "0")
         #expect(try JSONDecoder().decode(KeepsNavigationDirectory.self, from: JSONEncoder().encode(directory)) == directory)
         let old = Data(#"{"path":"/photos","name":"photos","photoCount":85,"hasChildren":true}"#.utf8)
-        #expect(try JSONDecoder().decode(KeepsNavigationDirectory.self, from: old).photoCountLabel == "—（85）")
+        #expect(try JSONDecoder().decode(KeepsNavigationDirectory.self, from: old).photoCountLabel == "85（—）")
     }
 
     @Test func editRecipeMetadataPreservesOpinionWithParameters() throws {

@@ -146,7 +146,7 @@ struct DirectoryOutlineView: NSViewRepresentable {
             countLabel.textColor = .secondaryLabelColor
             countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
             countLabel.setContentHuggingPriority(.required, for: .horizontal)
-            countLabel.toolTip = "当前目录照片数（包含所有子目录的照片总数），不含回收站"
+            countLabel.toolTip = "包含所有子目录的照片总数（当前目录照片数），数量相同时仅显示总数；不含回收站"
             icon.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
             spinner.style = .spinning
             spinner.controlSize = .small
