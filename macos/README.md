@@ -29,7 +29,7 @@ bash scripts/package_app.sh
 
 `.github/workflows/release-macos.yml` 在同仓库 main 的 push CI 全部通过后自动发布该提交，构建号采用 CI run number 加 100（不回写仓库）。发布使用独立队列，固定下载并校验 AI 运行时；上传后按目标版本和构建号等待内部测试可用，超时会明确失败，不把旧构建当作本次发布成功。
 
-启用前需配置 GitHub `macos-testflight` environment，仅允许 main，并配置 `ASC_KEY_ID`、`ASC_ISSUER_ID`、`ASC_PRIVATE_KEY`、`MACOS_SIGNING_P12_BASE64`、`MACOS_SIGNING_P12_PASSWORD`。P12 必须包含构建所需开发签名以及 Mac App Distribution、Mac Installer Distribution 身份和私钥；API Key 须有对应应用上传及 provisioning 权限。临时 Keychain 与证书文件在任务结束时清理。PR 和 fork 不获得发布凭据；有 main 写入权限者仍属于发布信任范围，应配合分支保护管理。
+启用前需配置 GitHub `macos-testflight` environment，仅允许 main，并配置 `ASC_KEY_ID`、`ASC_ISSUER_ID`、`ASC_PRIVATE_KEY`、`MACOS_SIGNING_P12_BASE64`、`MACOS_SIGNING_P12_PASSWORD`、`MACOS_PROVISIONING_PROFILE_BASE64`。分发 profile 必须为 `local.keeps` 的 Mac App Store profile，并关联 P12 内的分发证书；导出使用本地证书手动签名，证书或 profile 到期前须更新对应 secret。P12 必须包含构建所需开发签名以及 Mac App Distribution、Mac Installer Distribution 身份和私钥；API Key 须有对应应用上传及 provisioning 权限。临时 Keychain 与证书文件在任务结束时清理。PR 和 fork 不获得发布凭据；有 main 写入权限者仍属于发布信任范围，应配合分支保护管理。
 
 正式测试分发使用 `Keeps.xcodeproj` 的共享 `Keeps` scheme，自动签名团队为 `3TZ6RCL8NE`，Bundle ID 保持 `local.keeps`。工程直接编译现有源文件并引用 `../shared` 的 KeepsAPI，不维护第二份客户端实现。macOS 的版本号和构建号在 `Version.xcconfig` 修改，每次上传递增构建号；与 iOS 独立维护，不要求两端版本同步。发布记录使用“macOS 版本（构建号）”或“iOS 版本（构建号）”明确平台。
 

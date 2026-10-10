@@ -120,6 +120,10 @@ sys.exit(int(os.environ.get("STUB_EXIT", "0")))
                 self.assertFalse(Path(record["path"]).exists())
                 self.assertIn("-authenticationKeyIssuerID", record["args"])
                 self.assertNotIn("test-private-key", result.stdout + result.stderr)
+            result = run("upload", {"EXPORT_OPTIONS_PLIST": "/tmp/manual-export.plist"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads((root / "record.json").read_text())["args"]
+            self.assertEqual(args[args.index("-exportOptionsPlist") + 1], "/tmp/manual-export.plist")
 
 
 if __name__ == "__main__":

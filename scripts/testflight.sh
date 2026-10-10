@@ -64,7 +64,7 @@ case "$2" in
   upload)
     test -f "$ARCHIVE/Info.plist" || { echo "请先归档: $0 $1 archive" >&2; exit 1; }
     xcodebuild -exportArchive -archivePath "$ARCHIVE" \
-      -exportOptionsPlist scripts/ExportOptions.testflight.plist \
+      -exportOptionsPlist "${EXPORT_OPTIONS_PLIST:-scripts/ExportOptions.testflight.plist}" \
       -exportPath "$(dirname "$ARCHIVE")/upload" -allowProvisioningUpdates ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"}
     ;;
   *) echo "不支持的操作: $2" >&2; exit 2 ;;
