@@ -21,6 +21,25 @@ class AIRuntimePackagingTests(unittest.TestCase):
         return subprocess.run(["bash", str(SCRIPT), str(destination)], env=environment,
                               capture_output=True, text=True)
 
+    def test_runtime_architecture_check_accepts_arm64_and_rejects_intel_only(self):
+        check = next(line.strip() for line in SCRIPT.read_text().splitlines()
+                     if "subprocess.run" in line and '"-verify_arch"' in line)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "sample.c"
+            source.write_text("int main(void) { return 0; }\n")
+            for architecture in ("arm64", "x86_64"):
+                with self.subTest(architecture=architecture):
+                    binary = root / architecture
+                    subprocess.run(["clang", "-arch", architecture, str(source), "-o", str(binary)],
+                                   check=True, capture_output=True)
+                    namespace = {"subprocess": subprocess, "path": binary}
+                    if architecture == "arm64":
+                        exec(check, namespace)
+                    else:
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            exec(check, namespace)
+
     def test_code_mode_host_has_isolated_jit_entitlement(self):
         root = SCRIPT.parent.parent
         with (root / "AICodeModeHost.entitlements").open("rb") as stream:

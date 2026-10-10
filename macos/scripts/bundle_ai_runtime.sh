@@ -101,7 +101,7 @@ for path in sorted(helpers.rglob("*"), key=lambda item: len(item.parts), reverse
     if is_code:
         command = ["codesign", "--force", "--sign", identity, "--options", "runtime"]
         header = subprocess.check_output(["otool", "-hv", str(path)], text=True)
-        subprocess.run(["lipo", "-verify_arch", "arm64", str(path)], check=True)
+        subprocess.run(["lipo", str(path), "-verify_arch", "arm64"], check=True)
         if "EXECUTE" in header and identity != "-":
             command += ["--entitlements", host_entitlements if path == helpers / "codex-code-mode-host" else entitlements]
         subprocess.run(command + [str(path)], check=True)
