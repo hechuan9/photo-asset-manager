@@ -1,3 +1,5 @@
+import hashlib
+import plistlib
 import importlib.util
 import io
 import json
@@ -82,6 +84,31 @@ class APITests(unittest.TestCase):
 
 
 class ShellTests(unittest.TestCase):
+    def test_ci_export_uses_imported_identity_hashes(self):
+        workflow = Path(__file__).resolve().parents[1] / ".github/workflows/release-macos.yml"
+        source = workflow.read_text().split("          python3 - <<'PYTHON'\n")[-1].split("          PYTHON")[0]
+        source = "\n".join(line[10:] for line in source.splitlines())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            certificate = b"application-certificate"
+            application = hashlib.sha1(certificate).hexdigest().upper()
+            installer = "A" * 40
+            profile = {"TeamIdentifier": ["3TZ6RCL8NE"], "UUID": "profile-id",
+                       "DeveloperCertificates": [certificate],
+                       "Entitlements": {"com.apple.application-identifier": "3TZ6RCL8NE.local.keeps"}}
+            (root / "keeps-profile.plist").write_bytes(plistlib.dumps(profile))
+            (root / "keeps.provisionprofile").touch()
+            identities = f'1) {application} "3rd Party Mac Developer Application: ClimaMind LLC (3TZ6RCL8NE)"\n2) {installer} "3rd Party Mac Developer Installer: ClimaMind LLC (3TZ6RCL8NE)"'
+            (root / "signing-identities.txt").write_text(identities)
+            with patch.dict(os.environ, RUNNER_TEMP=temporary, GITHUB_ENV=str(root / "env")), \
+                 patch.object(Path, "home", return_value=root):
+                exec(compile(source, str(workflow), "exec"), {})
+                options = plistlib.loads((root / "ExportOptions.plist").read_bytes())
+                self.assertEqual(options["signingCertificate"], application)
+                self.assertEqual(options["installerSigningCertificate"], installer)
+                (root / "signing-identities.txt").write_text(identities.splitlines()[0])
+                with self.assertRaisesRegex(ValueError, "签名身份"):
+                    exec(compile(source, str(workflow), "exec"), {})
     def test_forwarding_cleanup_and_partial_configuration(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

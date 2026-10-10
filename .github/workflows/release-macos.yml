@@ -87,11 +87,12 @@ jobs:
           security import "$RUNNER_TEMP/keeps-signing.p12" -P "$MACOS_SIGNING_P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH" "$HOME/Library/Keychains/login.keychain-db"
+          security find-identity -v -p basic "$KEYCHAIN_PATH" > "$RUNNER_TEMP/signing-identities.txt"
           rm -f "$RUNNER_TEMP/keeps-signing.p12"
           printf '%s' "$MACOS_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/keeps.provisionprofile"
           security cms -D -i "$RUNNER_TEMP/keeps.provisionprofile" > "$RUNNER_TEMP/keeps-profile.plist"
           python3 - <<'PYTHON'
-          import os, pathlib, plistlib, shutil
+          import hashlib, os, pathlib, plistlib, re, shutil
           temporary = pathlib.Path(os.environ["RUNNER_TEMP"])
           profile = plistlib.loads((temporary / "keeps-profile.plist").read_bytes())
           if profile["TeamIdentifier"] != ["3TZ6RCL8NE"] or profile["Entitlements"]["com.apple.application-identifier"] != "3TZ6RCL8NE.local.keeps":
@@ -101,8 +102,13 @@ jobs:
           installed = profiles / (profile["UUID"] + ".provisionprofile")
           shutil.copyfile(temporary / "keeps.provisionprofile", installed)
           options = plistlib.loads(pathlib.Path("scripts/ExportOptions.testflight.plist").read_bytes())
-          options.update(signingStyle="manual", signingCertificate="Mac App Distribution",
-                         installerSigningCertificate="Mac Installer Distribution",
+          identities = (temporary / "signing-identities.txt").read_text()
+          installer = re.findall(r'([0-9A-F]{40}) "3rd Party Mac Developer Installer: [^"]+ \(3TZ6RCL8NE\)"', identities)
+          application = hashlib.sha1(profile["DeveloperCertificates"][0]).hexdigest().upper()
+          if len(installer) != 1 or application not in identities:
+              raise ValueError("Keychain 缺少 profile 对应的有效应用签名身份或唯一的安装包签名身份。")
+          options.update(signingStyle="manual", signingCertificate=application,
+                         installerSigningCertificate=installer[0],
                          provisioningProfiles={"local.keeps": profile["UUID"]})
           export = temporary / "ExportOptions.plist"
           export.write_bytes(plistlib.dumps(options))
@@ -138,7 +144,7 @@ jobs:
             security delete-keychain "$RUNNER_TEMP/keeps-signing.keychain-db"
           fi
           rm -f "$RUNNER_TEMP/keeps-signing.p12"
-          rm -f "$RUNNER_TEMP/keeps.provisionprofile" "$RUNNER_TEMP/keeps-profile.plist" "$RUNNER_TEMP/ExportOptions.plist"
+          rm -f "$RUNNER_TEMP/keeps.provisionprofile" "$RUNNER_TEMP/keeps-profile.plist" "$RUNNER_TEMP/ExportOptions.plist" "$RUNNER_TEMP/signing-identities.txt"
           if test -n "${MACOS_INSTALLED_PROFILE:-}"; then
             rm -f "$MACOS_INSTALLED_PROFILE"
           fi
