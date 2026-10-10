@@ -1,0 +1,117 @@
+name: Release macOS TestFlight
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-testflight
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: macos-15
+    environment: macos-testflight
+    timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      CI_RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Validate toolchain and release version
+        run: |
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+          BUILD_NUMBER=$((CI_RUN_NUMBER + 100))
+          test "$BUILD_NUMBER" -ge 1 && test "$BUILD_NUMBER" -le 9999
+          MARKETING_VERSION=$(awk '$1 == "MARKETING_VERSION" { print $3 }' macos/Version.xcconfig)
+          test -n "$MARKETING_VERSION"
+          printf 'BUILD_NUMBER=%s\nMARKETING_VERSION=%s\n' "$BUILD_NUMBER" "$MARKETING_VERSION" >> "$GITHUB_ENV"
+      - name: Install App Store Connect client runtime
+        run: brew install uv
+      - name: Check for an existing upload
+        id: existing
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          uv run --script scripts/app_store_connect.py macos status --build "$BUILD_NUMBER" > "$RUNNER_TEMP/build-status.json"
+          python3 - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+
+          builds = json.loads((Path(os.environ["RUNNER_TEMP"]) / "build-status.json").read_text())["builds"]
+          for build in builds:
+              if build.get("processingState") in {"INVALID", "FAILED"}:
+                  raise SystemExit("Apple rejected this build; push a new commit for a new build number.")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"uploaded={'true' if builds else 'false'}\n")
+          PYTHON
+      - name: Prepare pinned AI runtime
+        if: steps.existing.outputs.uploaded != 'true'
+        run: bash scripts/prepare_macos_release_runtime.sh
+      - name: Import signing certificates
+        if: steps.existing.outputs.uploaded != 'true'
+        env:
+          MACOS_SIGNING_P12_BASE64: ${{ secrets.MACOS_SIGNING_P12_BASE64 }}
+          MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+        run: |
+          test -n "$MACOS_SIGNING_P12_BASE64"
+          test -n "$MACOS_SIGNING_P12_PASSWORD"
+          umask 077
+          KEYCHAIN_PATH="$RUNNER_TEMP/keeps-signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 32)
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          printf '%s' "$MACOS_SIGNING_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/keeps-signing.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/keeps-signing.p12" -P "$MACOS_SIGNING_P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "$HOME/Library/Keychains/login.keychain-db"
+          rm -f "$RUNNER_TEMP/keeps-signing.p12"
+      - name: Archive
+        if: steps.existing.outputs.uploaded != 'true'
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          test -n "$ASC_KEY_ID" && test -n "$ASC_ISSUER_ID" && test -n "$ASC_PRIVATE_KEY"
+          bash scripts/testflight.sh macos archive
+      - name: Upload to TestFlight
+        if: steps.existing.outputs.uploaded != 'true'
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: bash scripts/testflight.sh macos upload
+      - name: Wait for Apple processing
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: uv run --script scripts/app_store_connect.py macos wait --build "$BUILD_NUMBER" --version "$MARKETING_VERSION"
+      - name: Clean up signing material
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/keeps-signing.keychain-db"; then
+            security delete-keychain "$RUNNER_TEMP/keeps-signing.keychain-db"
+          fi
+          rm -f "$RUNNER_TEMP/keeps-signing.p12"

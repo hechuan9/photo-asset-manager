@@ -46,6 +46,7 @@ struct ContentView: View {
     @State private var showsFilters = false
     @State private var thumbnailSize = 190.0
     @State private var detailMode = false
+    @State private var galleryReturnAssetID: UUID?
 
     var body: some View {
         Group {
@@ -132,7 +133,10 @@ struct ContentView: View {
         .task { batch.restore(library: library); library.refresh(); library.refreshNavigation(force: false) }
         .prefetchKeepsThumbnails(configuration: library.configuration)
         .onChange(of: library.query) { _, _ in library.refresh() }
-        .onChange(of: library.query.directory) { _, _ in detailMode = false }
+        .onChange(of: library.query.directory) { _, _ in
+            detailMode = false
+            galleryReturnAssetID = nil
+        }
     }
 
     private var topBar: some View {
@@ -249,26 +253,36 @@ struct ContentView: View {
                         availableWidth: max(1, geometry.size.width - 2),
                         targetHeight: thumbnailSize * 0.78
                     )
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 1) {
-                            ForEach(rows, id: \.indices.lowerBound) { row in
-                                HStack(spacing: 1) {
-                                    ForEach(row.indices, id: \.self) { index in
-                                        let asset = library.assets[index]
-                                        galleryTile(asset, height: row.height)
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 1) {
+                                ForEach(rows, id: \.indices.lowerBound) { row in
+                                    HStack(spacing: 1) {
+                                        ForEach(row.indices, id: \.self) { index in
+                                            let asset = library.assets[index]
+                                            galleryTile(asset, height: row.height)
+                                        }
                                     }
+                                    .id(row.indices.lowerBound)
                                 }
-                            }
-                            if library.nextCursor != nil {
-                                ProgressView()
-                                    .opacity(library.isLoading && !library.isCheckingRevision ? 1 : 0)
-                                    .frame(maxWidth: .infinity)
-                                    .padding()
-                                    .onAppear { library.setPaginationVisible(true) }
-                                    .onDisappear { library.setPaginationVisible(false) }
-                            }
-                        }.padding(1)
-                            .background(OverlayScrollerConfiguration())
+                                if library.nextCursor != nil {
+                                    ProgressView()
+                                        .opacity(library.isLoading && !library.isCheckingRevision ? 1 : 0)
+                                        .frame(maxWidth: .infinity)
+                                        .padding()
+                                        .onAppear { library.setPaginationVisible(true) }
+                                        .onDisappear { library.setPaginationVisible(false) }
+                                }
+                            }.padding(1)
+                                .background(OverlayScrollerConfiguration())
+                        }
+                        .onAppear {
+                            guard let assetID = galleryReturnAssetID,
+                                  let index = library.assets.firstIndex(where: { $0.id == assetID }),
+                                  let row = rows.first(where: { $0.indices.contains(index) }) else { return }
+                            proxy.scrollTo(row.indices.lowerBound, anchor: .center)
+                            galleryReturnAssetID = nil
+                        }
                     }
                 }
             }
@@ -291,12 +305,19 @@ struct ContentView: View {
         }
         .onKeyPress(.escape) {
             if detailMode {
-                detailMode = false
+                returnToGallery()
             } else {
                 library.deselectAll()
             }
             return .handled
         }
+    }
+
+    private func returnToGallery() {
+        guard detailMode else { return }
+        galleryReturnAssetID = library.selectedAsset?.id
+        detailMode = false
+        galleryFocused = true
     }
 
     private func galleryTile(_ asset: KeepsAsset, height: CGFloat) -> some View {
@@ -341,7 +362,7 @@ struct ContentView: View {
 
     private var bottomBar: some View {
         HStack(spacing: 16) {
-            railButton("网格视图", icon: "square.grid.2x2", selected: !detailMode) { detailMode = false }
+            railButton("网格视图", icon: "square.grid.2x2", selected: !detailMode) { returnToGallery() }
             railButton("单张视图", icon: "rectangle", selected: detailMode) {
                 if library.selectedAsset == nil, let first = library.assets.first { library.select(first.id, extending: false) }
                 detailMode = true

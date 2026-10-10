@@ -47,6 +47,36 @@ class APITests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "^App Store Connect HTTP 401$"):
                 asc.build_status("macos")
 
+    def test_status_filters_requested_build(self):
+        with patch.object(asc, "make_token", return_value="private-token"), \
+             patch.object(asc.urllib.request, "build_opener") as opener:
+            opener.return_value.open.return_value = io.BytesIO(b'{"data": []}')
+            asc.build_status("macos", "148")
+            query = asc.urllib.parse.parse_qs(asc.urllib.parse.urlparse(
+                opener.return_value.open.call_args.args[0].full_url).query)
+        self.assertEqual(query["filter[version]"], ["148"])
+
+    def test_wait_requires_target_build_and_internal_testing(self):
+        pending = {"builds": []}
+        ready = {"builds": [{"version": "148", "processingState": "VALID",
+                 "preReleaseVersion": {"version": "0.3.1"},
+                 "buildBetaDetail": {"internalBuildState": "IN_BETA_TESTING"}}]}
+        with patch.object(asc, "build_status", side_effect=[pending, ready]) as status, \
+             patch.object(asc.time, "sleep"), patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(asc.wait_for_build("macos", "148", "0.3.1"), ready)
+        self.assertEqual(status.call_args.args, ("macos", "148"))
+
+    def test_wait_rejects_failed_build_and_timeout(self):
+        failed = {"builds": [{"version": "148", "processingState": "INVALID",
+                  "preReleaseVersion": {"version": "0.3.1"}}]}
+        with patch.object(asc, "build_status", return_value=failed), patch("sys.stdout", new=io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "INVALID"):
+                asc.wait_for_build("macos", "148", "0.3.1")
+        with patch.object(asc, "build_status", return_value={"builds": []}), \
+             patch.object(asc.time, "monotonic", side_effect=[0, 1]):
+            with self.assertRaisesRegex(RuntimeError, "尚未确认"):
+                asc.wait_for_build("macos", "148", "0.3.1", timeout=1)
+
     def test_redirect_rejected(self):
         self.assertIsNone(asc.NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.example"))
 
