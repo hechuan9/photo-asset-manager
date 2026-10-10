@@ -41,12 +41,12 @@ def main():
     root = args.job.resolve()
     root.mkdir(parents=True, exist_ok=False)
     schema = {"type": "object", "properties": {
-        "status": {"type": "string", "enum": ["selected", "needs_review"]},
-        "candidateID": {"type": "string"}, "reason": {"type": "string"}},
+        "status": {"type": "string", "enum": ["ready"]},
+        "candidateID": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}},
         "required": ["status", "candidateID", "reason"], "additionalProperties": False}
     (root / "result.schema.json").write_text(json.dumps(schema))
     skill = Path(__file__).resolve().parents[1] / "Skills/keeps-color/SKILL.md"
-    prompt = skill.read_text() + "\nComplete this photo independently using only Keeps tools. Return the specified result, with reason in Chinese."
+    prompt = skill.read_text() + "\nComplete this photo independently using only Keeps tools. Return the specified ready result; the human decides whether to adopt it."
     command = [str(args.codex.resolve()), "exec", "--ignore-user-config", "--ignore-rules",
                "--skip-git-repo-check", "--json", "-m", args.model, "-s", "read-only", "-C", str(root),
                "--output-schema", str(root / "result.schema.json"), "-o", str(root / "result.json")]
@@ -90,10 +90,9 @@ def main():
     candidates = json.loads((root / "render/candidates.json").read_text())["candidates"]
     if result["candidateID"] not in {candidate["id"] for candidate in candidates}:
         raise RuntimeError("Model returned an unknown candidate; refusing to treat run as successful")
-    if result["status"] == "selected":
-        selected = json.loads((root / "render/selection.json").read_text())
-        if selected["candidateID"] != result["candidateID"] or not Path(selected["fullSize"]).is_file():
-            raise RuntimeError("Model selection does not match the rendered result")
+    preview = root / "render" / (result["candidateID"] + "-preview.jpg")
+    if result["status"] != "ready" or not preview.is_file():
+        raise RuntimeError("Adjusted preview is not ready for human selection")
     print(json.dumps({**metadata, **result}, ensure_ascii=False, indent=2))
 
 

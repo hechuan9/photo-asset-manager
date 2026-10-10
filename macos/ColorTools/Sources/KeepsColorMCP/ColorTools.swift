@@ -8,7 +8,6 @@ import KeepsColorCore
     private let initial: ColorCandidate
     private let original: ColorCandidate
     private let candidateLimit: Int
-    private var reviewed: Set<String> = []
 
     init(engine: DarktableProcess, baseRecipe: Data? = nil) throws {
         self.engine = engine
@@ -23,7 +22,7 @@ import KeepsColorCore
         } else {
             initial = original
         }
-        candidateLimit = baseRecipe == nil ? 5 : 6
+        candidateLimit = baseRecipe == nil ? 2 : 3
     }
 
     func selectCandidate(_ id: String) throws -> [String: Any] {
@@ -105,7 +104,6 @@ import KeepsColorCore
         case "inspect_photo":
             _ = try preview(original.id)
             let image = try imageBlock(preview(initial.id))
-            reviewed.insert(initial.id)
             var maskGeometry: [String: Any] = [:]
             if let width = engine.sourcePixelWidth, let height = engine.sourcePixelHeight {
                 maskGeometry = ["width": width, "height": height, "shorterEdge": min(width, height), "diagonal": hypot(Double(width), Double(height))]
@@ -136,26 +134,18 @@ import KeepsColorCore
             let candidate = try engine.store.add(operationID: operation, parentID: parent.id, recipe: encoder.encode(recipe))
             return [try textBlock(["candidateID": candidate.id])]
         case "preview_region":
+            let id = try string("candidateID")
+            guard id == original.id || id == initial.id else { throw ColorToolError("Only inspect the original or initial candidate before adjusting; the human reviews adjusted candidates") }
             func number(_ key: String) throws -> Double {
                 guard let value = arguments[key] as? Double else { throw ColorToolError("Missing number: \(key)") }
                 return value
             }
-            let (data, stats) = try PreviewAnalysis.crop(preview(string("candidateID")), x: number("x"), y: number("y"), width: number("width"), height: number("height"))
+            let (data, stats) = try PreviewAnalysis.crop(preview(id), x: number("x"), y: number("y"), width: number("width"), height: number("height"))
             return [try textBlock(stats), ["type": "image", "mimeType": "image/jpeg", "data": data.base64EncodedString()]]
         case "render_preview":
             let id = try string("candidateID")
-            let image = try imageBlock(preview(id))
-            reviewed.insert(id)
-            return [image]
-        case "compare_candidates":
-            let first = try string("firstID"), second = try string("secondID")
-            let images = [try imageBlock(preview(first)), try imageBlock(preview(second))]
-            reviewed.formUnion([first, second])
-            return images
-        case "select_candidate":
-            let id = try string("candidateID")
-            guard reviewed.contains(id) else { throw ColorToolError("Review this candidate with render_preview or compare_candidates before selecting it") }
-            return [try textBlock(selectCandidate(id))]
+            let rendered = try preview(id)
+            return [try textBlock(["candidateID": id, "preview": rendered.path, "readyForHuman": true])]
         default: throw ColorToolError("Unknown tool")
         }
     }

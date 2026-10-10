@@ -138,7 +138,7 @@ import CryptoKit
         try prepareDirectories(); try checkRuntime(); try readAccount(); try requireAccount()
     }
 
-    func gradePhoto(_ source: URL, job: URL, context: AIGradeContext? = nil, progress: ((String, Double, Double) -> Void)? = nil) async throws -> AIGradeResult {
+    func gradePhoto(_ source: URL, job: URL, context: AIGradeContext? = nil, priority: Int = Int.max, progress: ((String, Double, Double) -> Void)? = nil) async throws -> AIGradeResult {
         let id = UUID(), gradingRunner = AIEditingProcess()
         gradingRunners[id] = gradingRunner
         activeGrades = gradingRunners.count
@@ -154,7 +154,7 @@ import CryptoKit
             }
         }
         try validateEditingAccount()
-        try await runPhoto(source, job: job, runner: gradingRunner, context: context, progress: progress)
+        try await runPhoto(source, job: job, runner: gradingRunner, context: context, priority: priority, progress: progress)
         return try Self.gradeResult(in: job)
     }
 
@@ -163,7 +163,7 @@ import CryptoKit
         for runner in gradingRunners.values { runner.stopForExit() }
     }
 
-    private func runPhoto(_ source: URL, job requestedJob: URL? = nil, runner suppliedRunner: AIEditingProcess? = nil, context: AIGradeContext? = nil, progress: ((String, Double, Double) -> Void)? = nil) async throws {
+    private func runPhoto(_ source: URL, job requestedJob: URL? = nil, runner suppliedRunner: AIEditingProcess? = nil, context: AIGradeContext? = nil, priority: Int = Int.max, progress: ((String, Double, Double) -> Void)? = nil) async throws {
         let runner = suppliedRunner ?? self.runner
         if requestedJob == nil { self.resultPreview = nil; self.resultSummary = nil }
         try self.prepareDirectories(); try self.checkRuntime(); try self.readAccount(); try self.requireAccount()
@@ -177,8 +177,8 @@ import CryptoKit
         try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
         let skill = try Data(contentsOf: self.runtime.appendingPathComponent("SKILL.md"))
         let schema: [String: Any] = ["type": "object", "properties": [
-            "status": ["type": "string", "enum": ["selected", "needs_review"]],
-            "candidateID": ["type": "string"], "reason": ["type": "string"],
+            "status": ["type": "string", "enum": ["ready"]],
+            "candidateID": ["type": "string", "minLength": 1], "reason": ["type": "string", "minLength": 1],
             "preferenceSuggestions": ["type": "array", "items": ["type": "string"], "maxItems": 3]],
             "required": ["status", "candidateID", "reason", "preferenceSuggestions"], "additionalProperties": false]
         let schemaURL = job.appendingPathComponent("result.schema.json")
@@ -195,7 +195,7 @@ import CryptoKit
         progress?("等待初始预览准备", 0.05, 0.15)
         let preparationArguments = helperArguments + ["--prepare-preview"]
         // The parent owns this slot; the helper receives no KEEPS_RENDER_* environment.
-        let preparation = try await withRenderSlot {
+        let preparation = try await withRenderSlot(priority: priority) {
             try await runner.run(executable: self.codeRuntime.appendingPathComponent("keeps-color-mcp"),
                 arguments: preparationArguments, home: self.home, directory: job, timeout: 1200)
         }
@@ -208,6 +208,7 @@ import CryptoKit
             "mcp_servers.keeps_color.command": self.codeRuntime.appendingPathComponent("keeps-color-mcp").path,
             "mcp_servers.keeps_color.args": helperArguments,
             "mcp_servers.keeps_color.env.KEEPS_RENDER_LIMIT": String(limits.renders),
+            "mcp_servers.keeps_color.env.KEEPS_RENDER_PRIORITY": String(priority),
             "mcp_servers.keeps_color.env.KEEPS_RENDER_SLOTS": root.appendingPathComponent("render-slots").path,
             "mcp_servers.keeps_color.startup_timeout_sec": 7200,
             "mcp_servers.keeps_color.tool_timeout_sec": 7200]
@@ -243,7 +244,7 @@ import CryptoKit
             }
         }
         let prompt = String(decoding: skill, as: UTF8.self) + """
-        \nComplete this photo independently using only Keeps tools. Return the specified result, with reason in Chinese.
+        \nComplete this photo independently using only Keeps tools. Return the specified ready result after rendering one adjusted preview. Return reason in Chinese explaining why you chose these adjustments: the starting image, the user intent, and the purpose of the recipe changes. Describe intended effects, not verified outcomes; do not compare versions, rate the result, or recommend a winner.
         In this same result, return preferenceSuggestions: at most 3 concise Chinese suggestions summarizing reusable aesthetic preferences explicitly expressed by the user in instruction, batchInstruction, or the user requests in history. Extract only intent that applies across photos; exclude requests specific to this photo or batch, numeric exposure corrections, composition/local-mask instructions, and your own grading advice. Existing preferences are only a deduplication reference: do not extract them again or suggest equivalent preferences. If there is no explicit, sufficiently supported reusable user intent (including an automatic first grade without such requests), return []. These are candidates requiring user confirmation; do not claim they are saved or apply them as newly accepted preferences.
         """
         let contextualPrompt = prompt + (try context.map { "\nUser grading context (specific instruction takes precedence over batch and long-term preferences):\n" + String(decoding: try JSONEncoder().encode($0), as: UTF8.self) + "\nThe initial candidate already applies the exact base recipe to the original source. Iterate from its candidate ID; do not approximate or reset existing adjustments." } ?? "")
@@ -269,7 +270,7 @@ import CryptoKit
         if requestedJob == nil {
             self.resultPreview = validated.preview
             self.resultSummary = validated.reason
-            self.status = validated.selected ? "单张调色测试成功；结果保存在本机" : "测试完成；结果需要人工检查"
+            self.status = "调色预览已生成；结果保存在本机，等待你选择"
         }
     }
 
@@ -278,9 +279,9 @@ import CryptoKit
         for runner in gradingRunners.values { runner.cancel() }
     }
 
-    func withRenderSlot<T: Sendable>(_ operation: @Sendable () async throws -> T) async throws -> T {
+    func withRenderSlot<T: Sendable>(priority: Int = Int.max, _ operation: @Sendable () async throws -> T) async throws -> T {
         try await RenderSlots.withSlot(directory: root.appendingPathComponent("render-slots"),
-                                       limit: limits.bounded.renders, operation: operation)
+                                       limit: limits.bounded.renders, priority: priority, operation: operation)
     }
 
     private func runTracked(runner: AIEditingProcess, job: URL, arguments: [String], input: String,
@@ -445,7 +446,7 @@ import CryptoKit
             recipeJSON: String(decoding: recipe, as: UTF8.self), xmp: try String(contentsOf: xmpURL, encoding: .utf8), timing: AIGradeTiming.read(job), preview: checked.preview, originalPreview: checked.originalPreview, preferenceSuggestions: suggestions)
     }
 
-    func completeReviewResult(_ result: AIGradeResult, source: URL) async throws -> AIGradeResult {
+    func completeReviewResult(_ result: AIGradeResult, source: URL, priority: Int = Int.max) async throws -> AIGradeResult {
         guard result.isSelectable, let preview = result.preview else { throw AIEditingFailure("候选预览或配方缺失。") }
         let job = preview.deletingLastPathComponent().deletingLastPathComponent()
         let recovered = try Self.gradeResult(in: job)
@@ -458,7 +459,7 @@ import CryptoKit
         gradingRunners[id] = process
         defer { gradingRunners[id] = nil }
         // This direct helper launch has no KEEPS_RENDER_* environment; the parent owns its slot.
-        let execution = try await withRenderSlot {
+        let execution = try await withRenderSlot(priority: priority) {
             try await process.run(executable: self.codeRuntime.appendingPathComponent("keeps-color-mcp"),
                 arguments: ["--darktable", self.codeRuntime.appendingPathComponent("darktable.app/Contents/MacOS/darktable-cli").path,
                             "--source", source.path, "--job", job.appendingPathComponent("render").path,
@@ -492,15 +493,16 @@ import CryptoKit
            let reason = result["reason"] as? String, !reason.isEmpty {
             throw AIEditingFailure("AI 未生成候选：" + reason)
         }
-        guard let status = result["status"] as? String, ["selected", "unchanged", "needs_review"].contains(status),
-              let id = result["candidateID"] as? String, let reason = result["reason"] as? String,
+        guard let status = result["status"] as? String, ["ready", "selected", "unchanged", "needs_review"].contains(status),
+              let id = result["candidateID"] as? String,
               let candidates = store["candidates"] as? [[String: Any]], candidates.contains(where: { $0["id"] as? String == id }) else {
             throw AIEditingFailure("AI 返回了未知候选或无效状态，结果未被接受。")
         }
+        let reason = result["reason"] as? String ?? ""
         if requiresAdjustment {
             let candidate = candidates.first { $0["id"] as? String == id }!
             let starting = candidates.filter { ["baseline", "iteration-base"].contains($0["operationID"] as? String ?? "") }
-            guard status != "unchanged", let recipe = candidate["recipe"] as? String,
+            guard status == "ready", let recipe = candidate["recipe"] as? String,
                   !starting.contains(where: { $0["id"] as? String == id || $0["recipe"] as? String == recipe }) else {
                 throw AIEditingFailure("AI 未生成有实际调整的候选版本，请重试调色。")
             }
@@ -541,7 +543,7 @@ struct AIGradeContext: Codable, Sendable {
 }
 
 struct AIGradeResult: Codable, Sendable {
-    var isSelectable: Bool { status == "selected" || (status == "needs_review" && recipeJSON != nil) }
+    var isSelectable: Bool { status == "selected" || (["ready", "needs_review"].contains(status) && recipeJSON != nil) }
     var status: String
     var reason: String
     var fullSize: URL? = nil
@@ -589,8 +591,7 @@ struct AIEditingSteps {
             let floor = 0.34 + Double(min(adjustments - 1, 3)) * 0.09
             return ("第 \(adjustments) 轮：调整曝光与色彩", floor, min(0.77, floor + 0.09))
         case "render_preview": return ("第 \(max(1, adjustments)) 轮：渲染调色预览", 0.42, 0.74)
-        case "compare_candidates", "preview_region": return ("AI 正在比较效果、检查细节", 0.51, 0.78)
-        case "select_candidate": return ("已选定效果，生成全尺寸结果", 0.78, 0.85)
+        case "preview_region": return ("观察调整前照片细节", 0.25, 0.34)
         default: return nil
         }
     }

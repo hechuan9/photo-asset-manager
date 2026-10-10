@@ -71,6 +71,65 @@ final class RenderSlotsTests: XCTestCase {
         XCTAssertEqual(result, 42)
     }
 
+    private actor StartOrder {
+        var values: [Int] = []
+        func append(_ value: Int) { values.append(value) }
+    }
+
+    private func waitForRequests(_ count: Int, directory: URL) async throws {
+        for _ in 0..<100 {
+            let pending = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+                .filter { $0.hasPrefix("pending-") }
+            if pending.count == count { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Waiting requests were not registered")
+    }
+
+    func testHigherPhotoWinsDespiteReverseRegistrationOrder() async throws {
+        let directory = try temporaryDirectory()
+        let occupied = try RenderSlots(directory: directory, limit: 1)
+        let handle = try occupied.acquire()
+        let order = StartOrder()
+        let lower = Task {
+            try await RenderSlots.withSlot(directory: directory, limit: 1, priority: 9) {
+                await order.append(9)
+            }
+        }
+        try await waitForRequests(1, directory: directory)
+        let upper = Task {
+            try await RenderSlots.withSlot(directory: directory, limit: 1, priority: 1) {
+                await order.append(1)
+            }
+        }
+        try await waitForRequests(2, directory: directory)
+        RenderSlots.release(handle)
+        try await upper.value
+        try await lower.value
+        let actual = await order.values
+        XCTAssertEqual(actual, [1, 9])
+    }
+
+    func testTerminatedWaitingProcessDoesNotBlockQueue() throws {
+        let directory = try temporaryDirectory()
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        child.arguments = ["-c", "import fcntl,sys,time,json; f=open(sys.argv[1], 'w+'); fcntl.flock(f,fcntl.LOCK_EX); json.dump({'id':'dead','priority':0,'created':0},f); f.flush(); print('waiting',flush=True); time.sleep(30)", directory.appendingPathComponent("pending-dead.lock").path]
+        let pipe = Pipe()
+        child.standardOutput = pipe
+        try child.run()
+        defer { if child.isRunning { kill(child.processIdentifier, SIGKILL); child.waitUntilExit() } }
+        XCTAssertEqual(String(data: pipe.fileHandleForReading.availableData, encoding: .utf8), "waiting\n")
+        let worker = try RenderSlots(directory: directory, limit: 1, priority: 1)
+        var checks = 0
+        XCTAssertThrowsError(try worker.acquire(cancelled: { checks += 1; return checks > 1 }))
+        kill(child.processIdentifier, SIGKILL)
+        child.waitUntilExit()
+        let handle = try worker.acquire()
+        RenderSlots.release(handle)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("pending-dead.lock").path))
+    }
+
     func testEnvironmentRequiresCompleteValidConfiguration() throws {
         XCTAssertNil(try RenderSlots.configured(environment: [:]))
         XCTAssertThrowsError(try RenderSlots.configured(environment: ["KEEPS_RENDER_LIMIT": "2"]))

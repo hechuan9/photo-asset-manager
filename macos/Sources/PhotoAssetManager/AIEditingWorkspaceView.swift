@@ -194,12 +194,6 @@ struct AIEditingWorkspaceView: View {
                 if store.isAwaitingConfirmation {
                     Button("开始调色（\(store.totalCount) 张）", action: store.start)
                         .buttonStyle(.borderedProminent)
-                } else if let items = store.batch?.items {
-                    let ready = items.filter { store.canPublish($0) && $0.failure == nil }.count
-                    if ready > 0 {
-                        Button("确认并发布这 \(ready) 张", action: store.publishReady)
-                            .buttonStyle(.borderedProminent).disabled(ready == 0)
-                    }
                 }
             }
             Divider()
@@ -284,11 +278,8 @@ private struct AIEditingPhotoRow: View {
                 Button("重置视图") { zoom = 1; offset = .zero; dragOrigin = .zero }
                 Spacer()
             }.font(.caption)
-            if let result = displayed?.result {
-                if result.status == "needs_review" {
-                    Text("AI 建议人工检查；确认效果后仍可采用此版。").font(.caption).foregroundStyle(.secondary)
-                }
-                Text("调色意见：\(result.reason)").textSelection(.enabled)
+            if let reason = displayed?.result.reason, !reason.isEmpty {
+                Text("调色说明：" + reason).textSelection(.enabled)
             }
             if let failure = item.failure {
                 if item.isBackgroundDecision {
@@ -315,8 +306,6 @@ private struct AIEditingPhotoRow: View {
                 Spacer()
                 Button("弃用") { store.reject(itemID: item.id) }
                     .disabled(!editable)
-                Button(item.selectedCandidateID == nil ? "确认保留调整前版本" : "采用当前版本") { store.publish(itemID: item.id) }
-                    .buttonStyle(.borderedProminent).disabled(!editable || !store.canPublish(item))
             }
         }
         .padding(18)
@@ -329,7 +318,9 @@ private struct AIEditingPhotoRow: View {
                         ForEach(Array(candidates.enumerated()), id: \.element.id) { index, candidate in
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("第 \(index + 1) 版 · \(candidate.instruction.isEmpty ? "首次调色" : candidate.instruction)").font(.headline)
-                                Text(candidate.result.reason).foregroundStyle(.secondary).textSelection(.enabled)
+                                if !candidate.result.reason.isEmpty {
+                                    Text(candidate.result.reason).foregroundStyle(.secondary).textSelection(.enabled)
+                                }
                             }.frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }

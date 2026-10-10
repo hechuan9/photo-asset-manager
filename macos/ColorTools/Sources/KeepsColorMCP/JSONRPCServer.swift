@@ -67,7 +67,7 @@ private struct RPCError: Error {
         case "tools/list": return ["tools": tools.map { definition in
             var tool = definition
             let name = definition["name"] as? String ?? ""
-            tool["annotations"] = ["readOnlyHint": !["set_adjustments", "select_candidate"].contains(name), "destructiveHint": false, "openWorldHint": false, "idempotentHint": true]
+            tool["annotations"] = ["readOnlyHint": name != "set_adjustments", "destructiveHint": false, "openWorldHint": false, "idempotentHint": true]
             return tool
         }]
         case "tools/call": return try callTool(params)

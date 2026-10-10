@@ -148,6 +148,23 @@ import Testing
         #expect(AIEditingBatchStore.gradingContext(for: item).baseRecipeJSON == nil)
     }
 
+    @Test func priorityHeapUsesCurrentRowOrderInsteadOfArrivalOrder() {
+        let top = UUID(), middle = UUID(), bottom = UUID()
+        var queue = AIEditingPriorityQueue()
+        queue.insert(bottom, position: 2)
+        queue.insert(middle, position: 1)
+        queue.insert(top, position: 0)
+        #expect(queue.pop() == top)
+        queue.updateOrder([bottom, middle])
+        #expect(queue.pop() == bottom)
+        #expect(queue.pop() == middle)
+        #expect(queue.pop() == nil)
+        queue.insert(bottom, position: 2)
+        queue.insert(top, position: 0)
+        queue.remove(top)
+        #expect(queue.pop() == bottom)
+    }
+
     @Test func upstreamPhotoHasPriorityEvenWhenLowerPhotoIsReadyForAI() {
         let first = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "top", phase: .downloading)
         let second = AIEditingBatch.Item(id: UUID(), assetID: UUID(), name: "lower", phase: .grading)

@@ -41,8 +41,8 @@ import CryptoKit
         #expect(steps.consume(event("inspect_photo"))?.title.contains("初始预览") == true)
         #expect(steps.consume(event("set_adjustments"))?.title.contains("第 1 轮") == true)
         #expect(steps.consume(event("set_adjustments"))?.title.contains("第 2 轮") == true)
-        #expect(steps.consume(event("compare_candidates"))?.title.contains("比较") == true)
-        #expect(steps.consume(event("select_candidate"))?.floor == 0.78)
+        #expect(steps.consume(event("compare_candidates")) == nil)
+        #expect(steps.consume(event("select_candidate")) == nil)
     }
 
     @Test func streamedEventsArriveBeforeProcessExit() async throws {
@@ -247,9 +247,9 @@ import CryptoKit
         for id in ["raw", "base", "copy", "adjusted"] {
             try Data([1]).write(to: render.appendingPathComponent(id + "-preview.jpg"))
         }
-        for (status, id) in [("needs_review", "raw"), ("needs_review", "base"), ("needs_review", "copy"), ("unchanged", "adjusted"), ("needs_review", "adjusted")] {
-            try JSONSerialization.data(withJSONObject: ["status": status, "candidateID": id, "reason": "请比较候选"]).write(to: job.appendingPathComponent("result.json"))
-            if status == "needs_review" && id == "adjusted" {
+        for (status, id) in [("ready", "raw"), ("ready", "base"), ("ready", "copy"), ("unchanged", "adjusted"), ("ready", "adjusted")] {
+            try JSONSerialization.data(withJSONObject: ["status": status, "candidateID": id]).write(to: job.appendingPathComponent("result.json"))
+            if status == "ready" && id == "adjusted" {
                 #expect(try AIEditingSettingsStore.validateResult(in: job, requiresAdjustment: true).preview != nil)
             } else {
                 #expect(throws: (any Error).self) { try AIEditingSettingsStore.validateResult(in: job, requiresAdjustment: true) }
@@ -284,7 +284,7 @@ import CryptoKit
         #expect(throws: (any Error).self) { try AIEditingSettingsStore.gradeResult(in: job) }
     }
 
-    @Test func humanReviewedCandidateExportsWithoutAIAccountOrAnotherDecision() async throws {
+    @Test(arguments: ["ready", "needs_review"]) func humanReviewedCandidateExportsWithoutAIAccountOrAnotherDecision(status: String) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("keeps-human-review-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let job = root.appendingPathComponent("job"), render = job.appendingPathComponent("render")
@@ -294,7 +294,9 @@ import CryptoKit
         func write(_ value: [String: Any], _ path: String) throws {
             try JSONSerialization.data(withJSONObject: value).write(to: job.appendingPathComponent(path))
         }
-        try write(["status": "needs_review", "candidateID": "candidate", "reason": "检查靠垫溢出", "preferenceSuggestions": ["偏好柔和的高光过渡"]], "result.json")
+        var output: [String: Any] = ["status": status, "candidateID": "candidate", "preferenceSuggestions": ["偏好柔和的高光过渡"]]
+        output["reason"] = status == "ready" ? "提亮人物以呼应用户要求，保留窗外高光" : "检查靠垫溢出"
+        try write(output, "result.json")
         try write(["candidates": [["id": "candidate", "recipe": Data("{}".utf8).base64EncodedString()]]], "render/candidates.json")
         let preview = render.appendingPathComponent("candidate-preview.jpg"), full = render.appendingPathComponent("full.jpg")
         try Data([1]).write(to: preview); try Data([2]).write(to: full)
@@ -310,8 +312,11 @@ import CryptoKit
             defaults: UserDefaults(suiteName: UUID().uuidString)!)
         store.limits.renders = 1
         let reviewed = try AIEditingSettingsStore.gradeResult(in: job)
+        #expect(reviewed.isSelectable)
+        #expect(reviewed.fullSize == nil)
+        if status == "ready" { #expect(reviewed.reason == "提亮人物以呼应用户要求，保留窗外高光") }
         let completed = try await store.completeReviewResult(reviewed, source: root.appendingPathComponent("source.arw"))
-        #expect(completed.status == "needs_review")
+        #expect(completed.status == status)
         #expect(completed.reason == reviewed.reason)
         #expect(reviewed.preferenceSuggestions == ["偏好柔和的高光过渡"])
         #expect(completed.preferenceSuggestions == reviewed.preferenceSuggestions)
@@ -324,7 +329,7 @@ import CryptoKit
         #expect(exportLogs.count == 2)
         #expect(store.usage.attempts.isEmpty)
         let original = try JSONSerialization.jsonObject(with: Data(contentsOf: job.appendingPathComponent("result.json"))) as! [String: Any]
-        #expect(original["status"] as? String == "needs_review")
+        #expect(original["status"] as? String == status)
     }
 
     @Test func missingOrDifferentAccountNeverStartsCodex() async throws {

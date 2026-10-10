@@ -102,6 +102,7 @@ struct AIEditingBatch: Codable {
     }
     private var progressTicker: Task<Void, Never>?
     private var gates: [String: Set<UUID>] = [:]
+    private var waitingQueues: [String: AIEditingPriorityQueue] = [:]
     private var limits = AIEditingLimits()
     private var aiResumeAfter = Date.distantPast
     private var storageError: Error?
@@ -249,6 +250,8 @@ struct AIEditingBatch: Codable {
                     let directory = root.appendingPathComponent(item.id.uuidString.lowercased(), isDirectory: true)
                     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                     let preview = directory.appendingPathComponent("before.heic")
+                    try await acquire("download", itemID: item.id, limit: limits.downloads)
+                    defer { gates["download"]?.remove(item.id) }
                     try await client.downloadCurrentStandard(assetID: item.assetID, to: preview)
                     guard let index = batch?.items.firstIndex(where: { $0.id == item.id }) else { return }
                     batch!.items[index].originalPreview = preview
@@ -431,13 +434,6 @@ struct AIEditingBatch: Codable {
         do { try persist(); start() } catch { batch = previous; recordFailure(error) }
     }
 
-    func publishReady() {
-        do {
-            for item in batch?.items ?? [] where canPublish(item) && item.failure == nil { try confirm(itemID: item.id) }
-            start()
-        } catch { recordFailure(error) }
-    }
-
     private func confirm(itemID: UUID) throws {
         guard let index = batch?.items.firstIndex(where: { $0.id == itemID }), batch!.items[index].phase == .review else { return }
         guard canPublish(batch!.items[index]) else { throw AIEditingFailure("对比预览不完整，请继续调色生成新版本后确认。") }
@@ -472,8 +468,7 @@ struct AIEditingBatch: Codable {
             "preferenceRevision": candidate?.preferenceRevision ?? item.preferenceRevision ?? 0,
             "batchInstruction": candidate?.batchInstruction ?? item.batchInstruction ?? "",
             "selection": item.selectedCandidateID?.uuidString ?? "original", "confirmedAt": item.confirmedAt ?? "",
-            "history": try (item.candidates ?? []).map { ["id": $0.id.uuidString, "reason": $0.result.reason,
-                "instruction": $0.instruction, "parentID": $0.parentID?.uuidString ?? "", "status": $0.result.status, "recipeJSON": try Self.historyRecipe($0.result.recipeJSON) ?? ""] }]
+            "history": try (item.candidates ?? []).map { ["id": $0.id.uuidString, "reason": $0.result.reason, "instruction": $0.instruction, "parentID": $0.parentID?.uuidString ?? "", "status": $0.result.status, "recipeJSON": try Self.historyRecipe($0.result.recipeJSON) ?? ""] }]
         return String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), as: UTF8.self)
     }
 
@@ -615,7 +610,10 @@ struct AIEditingBatch: Codable {
         }
         while !Task.isCancelled, batch?.cancelled == false {
             let pending = batch!.items.filter { !$0.terminal && $0.failure == nil && itemWorkers[$0.id] == nil }
-            for item in pending {
+            var admission = AIEditingPriorityQueue()
+            for item in pending { admission.insert(item.id, position: position(of: item.id)) }
+            while let id = admission.pop() {
+                guard let item = pending.first(where: { $0.id == id }) else { continue }
                 let decision = item.phase == .uploading || item.phase == .discarding
                 let running = batch!.items.filter { itemWorkers[$0.id] != nil }
                 let laneCount = running.filter { ($0.phase == .uploading || $0.phase == .discarding) == decision }.count
@@ -712,35 +710,49 @@ struct AIEditingBatch: Codable {
         switch name {
         case "download": phases = [.preparing, .downloading]
         case "ai": phases = [.preparing, .downloading, .grading]
-        default: phases = [.uploading]
+        default: phases = [.uploading, .discarding]
         }
         return !items[..<index].contains {
             $0.failure == nil && phases.contains($0.phase) && !holders.contains($0.id)
         }
     }
 
+    private func position(of itemID: UUID) -> Int {
+        batch?.items.firstIndex(where: { $0.id == itemID }) ?? Int.max
+    }
+
     private func acquire(_ name: String, itemID: UUID, limit: Int) async throws {
-        // A newly queued refinement must not deadlock already admitted photos waiting for a slot.
-        while gates[name, default: []].count >= max(1, limit) || !Self.hasPriority(itemID, for: name,
-            items: batch?.items.filter { itemWorkers[$0.id] != nil } ?? [], holders: gates[name, default: []])
-            || (name == "ai" && Date() < aiResumeAfter) {
+        waitingQueues[name, default: .init()].insert(itemID, position: position(of: itemID))
+        defer { waitingQueues[name]?.remove(itemID) }
+        while true {
+            try Task.checkCancellation()
+            waitingQueues[name]?.updateOrder(batch?.items.map(\.id) ?? [])
+            // Preserve upstream ordering within admitted photos, without blocking on unstarted rows.
+            if waitingQueues[name]?.first == itemID,
+               gates[name, default: []].count < max(1, limit),
+               Self.hasPriority(itemID, for: name, items: batch?.items.filter { itemWorkers[$0.id] != nil } ?? [],
+                                holders: gates[name, default: []]),
+               name != "ai" || Date() >= aiResumeAfter {
+                gates[name, default: []].insert(itemID)
+                return
+            }
             try await Task.sleep(for: .milliseconds(100))
         }
-        try Task.checkCancellation()
-        gates[name, default: []].insert(itemID)
     }
 
     static func gradingContext(for item: AIEditingBatch.Item) -> AIGradeContext {
         let selected = item.candidates?.first { $0.id == item.selectedCandidateID }
         return AIGradeContext(preferences: item.preferences ?? "", batchInstruction: item.batchInstruction ?? "",
             instruction: item.pendingInstruction ?? "", baseRecipeJSON: selected?.result.recipeJSON,
-            history: (item.candidates ?? []).map { $0.instruction + "\n" + $0.result.reason })
+            history: (item.candidates ?? []).map(\.instruction))
     }
 
     private func advance(_ item: inout AIEditingBatch.Item, client: KeepsClient) async throws {
         let directory = root.appendingPathComponent(item.id.uuidString.lowercased(), isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         if item.phase == .preparing {
+            try await acquire("download", itemID: item.id, limit: limits.downloads)
+            defer { gates["download"]?.remove(item.id) }
             stage(item.id, "读取底片（\(completedCount + 1)/\(totalCount)）", 0.01, 0.04)
             if item.preferences == nil {
                 item.preferences = preferencesText
@@ -757,6 +769,8 @@ struct AIEditingBatch: Codable {
             return
         }
         if item.phase == .discarding {
+            try await acquire("upload", itemID: item.id, limit: limits.uploads)
+            defer { gates["upload"]?.remove(item.id) }
             stage(item.id, "标记为弃用", 0.9, 0.95)
             _ = try await client.updateAsset(id: item.assetID, patch: KeepsAssetPatch(flagState: "rejected"))
             item.phase = .done
@@ -794,7 +808,7 @@ struct AIEditingBatch: Codable {
             stage(item.id, "连接 AI，准备观察照片", 0.15, 0.25)
             let context = Self.gradingContext(for: item)
             let jobName = item.pendingCandidateID.map { "ai-" + $0.uuidString.lowercased() } ?? "ai"
-            item.result = try await editor.gradePhoto(source, job: directory.appendingPathComponent(jobName, isDirectory: true), context: context, progress: { [weak self] title, floor, ceiling in
+            item.result = try await editor.gradePhoto(source, job: directory.appendingPathComponent(jobName, isDirectory: true), context: context, priority: position(of: item.id), progress: { [weak self] title, floor, ceiling in
                 self?.stage(itemID, title, floor, ceiling)
             })
             let candidate = AIEditingBatch.Candidate(id: item.pendingCandidateID ?? UUID(), result: item.result!,
@@ -822,7 +836,7 @@ struct AIEditingBatch: Codable {
                 return
             }
             if let result = item.result, result.isSelectable, result.fullSize == nil || result.xmp == nil {
-                item.result = try await editor.completeReviewResult(result, source: source)
+                item.result = try await editor.completeReviewResult(result, source: source, priority: position(of: item.id))
             }
             guard let result = item.result, let full = result.fullSize, let recipe = result.recipeJSON, let xmp = result.xmp else {
                 throw AIEditingFailure("完整调色结果或配方缺失。")
@@ -832,7 +846,7 @@ struct AIEditingBatch: Codable {
                 throw AIEditingFailure("本机完整调色图已丢失；配方和意见仍在。请继续调色重新生成一版，再确认发布。")
             }
             stage(item.id, "生成展示图和缩略图", 0.87, 0.90)
-            let files = try await editor.withRenderSlot {
+            let files = try await editor.withRenderSlot(priority: position(of: item.id)) {
                 try await AIEditingImages.derivatives(from: full, directory: directory)
             }
             let upload = try await client.prepareEditUploads(assetID: item.assetID, requestID: item.id)
