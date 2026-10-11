@@ -46,11 +46,12 @@ enum AIEditingImages {
         return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
 
-    static func derivatives(from source: URL, directory: URL) async throws -> [String: URL] {
+    static func derivatives(from source: URL, directory: URL, quarterTurns: Int = 0, crop: CGRect? = nil) async throws -> [String: URL] {
         let task = Task.detached(priority: .utility) {
-            guard let image = CIImage(contentsOf: source, options: [.applyOrientationProperty: true]),
-                  image.extent.width > 0, image.extent.height > 0, !image.extent.isInfinite,
+            guard let original = CIImage(contentsOf: source, options: [.applyOrientationProperty: true]),
+                  original.extent.width > 0, original.extent.height > 0, !original.extent.isInfinite,
                   let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { throw AIEditingFailure("无法生成调色展示图。") }
+            let image = try GeometryRenderer.geometry(original, quarterTurns: quarterTurns, crop: crop)
             let context = CIContext()
             var outputs: [String: URL] = [:]
             for (role, limit) in [("standard", 0.0), ("thumbnail", 512.0), ("browse", 64.0)] {

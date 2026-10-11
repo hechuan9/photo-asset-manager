@@ -6,11 +6,12 @@ struct PhotoAssetManagerApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var library = LibraryStore()
     @StateObject private var batch = AIEditingBatchStore()
+    @StateObject private var geometryTasks = GeometryTaskStore()
     @FocusedValue(\.aiWorkspace) private var aiWorkspace
     @FocusedValue(\.gallerySelection) private var gallerySelection
     var body: some Scene {
         WindowGroup {
-            LibraryStartupView().environmentObject(library).environmentObject(batch).frame(minWidth: 1080, minHeight: 720)
+            LibraryStartupView().environmentObject(library).environmentObject(batch).environmentObject(geometryTasks).frame(minWidth: 1080, minHeight: 720)
                 .onReceive(batch.editor.$isBusy, perform: synchronizeEditorActivity)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in batch.stopForExit() }
         }

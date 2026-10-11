@@ -1081,13 +1081,15 @@ mod tests {
 #[cfg(test)]
 mod render_integration {
     use super::*;
-    #[test]
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    #[tokio::test]
     #[ignore = "requires ExifTool and KEEPS_EDIT_TEST_FIXTURES containing rendered HEIF files"]
-    fn real_heif_commit_is_atomic_idempotent_and_validated() -> Result<()> {
-        real_commit(false)?;
-        real_commit(true)
+    async fn real_heif_commit_is_atomic_idempotent_and_validated() -> Result<()> {
+        real_commit(false).await?;
+        real_commit(true).await
     }
-    fn real_commit(darktable: bool) -> Result<()> {
+    async fn real_commit(darktable: bool) -> Result<()> {
         let fixtures = PathBuf::from(std::env::var("KEEPS_EDIT_TEST_FIXTURES")?);
         let dir = tempfile::tempdir()?;
         let root = dir.path().canonicalize()?;
@@ -1101,7 +1103,7 @@ mod render_integration {
         let id=store.ingest_original("lib",path.to_str().unwrap(),&json!({"contentHash":hash,"sizeBytes":size,"role":"jpeg_original"}),&json!({"contentFingerprint":hash,"metadataFingerprint":"meta","originalFilename":"source.heic","createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z"}))?;
         let jobs = crate::jobs::Jobs::open(&root.join("jobs.sqlite"), &photos)?;
         jobs.add_folder("lib", photos.to_str().unwrap())?;
-        let s = AppState {
+        let s = Arc::new(AppState {
             store: Arc::new(store),
             jobs: Arc::new(jobs),
             previews: Arc::new(crate::previews::PreviewStorage::new(
@@ -1113,17 +1115,54 @@ mod render_integration {
             access_token: "test".into(),
             library_id: "lib".into(),
             original_root_names: Default::default(),
-        };
+        });
+        let app = crate::api::router(s.clone());
+        let edit_path = format!("/libraries/lib/assets/{id}/edit");
         s.store.initialize_negative("lib", &id)?;
         let request = uuid::Uuid::new_v4().to_string();
+        let prepared = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("{edit_path}/uploads"))
+                    .header("authorization", "Bearer test")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({"requestID":request}).to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(prepared.status(), 200);
+        let uploads: Value =
+            serde_json::from_slice(&prepared.into_body().collect().await?.to_bytes())?;
         let mut outputs = Vec::new();
         for role in ["standard", "thumbnail", "browse"] {
             let input = fixtures.join(format!("{role}.heic"));
             let metadata = crate::media::MediaProcessor::new().extract(&input)?;
             let object = object("lib", &id, &request, role);
-            let target = s.previews.object_path(&object)?;
-            std::fs::create_dir_all(target.parent().unwrap())?;
-            std::fs::copy(&input, &target)?;
+            let target = uploads["objects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|target| target["role"] == role)
+                .unwrap();
+            assert_eq!(target["objectRef"], object);
+            let url = url::Url::parse(target["uploadURL"].as_str().unwrap())?;
+            let uri = match url.query() {
+                Some(query) => format!("{}?{query}", url.path()),
+                None => url.path().to_owned(),
+            };
+            let uploaded = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("PUT")
+                        .uri(uri)
+                        .body(axum::body::Body::from(std::fs::read(&input)?))?,
+                )
+                .await?;
+            assert_eq!(uploaded.status(), 204);
             outputs.push(json!({"role":role,"objectRef":object,"contentHash":crate::media::sha256_file(&input)?,"width":metadata.width,"height":metadata.height,"sizeBytes":std::fs::metadata(&input)?.len()}));
         }
         let mut input = json!({"requestID":request,"expectedRevision":0,"negativeContentHash":hash,"exposureEV":1.99609375,"algorithmVersion":"test-auto-v1","rendererVersion":"test-ci-v1","outputs":outputs});
@@ -1147,7 +1186,20 @@ mod render_integration {
         assert_eq!(s.store.edit_state("lib", &id)?["hasEdit"], false);
         assert_eq!(s.store.edit_state("lib", &id)?["revision"], 0);
         s.store.lock()?.execute_batch("DROP TRIGGER reject_edit;")?;
-        let response = mutate(&s, "lib", &id, input.clone(), "commit")?;
+        let saved = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri(&edit_path)
+                    .header("authorization", "Bearer test")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(input.to_string()))?,
+            )
+            .await?;
+        assert_eq!(saved.status(), 200);
+        let response: Value =
+            serde_json::from_slice(&saved.into_body().collect().await?.to_bytes())?;
         assert_eq!(response["revision"], 1);
         assert_eq!(response["hasEdit"], true);
         if darktable {
@@ -1157,7 +1209,21 @@ mod render_integration {
         for role in ["standard", "thumbnail", "browse"] {
             assert!(media[role]["version"].as_str().unwrap().contains(&request));
         }
-        assert_eq!(mutate(&s, "lib", &id, input.clone(), "commit")?, response);
+        let repeated = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri(&edit_path)
+                    .header("authorization", "Bearer test")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(input.to_string()))?,
+            )
+            .await?;
+        assert_eq!(repeated.status(), 200);
+        let repeated: Value =
+            serde_json::from_slice(&repeated.into_body().collect().await?.to_bytes())?;
+        assert_eq!(repeated, response);
         let reopened = Store::open(&root.join("catalog.sqlite"), false)?;
         assert_eq!(reopened.edit_state("lib", &id)?, response);
         let mut stale = input;

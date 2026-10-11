@@ -33,6 +33,7 @@ extension FocusedValues {
 struct ContentView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var batch: AIEditingBatchStore
+    @EnvironmentObject private var geometryTasks: GeometryTaskStore
     @Environment(\.openWindow) private var openWindow
     @State private var showsAIWorkspace = false
     @State private var startsAIWorkspace = false
@@ -47,6 +48,7 @@ struct ContentView: View {
     @State private var thumbnailSize = 190.0
     @State private var detailMode = false
     @State private var galleryReturnAssetID: UUID?
+    @State private var assetToCrop: KeepsAsset?
 
     var body: some View {
         Group {
@@ -59,6 +61,12 @@ struct ContentView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             AIEditingBackgroundStatus(store: batch) { showsAIWorkspace = true }
         }
+        .sheet(item: $assetToCrop) { asset in
+            PhotoCropSheet(asset: asset)
+        }
+        .onChange(of: library.configuration, initial: true) { _, _ in configureGeometryTasks() }
+        .onChange(of: library.isOperationBlocking) { _, _ in configureGeometryTasks() }
+        .onChange(of: geometryTasks.completionRevision) { _, _ in library.refresh(force: true) }
         .focusedSceneValue(\.aiWorkspace, AIWorkspaceActions(open: openAIWorkspace))
         .sheet(isPresented: $library.showsRejectedTrash) {
             RejectedTrashSheet(library: library)
@@ -218,6 +226,7 @@ struct ContentView: View {
                 WorkspaceErrorView(title: "请求失败", details: error)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(10)
             }
+            GeometryTaskStatusView(store: geometryTasks, configuration: library.configuration)
             bottomBar
         }
     }
@@ -350,6 +359,8 @@ struct ContentView: View {
             }
             .help(asset.originalFilename)
             .contextMenu {
+                rotationActions(for: asset)
+                Divider()
                 Button("选择此照片") { library.select(asset.id, extending: false) }
                 Button("全选当前目录照片") { library.selectAll() }
                 Button("取消选择") { library.deselectAll() }
@@ -358,6 +369,23 @@ struct ContentView: View {
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { library.select(asset.id) }
             .accessibilityAddTraits(library.selectedIDs.contains(asset.id) ? [.isSelected] : [])
+    }
+
+    private func configureGeometryTasks() {
+        geometryTasks.configure(library.isOperationBlocking ? nil : library.configuration)
+    }
+
+    @ViewBuilder private func rotationActions(for asset: KeepsAsset) -> some View {
+        Button("向左旋转 90°") { geometryTasks.rotate(assetID: asset.id, quarterTurns: -1) }
+            .disabled(adjustmentUnavailable(for: asset))
+        Button("向右旋转 90°") { geometryTasks.rotate(assetID: asset.id, quarterTurns: 1) }
+            .disabled(adjustmentUnavailable(for: asset))
+        Button("旋转 180°") { geometryTasks.rotate(assetID: asset.id, quarterTurns: 2) }
+            .disabled(adjustmentUnavailable(for: asset))
+    }
+
+    private func adjustmentUnavailable(for asset: KeepsAsset) -> Bool {
+        asset.trashed || library.isOperationBlocking || geometryTasks.isPending(assetID: asset.id) || geometryTasks.storageError != nil || library.configuration == nil
     }
 
     private var bottomBar: some View {
@@ -369,6 +397,21 @@ struct ContentView: View {
                 galleryFocused = true
             }.disabled(library.assets.isEmpty)
             Divider().frame(height: 16)
+            if detailMode, let asset = library.selectedAsset {
+                Button { assetToCrop = asset } label: { Image(systemName: "crop") }
+                    .buttonStyle(.plain).help("裁剪").accessibilityLabel("裁剪")
+                    .disabled(adjustmentUnavailable(for: asset) || asset.standard == nil)
+                Button { geometryTasks.rotate(assetID: asset.id, quarterTurns: -1) } label: { Image(systemName: "rotate.left") }
+                    .buttonStyle(.plain).help("向左旋转 90°").accessibilityLabel("向左旋转 90°")
+                    .disabled(adjustmentUnavailable(for: asset))
+                Button { geometryTasks.rotate(assetID: asset.id, quarterTurns: 1) } label: { Image(systemName: "rotate.right") }
+                    .buttonStyle(.plain).help("向右旋转 90°").accessibilityLabel("向右旋转 90°")
+                    .disabled(adjustmentUnavailable(for: asset))
+                Button("180°") { geometryTasks.rotate(assetID: asset.id, quarterTurns: 2) }
+                    .buttonStyle(.plain).help("旋转 180°").accessibilityLabel("旋转 180°")
+                    .disabled(adjustmentUnavailable(for: asset))
+                Divider().frame(height: 16)
+            }
             if !library.selectedIDs.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(1...5, id: \.self) { rating in
